@@ -4,10 +4,13 @@
 Monitors the OpenClaw and Claude Code session directories for new/modified .jsonl files
 and compresses them through the cognitive dedup pipeline.
 
+Also ingests sessions into searchable memory (FTS5 + FAISS vectors).
+
 Runs as a systemd user service for persistent operation.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
@@ -108,13 +111,51 @@ def compress_session(spine: MemorySpine, session_file: Path) -> dict | None:
 
 
 def ingest_session(spine: MemorySpine, session_file: Path) -> dict | None:
-    """Ingest a session into searchable memory. Returns result or None on error."""
+    """Ingest a session into searchable memory with optional embedding.
+
+    Ingests into FTS5 for keyword search, then tries to embed into FAISS
+    for vector search if Venice API key is available.
+    """
     try:
         result = spine.ingest_session(session_file)
+        # Try to embed the newly ingested chunks into FAISS
+        if result and result["chunks_ingested"] > 0 and os.environ.get("VENICE_API_KEY"):
+            try:
+                _embed_recent_chunks(spine, session_file.stem, result["chunks_ingested"])
+            except Exception as e:
+                print(f"  WARNING: Embedding failed for {session_file.name}: {e}",
+                      file=sys.stderr)
         return result
     except Exception as e:
         print(f"  ERROR ingesting {session_file.name}: {e}", file=sys.stderr)
         return None
+
+
+def _embed_recent_chunks(spine: MemorySpine, session_id: str, expected_count: int):
+    """Embed recently ingested chunks for a session into FAISS."""
+    rows = spine.sqlite._conn.execute(
+        """SELECT id, content FROM chunks
+           WHERE source_id = ?
+           ORDER BY rowid DESC LIMIT ?""",
+        (f"session:{session_id}", expected_count),
+    ).fetchall()
+
+    if not rows:
+        return
+
+    # Filter out chunks already in FAISS
+    existing = set(spine.faiss._id_map)
+    to_embed = [(r["id"], r["content"]) for r in rows if r["id"] not in existing]
+    if not to_embed:
+        return
+
+    chunk_ids = [cid for cid, _ in to_embed]
+    texts = [content for _, content in to_embed]
+
+    asyncio.run(spine._embed_and_index(chunk_ids, texts))
+    if spine.config.faiss_dir:
+        spine.faiss.save()
+    print(f"  Embedded {len(to_embed)} chunks for {session_id}")
 
 
 def run_once(spine: MemorySpine) -> tuple[int, int]:

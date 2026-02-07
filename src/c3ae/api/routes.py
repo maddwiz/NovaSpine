@@ -310,10 +310,14 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         """Search memory for content relevant to the given query.
 
         This is the primary endpoint for agents to recall past sessions,
-        conversations, and knowledge. Uses FTS5 keyword search for
-        fast, embedding-free retrieval.
+        conversations, and knowledge. Uses hybrid search (Venice embeddings
+        + FTS5 keyword) when available, falls back to keyword-only.
         """
-        results = spine.search_keyword(req.query, top_k=req.top_k)
+        try:
+            results = await spine.search(req.query, top_k=req.top_k * 2)
+        except Exception:
+            # Fall back to keyword-only if embedding fails
+            results = spine.search_keyword(req.query, top_k=req.top_k)
 
         memories = []
         for r in results:
