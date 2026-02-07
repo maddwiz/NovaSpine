@@ -205,19 +205,27 @@ class SQLiteStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
     def _init_schema(self) -> None:
-        cur = self._conn.cursor()
-        cur.executescript(_SCHEMA)
-        cur.executescript(_FTS_TRIGGERS)
-        # Set schema version if not exists
-        cur.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
-            ("schema_version", str(SCHEMA_VERSION)),
-        )
-        self._conn.commit()
+        import time as _time
+        for attempt in range(5):
+            try:
+                cur = self._conn.cursor()
+                cur.executescript(_SCHEMA)
+                cur.executescript(_FTS_TRIGGERS)
+                cur.execute(
+                    "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
+                    ("schema_version", str(SCHEMA_VERSION)),
+                )
+                self._conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) and attempt < 4:
+                    _time.sleep(2 * (attempt + 1))
+                    continue
+                raise
 
     def close(self) -> None:
         self._conn.close()
