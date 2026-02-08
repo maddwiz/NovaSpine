@@ -160,6 +160,95 @@ class ReasonResponse(BaseModel):
     final_answer: str
 
 
+# --- Context Compaction Models ---
+
+class CompressPromptRequest(BaseModel):
+    prompt: str
+
+
+class CompressPromptResponse(BaseModel):
+    compressed: str
+    token_savings: float
+    refs_used: int
+    original_tokens: int
+
+
+class ExpandRequest(BaseModel):
+    text: str
+
+
+class ExpandResponse(BaseModel):
+    expanded: str
+
+
+# --- Temporal Tracking Models ---
+
+class TrackEventRequest(BaseModel):
+    event_type: str
+
+
+class TrackEventResponse(BaseModel):
+    motif: dict[str, Any] | None = None
+
+
+class TrackEventsBatchRequest(BaseModel):
+    events: list[str]
+
+
+class TrackEventsBatchResponse(BaseModel):
+    motifs: list[dict[str, Any]]
+    count: int
+
+
+# --- Structural Similarity Models ---
+
+class SimilarityRequest(BaseModel):
+    data_id_a: str
+    data_id_b: str
+
+
+class SimilarityResponse(BaseModel):
+    data_id_a: str
+    data_id_b: str
+    similarity: float
+
+
+class FindSimilarResponse(BaseModel):
+    data_id: str
+    matches: list[dict[str, Any]]
+    count: int
+
+
+# --- Compression Models ---
+
+class CompressMemoriesRequest(BaseModel):
+    memories: list[dict[str, Any]]
+
+
+class CompressResponse(BaseModel):
+    compressed_size: int
+    original_size: int
+    ratio: float
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Supersede Knowledge ---
+
+class SupersedeRequest(BaseModel):
+    old_id: str
+    new_title: str
+    new_content: str
+    tags: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+# --- Session Management ---
+
+class SessionStartRequest(BaseModel):
+    session_id: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 # --- App factory ---
 
 _spine: MemorySpine | None = None
@@ -391,5 +480,162 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         status = spine.status()
         status["service"] = "nova-memory"
         return status
+
+    # --- Context Compaction (LLM Prompt Compression) ---
+
+    @app.post("/api/v1/compression/prompt", response_model=CompressPromptResponse)
+    async def compress_prompt(req: CompressPromptRequest,
+                              spine: MemorySpine = Depends(get_spine)):
+        """Compress an LLM prompt by replacing known chunks with REF placeholders."""
+        result = spine.compress_prompt(req.prompt)
+        return CompressPromptResponse(**result)
+
+    @app.post("/api/v1/compression/expand", response_model=ExpandResponse)
+    async def expand_response(req: ExpandRequest,
+                              spine: MemorySpine = Depends(get_spine)):
+        """Expand REF placeholders back to full content."""
+        expanded = spine.expand_response(req.text)
+        return ExpandResponse(expanded=expanded)
+
+    @app.post("/api/v1/compression/memories", response_model=CompressResponse)
+    async def compress_memories(req: CompressMemoriesRequest,
+                                spine: MemorySpine = Depends(get_spine)):
+        """Compress a batch of memories using cognitive dedup."""
+        blob, stats = spine.compress_memories(req.memories)
+        return CompressResponse(
+            compressed_size=stats.get("compressed_size", len(blob)),
+            original_size=stats.get("original_size", 0),
+            ratio=stats.get("ratio", 0.0),
+            extra=stats,
+        )
+
+    @app.post("/api/v1/compression/reasoning-bank", response_model=CompressResponse)
+    async def compress_reasoning_bank(spine: MemorySpine = Depends(get_spine)):
+        """Compress the entire reasoning bank for archival."""
+        blob, stats = spine.compress_reasoning_bank()
+        return CompressResponse(
+            compressed_size=stats.get("compressed_size", len(blob)),
+            original_size=stats.get("original_size", 0),
+            ratio=stats.get("ratio", 0.0),
+            extra=stats,
+        )
+
+    @app.post("/api/v1/compression/audit-log", response_model=CompressResponse)
+    async def compress_audit_log(limit: int = 10000,
+                                 spine: MemorySpine = Depends(get_spine)):
+        """Compress recent audit log entries for archival."""
+        blob, stats = spine.compress_audit_log(limit=limit)
+        return CompressResponse(
+            compressed_size=stats.get("compressed_size", len(blob)),
+            original_size=stats.get("original_size", 0),
+            ratio=stats.get("ratio", 0.0),
+            extra=stats,
+        )
+
+    # --- Temporal Event Tracking ---
+
+    @app.post("/api/v1/events/track", response_model=TrackEventResponse)
+    async def track_event(req: TrackEventRequest,
+                          spine: MemorySpine = Depends(get_spine)):
+        """Track a temporal event. Returns motif if a pattern is detected."""
+        motif = spine.track_event(req.event_type)
+        return TrackEventResponse(motif=motif)
+
+    @app.post("/api/v1/events/track-batch", response_model=TrackEventsBatchResponse)
+    async def track_events_batch(req: TrackEventsBatchRequest,
+                                 spine: MemorySpine = Depends(get_spine)):
+        """Track a batch of events. Returns all detected motifs."""
+        motifs = spine.track_events_batch(req.events)
+        return TrackEventsBatchResponse(motifs=motifs, count=len(motifs))
+
+    # --- Structural Similarity ---
+
+    @app.post("/api/v1/similarity/compare", response_model=SimilarityResponse)
+    async def structural_similarity(req: SimilarityRequest,
+                                    spine: MemorySpine = Depends(get_spine)):
+        """Compute structural similarity between two memories using shared chunks."""
+        score = spine.structural_similarity(req.data_id_a, req.data_id_b)
+        return SimilarityResponse(
+            data_id_a=req.data_id_a, data_id_b=req.data_id_b, similarity=score,
+        )
+
+    @app.get("/api/v1/similarity/find/{data_id}", response_model=FindSimilarResponse)
+    async def find_similar(data_id: str, threshold: float = 0.3,
+                           spine: MemorySpine = Depends(get_spine)):
+        """Find memories structurally similar to the given one."""
+        matches = spine.find_structurally_similar(data_id, threshold=threshold)
+        return FindSimilarResponse(
+            data_id=data_id,
+            matches=[{"id": m[0], "similarity": m[1]} for m in matches],
+            count=len(matches),
+        )
+
+    # --- Reasoning Bank: Supersede ---
+
+    @app.post("/api/v1/reasoning/supersede", response_model=KnowledgeResponse)
+    async def reasoning_supersede(req: SupersedeRequest,
+                                  spine: MemorySpine = Depends(get_spine)):
+        """Supersede an old reasoning entry with a new version."""
+        try:
+            entry = spine.supersede_knowledge(
+                req.old_id, req.new_title, req.new_content,
+                tags=req.tags, evidence_ids=req.evidence_ids,
+            )
+            return KnowledgeResponse(id=entry.id, title=entry.title, status=entry.status.value)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    # --- Session Management ---
+
+    @app.post("/api/v1/sessions/start")
+    async def session_start(req: SessionStartRequest,
+                            spine: MemorySpine = Depends(get_spine)):
+        """Start a new tracked session."""
+        sid = spine.start_session(req.session_id, metadata=req.metadata)
+        return {"session_id": sid, "status": "started"}
+
+    @app.post("/api/v1/sessions/end")
+    async def session_end(session_id: str, spine: MemorySpine = Depends(get_spine)):
+        """End a tracked session."""
+        spine.end_session(session_id)
+        return {"session_id": session_id, "status": "ended"}
+
+    # --- Cogdedup Stats ---
+
+    @app.get("/api/v1/cogdedup/stats")
+    async def cogdedup_stats(spine: MemorySpine = Depends(get_spine)):
+        """Cognitive dedup statistics — compression store, anomaly, temporal."""
+        result: dict[str, Any] = {}
+        result["cogstore"] = spine.cogstore.stats()
+        if hasattr(spine, '_lazy_anomaly_detector'):
+            report = spine._anomaly_detector.drift_report()
+            result["anomaly"] = {
+                "total_observations": spine._anomaly_detector._observation_count,
+                "alerts": report.alerts_count,
+                "mean_ratio": round(report.current_mean, 2),
+                "std_ratio": round(report.current_std, 2),
+            }
+        if hasattr(spine, '_lazy_temporal_tracker'):
+            motifs = spine._temporal_tracker.detected_motifs()
+            result["temporal"] = {
+                "motifs_detected": len(motifs),
+                "motifs": [{"pattern": m.pattern, "count": m.occurrences} for m in motifs],
+            }
+        return result
+
+    @app.get("/api/v1/cogdedup/anomaly-report")
+    async def anomaly_report(spine: MemorySpine = Depends(get_spine)):
+        """Anomaly detection drift report from compression monitoring."""
+        report = spine._anomaly_detector.drift_report()
+        return {
+            "total_observations": spine._anomaly_detector._observation_count,
+            "alerts_count": report.alerts_count,
+            "current_mean": round(report.current_mean, 2),
+            "current_std": round(report.current_std, 2),
+            "recent_alerts": [
+                {"severity": a.severity, "z_score": round(a.z_score, 2)}
+                for a in (report.recent_alerts if hasattr(report, 'recent_alerts') else [])
+            ],
+        }
 
     return app
