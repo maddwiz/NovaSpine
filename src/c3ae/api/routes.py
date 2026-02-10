@@ -136,6 +136,7 @@ class AugmentRequest(BaseModel):
     top_k: int = 5
     min_score: float = 0.005
     format: str = "xml"  # "xml" or "plain"
+    roles: list[str] | None = None  # Filter by role; default ["user", "assistant"]
 
 
 class AugmentResponse(BaseModel):
@@ -329,8 +330,19 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.post("/api/v1/memory/ingest", response_model=IngestResponse)
     async def memory_ingest(req: IngestRequest, spine: MemorySpine = Depends(get_spine)):
-        chunk_ids = await spine.ingest_text(req.text, source_id=req.source_id, metadata=req.metadata)
-        return IngestResponse(chunk_ids=chunk_ids, count=len(chunk_ids))
+        import time as _time
+        last_err = None
+        for attempt in range(3):
+            try:
+                chunk_ids = await spine.ingest_text(req.text, source_id=req.source_id, metadata=req.metadata)
+                return IngestResponse(chunk_ids=chunk_ids, count=len(chunk_ids))
+            except Exception as e:
+                last_err = e
+                if "locked" in str(e) and attempt < 2:
+                    _time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise
+        raise last_err  # type: ignore[misc]
 
     @app.post("/api/v1/reasoning/add", response_model=KnowledgeResponse)
     async def reasoning_add(req: KnowledgeRequest, spine: MemorySpine = Depends(get_spine)):
@@ -423,6 +435,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             results = spine.search_keyword(req.query, top_k=req.top_k)
 
         memories = []
+        seen_content: set[str] = set()
         for r in results:
             meta = r.metadata or {}
             role = meta.get("role", "unknown")
@@ -432,6 +445,12 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             if req.session_filter and session_id and req.session_filter not in session_id:
                 continue
 
+            # Content dedup
+            content_key = r.content.strip().lower()[:200]
+            if content_key in seen_content:
+                continue
+            seen_content.add(content_key)
+
             memories.append(RecallItem(
                 content=r.content,
                 role=role,
@@ -439,9 +458,11 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 score=r.score,
                 metadata=meta,
             ))
+            if len(memories) >= req.top_k:
+                break
 
         return RecallResponse(
-            memories=memories[:req.top_k],
+            memories=memories,
             count=len(memories),
             query=req.query,
         )
@@ -456,18 +477,28 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         Any integration (OpenClaw, LangChain, custom agents) can call this
         to get relevant memories formatted for injection into LLM prompts.
         """
+        allowed_roles = set(req.roles or ["user", "assistant"])
+
         try:
-            results = await spine.search(req.query, top_k=req.top_k * 3)
+            results = await spine.search(req.query, top_k=req.top_k * 10)
         except Exception:
-            results = spine.search_keyword(req.query, top_k=req.top_k)
+            results = spine.search_keyword(req.query, top_k=req.top_k * 5)
 
         memories = []
+        seen_content: set[str] = set()
         for r in results:
             meta = r.metadata or {}
             role = meta.get("role", "unknown")
             session_id = meta.get("session_id", "")
             if r.score < req.min_score:
                 continue
+            if role not in allowed_roles:
+                continue
+            # Content dedup — skip near-identical memories
+            content_key = r.content.strip().lower()[:200]
+            if content_key in seen_content:
+                continue
+            seen_content.add(content_key)
             memories.append(RecallItem(
                 content=r.content,
                 role=role,
@@ -475,8 +506,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 score=r.score,
                 metadata=meta,
             ))
-
-        memories = memories[:req.top_k]
+            if len(memories) >= req.top_k:
+                break
 
         if not memories:
             return AugmentResponse(context="", count=0, memories=[])
