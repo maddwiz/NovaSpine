@@ -13,6 +13,8 @@ Most LLM memory solutions use only vector search. NovaSpine combines **FAISS vec
 | Pre-formatted LLM injection | `/augment` endpoint | DIY formatting |
 | Role filtering | Built-in (user/assistant only) | Manual |
 | Content deduplication | Built-in | Manual |
+| Temporal memory graph | Built-in (SQLite graph tables) | Usually external add-on |
+| Episodic→semantic consolidation | Built-in | Rarely included |
 
 ## Quick Start
 
@@ -43,6 +45,39 @@ curl -X POST localhost:8420/api/v1/memory/augment \
 ```
 
 Returns pre-formatted `<relevant-memories>` block ready for LLM context injection.
+
+### Query the memory graph
+```bash
+curl -X POST localhost:8420/api/v2/graph/query \
+  -H "Content-Type: application/json" \
+  -d '{"entity":"Desmond","depth":2}'
+```
+
+### Run memory consolidation
+```bash
+curl -X POST localhost:8420/api/v1/memory/consolidate \
+  -H "Content-Type: application/json" \
+  -d '{"max_chunks":1000}'
+```
+
+## Versioned Integration Contract (No Per-Project Rewrite)
+
+Use the protocol client as the stable interface and keep `MemorySpine` internals free to evolve.
+
+```python
+from c3ae.config import Config
+from c3ae.memory_spine import MemorySpine
+
+spine = MemorySpine(Config())
+client = spine.protocol_client("v1")
+
+await client.ingest("User prefers short status updates", source_id="session:1")
+rows = await client.recall("user preference", top_k=5)
+context = await client.augment("user preference", top_k=3, format="xml")
+status = client.status()
+```
+
+`/api/v1/*` remains the stable remote contract. Future additive methods are exposed under protocol `v2` without breaking `v1`.
 
 ## Architecture
 
@@ -77,10 +112,14 @@ Returns pre-formatted `<relevant-memories>` block ready for LLM context injectio
 
 1. Run **keyword search** (FTS5) → ranked list
 2. Run **vector search** (FAISS) → ranked list
-3. Merge via **Reciprocal Rank Fusion**:
+3. Merge via **adaptive Reciprocal Rank Fusion** (query-intent weighted):
    - `score(doc) = Σ weight / (k + rank + 1)`
-   - Vector weight: 0.7, Keyword weight: 0.3
-4. Return top-k by combined score
+   - Base default: Vector 0.7, Keyword 0.3
+4. Apply time/access/importance scoring:
+   - Older memories decay (configurable half-life)
+   - Frequently retrieved memories get reinforcement boost
+   - Reasoning/evidence-linked entries get importance boost
+5. Return top-k by final score
 
 Results that appear in **both** lists get a significant boost.
 
@@ -116,6 +155,14 @@ VENICE_API_KEY=your-key              # Embedding provider API key
 ## Also Includes: USC Compression Engine
 
 NovaSpine includes **USC (Unified State Codec)** — a cognitive compression engine that learns from repeated patterns across sessions. Compression ratios improve over time as the dictionary grows (3.7x → 6.1x across 64 sessions).
+
+## Benchmarks
+
+Use the benchmark harness to evaluate recall@k and MRR on LoCoMo/LongMemEval/DMR-style JSONL datasets:
+
+```bash
+python scripts/run_memory_benchmarks.py --name locomo --dataset ./bench/locomo_eval.jsonl --top-k 10
+```
 
 ## Development
 

@@ -92,6 +92,8 @@ class StatusResponse(BaseModel):
     reasoning_entries: int
     skills: int
     vault_documents: int
+    consolidated_memories: int | None = None
+    graph: dict[str, Any] | None = None
 
 
 class AuditEventItem(BaseModel):
@@ -117,6 +119,7 @@ class RecallRequest(BaseModel):
 
 
 class RecallItem(BaseModel):
+    id: str = ""
     content: str
     role: str
     session_id: str
@@ -257,6 +260,20 @@ class SupersedeRequest(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class GraphQueryRequest(BaseModel):
+    entity: str
+    depth: int = 2
+
+
+class DecayConfigRequest(BaseModel):
+    half_life_hours: float
+
+
+class ConsolidateRequest(BaseModel):
+    session_id: str | None = None
+    max_chunks: int = 1000
+
+
 # --- Session Management ---
 
 class SessionStartRequest(BaseModel):
@@ -284,7 +301,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     app = FastAPI(
         title="C3/Ae Memory API",
-        version="0.1.0",
+        version="0.3.0",
         default_response_class=ORJSONResponse,
     )
 
@@ -428,38 +445,22 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         conversations, and knowledge. Uses hybrid search (Venice embeddings
         + FTS5 keyword) when available, falls back to keyword-only.
         """
-        try:
-            results = await spine.search(req.query, top_k=req.top_k * 2)
-        except Exception:
-            # Fall back to keyword-only if embedding fails
-            results = spine.search_keyword(req.query, top_k=req.top_k)
-
-        memories = []
-        seen_content: set[str] = set()
-        for r in results:
-            meta = r.metadata or {}
-            role = meta.get("role", "unknown")
-            session_id = meta.get("session_id", "")
-
-            # Filter by session if requested
-            if req.session_filter and session_id and req.session_filter not in session_id:
-                continue
-
-            # Content dedup
-            content_key = r.content.strip().lower()[:200]
-            if content_key in seen_content:
-                continue
-            seen_content.add(content_key)
-
-            memories.append(RecallItem(
-                content=r.content,
-                role=role,
-                session_id=session_id,
-                score=r.score,
-                metadata=meta,
-            ))
-            if len(memories) >= req.top_k:
-                break
+        rows = await spine.recall(
+            req.query,
+            top_k=req.top_k,
+            session_filter=req.session_filter,
+        )
+        memories = [
+            RecallItem(
+                id=str(r.get("id", "")),
+                content=str(r.get("content", "")),
+                role=str((r.get("metadata") or {}).get("role", "unknown")),
+                session_id=str((r.get("metadata") or {}).get("session_id", "")),
+                score=float(r.get("score", 0.0)),
+                metadata=dict(r.get("metadata") or {}),
+            )
+            for r in rows
+        ]
 
         return RecallResponse(
             memories=memories,
@@ -477,50 +478,35 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         Any integration (OpenClaw, LangChain, custom agents) can call this
         to get relevant memories formatted for injection into LLM prompts.
         """
+        rows = await spine.recall(req.query, top_k=max(req.top_k * 10, req.top_k))
         allowed_roles = set(req.roles or ["user", "assistant"])
-
-        try:
-            results = await spine.search(req.query, top_k=req.top_k * 10)
-        except Exception:
-            results = spine.search_keyword(req.query, top_k=req.top_k * 5)
-
-        memories = []
-        seen_content: set[str] = set()
-        for r in results:
-            meta = r.metadata or {}
-            role = meta.get("role", "unknown")
-            session_id = meta.get("session_id", "")
-            if r.score < req.min_score:
-                continue
+        filtered = []
+        for r in rows:
+            meta = dict(r.get("metadata") or {})
+            role = str(meta.get("role", "unknown"))
             if role not in allowed_roles:
                 continue
-            # Content dedup — skip near-identical memories
-            content_key = r.content.strip().lower()[:200]
-            if content_key in seen_content:
+            if float(r.get("score", 0.0)) < req.min_score:
                 continue
-            seen_content.add(content_key)
-            memories.append(RecallItem(
-                content=r.content,
-                role=role,
-                session_id=session_id,
-                score=r.score,
-                metadata=meta,
-            ))
-            if len(memories) >= req.top_k:
+            filtered.append(r)
+            if len(filtered) >= req.top_k:
                 break
 
-        if not memories:
-            return AugmentResponse(context="", count=0, memories=[])
-
-        if req.format == "xml":
-            lines = []
-            for m in memories:
-                tag = m.role if m.role != "unknown" else "memory"
-                lines.append(f"  <{tag}>{m.content}</{tag}>")
-            context = "<relevant-memories>\n" + "\n".join(lines) + "\n</relevant-memories>"
-        else:
-            lines = [f"- [{m.role}] {m.content}" for m in memories]
-            context = "Relevant memories:\n" + "\n".join(lines)
+        memories = [
+            RecallItem(
+                id=str(r.get("id", "")),
+                content=str(r.get("content", "")),
+                role=str((r.get("metadata") or {}).get("role", "unknown")),
+                session_id=str((r.get("metadata") or {}).get("session_id", "")),
+                score=float(r.get("score", 0.0)),
+                metadata=dict(r.get("metadata") or {}),
+            )
+            for r in filtered
+        ]
+        context = spine._render_augmented_context(
+            [{"content": m.content, "role": m.role} for m in memories],
+            format=req.format,
+        )
 
         return AugmentResponse(context=context, count=len(memories), memories=memories)
 
@@ -572,6 +558,45 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         status = spine.status()
         status["service"] = "novaspine"
         return status
+
+    @app.post("/api/v1/memory/consolidate")
+    async def memory_consolidate(req: ConsolidateRequest, spine: MemorySpine = Depends(get_spine)):
+        """Run episodic -> semantic consolidation."""
+        result = spine.consolidate(session_id=req.session_id, max_chunks=req.max_chunks)
+        return result
+
+    @app.post("/api/v1/memory/dream")
+    async def memory_dream(spine: MemorySpine = Depends(get_spine)):
+        """Run an offline-style dream consolidation pass."""
+        return spine.dream_consolidate()
+
+    @app.post("/api/v1/memory/forget-preview")
+    async def memory_forget_preview(
+        max_age_days: int = 120,
+        max_access_count: int = 0,
+        limit: int = 1000,
+        spine: MemorySpine = Depends(get_spine),
+    ):
+        """Preview stale-memory forgetting candidates."""
+        return spine.forget_stale(
+            max_age_days=max_age_days,
+            max_access_count=max_access_count,
+            limit=limit,
+            dry_run=True,
+        )
+
+    @app.post("/api/v2/graph/query")
+    async def graph_query(req: GraphQueryRequest, spine: MemorySpine = Depends(get_spine)):
+        """V2 graph retrieval endpoint."""
+        graph = await spine.graph_query(req.entity, depth=req.depth)
+        graph["protocol_version"] = "v2"
+        return graph
+
+    @app.post("/api/v2/decay/config")
+    async def set_decay_config(req: DecayConfigRequest, spine: MemorySpine = Depends(get_spine)):
+        """V2 decay tuning endpoint."""
+        spine.set_decay_config(req.half_life_hours)
+        return {"protocol_version": "v2", "half_life_hours": spine.config.retrieval.decay_half_life_hours}
 
     # --- Context Compaction (LLM Prompt Compression) ---
 

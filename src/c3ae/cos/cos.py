@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from c3ae.config import COSConfig
 from c3ae.storage.sqlite_store import SQLiteStore
 from c3ae.types import CarryOverSummary
 from c3ae.utils import utcnow
@@ -10,8 +11,9 @@ from c3ae.utils import utcnow
 class COSManager:
     """Manages Carry-Over Summaries for reasoning sessions."""
 
-    def __init__(self, store: SQLiteStore) -> None:
+    def __init__(self, store: SQLiteStore, config: COSConfig | None = None) -> None:
         self.store = store
+        self.config = config or COSConfig()
 
     def create(self, session_id: str, summary: str,
                key_facts: list[str] | None = None,
@@ -41,6 +43,8 @@ class COSManager:
         for f in (new_facts or []):
             if f not in merged_facts:
                 merged_facts.append(f)
+        if self.config.max_key_facts > 0 and len(merged_facts) > self.config.max_key_facts:
+            merged_facts = merged_facts[-self.config.max_key_facts:]
 
         # Resolve questions
         resolved = set(resolved_questions or [])
@@ -48,6 +52,8 @@ class COSManager:
         for q in (new_questions or []):
             if q not in remaining_questions:
                 remaining_questions.append(q)
+        if self.config.max_open_questions > 0 and len(remaining_questions) > self.config.max_open_questions:
+            remaining_questions = remaining_questions[-self.config.max_open_questions:]
 
         cos = CarryOverSummary(
             session_id=session_id,

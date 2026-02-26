@@ -6,6 +6,7 @@ import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from c3ae.types import (
     AuditEvent,
@@ -119,6 +120,69 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at);
 
+CREATE TABLE IF NOT EXISTS memory_access (
+    memory_id TEXT PRIMARY KEY,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL UNIQUE,
+    entity_type TEXT NOT NULL DEFAULT 'unknown',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+
+CREATE TABLE IF NOT EXISTS entity_mentions (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    chunk_id TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+);
+CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity ON entity_mentions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_mentions_chunk ON entity_mentions(chunk_id);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id TEXT PRIMARY KEY,
+    src_entity_id TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    dst_entity_id TEXT NOT NULL,
+    source_chunk_id TEXT NOT NULL DEFAULT '',
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (src_entity_id) REFERENCES entities(id),
+    FOREIGN KEY (dst_entity_id) REFERENCES entities(id)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_entity_id, status);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_entity_id, status);
+CREATE INDEX IF NOT EXISTS idx_edges_rel ON edges(relation, status);
+
+CREATE TABLE IF NOT EXISTS consolidated_memories (
+    id TEXT PRIMARY KEY,
+    cluster_key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    facts TEXT NOT NULL DEFAULT '[]',
+    source_chunk_ids TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_consolidated_cluster ON consolidated_memories(cluster_key);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_memories_fts USING fts5(
+    summary, facts, content=consolidated_memories, content_rowid=rowid
+);
+
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -176,6 +240,21 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, content)
     VALUES (new.rowid, new.content);
 END;
+
+CREATE TRIGGER IF NOT EXISTS consolidated_memories_ai AFTER INSERT ON consolidated_memories BEGIN
+    INSERT INTO consolidated_memories_fts(rowid, summary, facts)
+    VALUES (new.rowid, new.summary, new.facts);
+END;
+CREATE TRIGGER IF NOT EXISTS consolidated_memories_ad AFTER DELETE ON consolidated_memories BEGIN
+    INSERT INTO consolidated_memories_fts(consolidated_memories_fts, rowid, summary, facts)
+    VALUES ('delete', old.rowid, old.summary, old.facts);
+END;
+CREATE TRIGGER IF NOT EXISTS consolidated_memories_au AFTER UPDATE ON consolidated_memories BEGIN
+    INSERT INTO consolidated_memories_fts(consolidated_memories_fts, rowid, summary, facts)
+    VALUES ('delete', old.rowid, old.summary, old.facts);
+    INSERT INTO consolidated_memories_fts(rowid, summary, facts)
+    VALUES (new.rowid, new.summary, new.facts);
+END;
 """
 
 
@@ -192,6 +271,11 @@ def _sanitize_fts_query(query: str) -> str:
         return '""'
     # Quote each token to prevent operator interpretation
     return " ".join(f'"{t}"' for t in tokens)
+
+
+def _normalize_entity_name(name: str) -> str:
+    cleaned = re.sub(r"\s+", " ", name.strip().lower())
+    return re.sub(r"[^a-z0-9\-\._ ]+", "", cleaned)
 
 
 class SQLiteStore:
@@ -292,7 +376,7 @@ class SQLiteStore:
     def search_chunks_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
         fts_query = _sanitize_fts_query(query)
         rows = self._conn.execute(
-            """SELECT c.id, c.content, c.metadata,
+            """SELECT c.id, c.content, c.metadata, c.created_at,
                       bm25(chunks_fts) AS score
                FROM chunks_fts f
                JOIN chunks c ON c.rowid = f.rowid
@@ -307,7 +391,11 @@ class SQLiteStore:
                 content=r["content"],
                 score=-r["score"],  # bm25 returns negative scores, lower = better
                 source="fts5",
-                metadata=json_loads(r["metadata"]),
+                metadata={
+                    **json_loads(r["metadata"]),
+                    "_created_at": r["created_at"],
+                    "_source_kind": "chunk",
+                },
             )
             for r in rows
         ]
@@ -315,6 +403,64 @@ class SQLiteStore:
     def count_chunks(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return row[0]
+
+    def list_chunks(
+        self,
+        limit: int = 200,
+        older_than: str | None = None,
+        session_id: str | None = None,
+    ) -> list[Chunk]:
+        where: list[str] = []
+        params: list[Any] = []
+        if older_than:
+            where.append("c.created_at <= ?")
+            params.append(older_than)
+        if session_id:
+            where.append("json_extract(c.metadata, '$.session_id') = ?")
+            params.append(session_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = self._conn.execute(
+            f"""SELECT c.*
+                FROM chunks c
+                {where_sql}
+                ORDER BY c.created_at DESC
+                LIMIT ?""",
+            (*params, limit),
+        ).fetchall()
+        return [self._row_to_chunk(r) for r in rows]
+
+    def list_chunks_with_access(
+        self,
+        limit: int = 200,
+        older_than: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if older_than:
+            where.append("c.created_at <= ?")
+            params.append(older_than)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = self._conn.execute(
+            f"""SELECT c.id, c.source_id, c.content, c.metadata, c.created_at,
+                       COALESCE(ma.access_count, 0) AS access_count
+                FROM chunks c
+                LEFT JOIN memory_access ma ON ma.memory_id = c.id
+                {where_sql}
+                ORDER BY c.created_at ASC
+                LIMIT ?""",
+            (*params, limit),
+        ).fetchall()
+        return [
+            {
+                "id": str(r["id"]),
+                "source_id": str(r["source_id"]),
+                "content": str(r["content"]),
+                "metadata": json_loads(r["metadata"]),
+                "created_at": str(r["created_at"]),
+                "access_count": int(r["access_count"]),
+            }
+            for r in rows
+        ]
 
     # --- Reasoning Bank ---
 
@@ -356,7 +502,7 @@ class SQLiteStore:
     def search_reasoning_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
         fts_query = _sanitize_fts_query(query)
         rows = self._conn.execute(
-            """SELECT r.id, r.content, r.title, r.metadata,
+            """SELECT r.id, r.content, r.title, r.metadata, r.created_at,
                       bm25(reasoning_bank_fts) AS score
                FROM reasoning_bank_fts f
                JOIN reasoning_bank r ON r.rowid = f.rowid
@@ -372,7 +518,11 @@ class SQLiteStore:
                 content=r["content"],
                 score=-r["score"],
                 source="reasoning_bank",
-                metadata=json_loads(r["metadata"]),
+                metadata={
+                    **json_loads(r["metadata"]),
+                    "_created_at": r["created_at"],
+                    "_source_kind": "reasoning_entry",
+                },
             )
             for r in rows
         ]
@@ -487,6 +637,366 @@ class SQLiteStore:
         ).fetchall()
         return [self._row_to_skill_capsule(r) for r in rows]
 
+    # --- Consolidated Memories ---
+
+    def upsert_consolidated_memory(
+        self,
+        cluster_key: str,
+        summary: str,
+        facts: list[str],
+        source_chunk_ids: list[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        now = iso_str(utcnow())
+        row = self._conn.execute(
+            "SELECT id FROM consolidated_memories WHERE cluster_key=?",
+            (cluster_key,),
+        ).fetchone()
+        if row:
+            memory_id = str(row["id"])
+            self._conn.execute(
+                """UPDATE consolidated_memories
+                   SET summary=?, facts=?, source_chunk_ids=?, metadata=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    summary,
+                    json_dumps(facts),
+                    json_dumps(source_chunk_ids),
+                    json_dumps(metadata or {}),
+                    now,
+                    memory_id,
+                ),
+            )
+            self._commit()
+            return memory_id
+        memory_id = uuid4().hex
+        self._conn.execute(
+            """INSERT INTO consolidated_memories(
+                id, cluster_key, summary, facts, source_chunk_ids, metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                memory_id,
+                cluster_key,
+                summary,
+                json_dumps(facts),
+                json_dumps(source_chunk_ids),
+                json_dumps(metadata or {}),
+                now,
+                now,
+            ),
+        )
+        self._commit()
+        return memory_id
+
+    def search_consolidated_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
+        fts_query = _sanitize_fts_query(query)
+        rows = self._conn.execute(
+            """SELECT c.id, c.summary, c.facts, c.metadata, c.updated_at,
+                      bm25(consolidated_memories_fts) AS score
+               FROM consolidated_memories_fts f
+               JOIN consolidated_memories c ON c.rowid = f.rowid
+               WHERE consolidated_memories_fts MATCH ?
+               ORDER BY score
+               LIMIT ?""",
+            (fts_query, limit),
+        ).fetchall()
+        out: list[SearchResult] = []
+        for r in rows:
+            facts = json_loads(r["facts"])
+            fact_text = "; ".join(str(x) for x in facts[:5]) if isinstance(facts, list) else ""
+            content = f"{r['summary']} | facts: {fact_text}" if fact_text else str(r["summary"])
+            out.append(
+                SearchResult(
+                    id=str(r["id"]),
+                    content=content,
+                    score=-float(r["score"]),
+                    source="consolidated",
+                    metadata={
+                        **json_loads(r["metadata"]),
+                        "_created_at": str(r["updated_at"]),
+                        "_source_kind": "consolidated",
+                    },
+                )
+            )
+        return out
+
+    def list_consolidated_memories(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """SELECT id, cluster_key, summary, facts, source_chunk_ids, metadata, created_at, updated_at
+               FROM consolidated_memories
+               ORDER BY updated_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": str(r["id"]),
+                "cluster_key": str(r["cluster_key"]),
+                "summary": str(r["summary"]),
+                "facts": json_loads(r["facts"]),
+                "source_chunk_ids": json_loads(r["source_chunk_ids"]),
+                "metadata": json_loads(r["metadata"]),
+                "created_at": str(r["created_at"]),
+                "updated_at": str(r["updated_at"]),
+            }
+            for r in rows
+        ]
+
+    def count_consolidated_memories(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM consolidated_memories").fetchone()
+        return int(row["n"]) if row else 0
+
+    # --- Knowledge Graph ---
+
+    def upsert_entity(
+        self,
+        name: str,
+        entity_type: str = "unknown",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        normalized = _normalize_entity_name(name)
+        if not normalized:
+            raise ValueError("Entity name cannot be empty")
+        now = iso_str(utcnow())
+        row = self._conn.execute(
+            "SELECT id, metadata FROM entities WHERE normalized_name=?",
+            (normalized,),
+        ).fetchone()
+        if row:
+            entity_id = str(row["id"])
+            current_meta = json_loads(row["metadata"])
+            merged_meta = {**current_meta, **(metadata or {})}
+            self._conn.execute(
+                "UPDATE entities SET name=?, entity_type=?, metadata=?, updated_at=? WHERE id=?",
+                (name.strip(), entity_type, json_dumps(merged_meta), now, entity_id),
+            )
+            self._commit()
+            return entity_id
+
+        entity_id = uuid4().hex
+        self._conn.execute(
+            """INSERT INTO entities(id, name, normalized_name, entity_type, metadata, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                entity_id,
+                name.strip(),
+                normalized,
+                entity_type,
+                json_dumps(metadata or {}),
+                now,
+                now,
+            ),
+        )
+        self._commit()
+        return entity_id
+
+    def get_entity_by_name(self, name: str) -> dict[str, Any] | None:
+        normalized = _normalize_entity_name(name)
+        if not normalized:
+            return None
+        row = self._conn.execute(
+            """SELECT id, name, normalized_name, entity_type, metadata, created_at, updated_at
+               FROM entities
+               WHERE normalized_name=?""",
+            (normalized,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "normalized_name": str(row["normalized_name"]),
+            "entity_type": str(row["entity_type"]),
+            "metadata": json_loads(row["metadata"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def search_entities(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        token = _normalize_entity_name(query)
+        if not token:
+            return []
+        rows = self._conn.execute(
+            """SELECT id, name, normalized_name, entity_type, metadata, created_at, updated_at
+               FROM entities
+               WHERE normalized_name LIKE ?
+               ORDER BY LENGTH(name) ASC
+               LIMIT ?""",
+            (f"%{token}%", limit),
+        ).fetchall()
+        return [
+            {
+                "id": str(r["id"]),
+                "name": str(r["name"]),
+                "normalized_name": str(r["normalized_name"]),
+                "entity_type": str(r["entity_type"]),
+                "metadata": json_loads(r["metadata"]),
+                "created_at": str(r["created_at"]),
+                "updated_at": str(r["updated_at"]),
+            }
+            for r in rows
+        ]
+
+    def add_entity_mention(self, entity_id: str, chunk_id: str, confidence: float = 0.5) -> str:
+        mention_id = uuid4().hex
+        self._conn.execute(
+            """INSERT INTO entity_mentions(id, entity_id, chunk_id, confidence, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (mention_id, entity_id, chunk_id, float(confidence), iso_str(utcnow())),
+        )
+        self._commit()
+        return mention_id
+
+    def add_edge(
+        self,
+        src_entity_id: str,
+        relation: str,
+        dst_entity_id: str,
+        source_chunk_id: str = "",
+        confidence: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+        invalidate_existing_relation: bool = False,
+    ) -> str:
+        now = iso_str(utcnow())
+        relation_norm = relation.strip().lower().replace(" ", "_")
+        if invalidate_existing_relation:
+            self._conn.execute(
+                """UPDATE edges
+                   SET status='inactive', valid_to=?
+                   WHERE src_entity_id=? AND relation=? AND status='active' AND dst_entity_id != ?""",
+                (now, src_entity_id, relation_norm, dst_entity_id),
+            )
+        edge_id = uuid4().hex
+        self._conn.execute(
+            """INSERT INTO edges(
+                id, src_entity_id, relation, dst_entity_id, source_chunk_id,
+                valid_from, valid_to, confidence, status, metadata, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?)""",
+            (
+                edge_id,
+                src_entity_id,
+                relation_norm,
+                dst_entity_id,
+                source_chunk_id,
+                now,
+                float(confidence),
+                json_dumps(metadata or {}),
+                now,
+            ),
+        )
+        self._commit()
+        return edge_id
+
+    def query_graph(self, entity: str, depth: int = 2, limit: int = 200) -> dict[str, Any]:
+        seed = self.get_entity_by_name(entity)
+        if not seed:
+            matches = self.search_entities(entity, limit=1)
+            if not matches:
+                return {"entity": entity, "depth": depth, "nodes": [], "edges": []}
+            seed = matches[0]
+
+        depth = max(1, int(depth))
+        frontier = {seed["id"]}
+        visited = set(frontier)
+        collected_edges: list[dict[str, Any]] = []
+        collected_nodes: dict[str, dict[str, Any]] = {seed["id"]: seed}
+
+        for _ in range(depth):
+            if not frontier:
+                break
+            placeholders = ",".join("?" for _ in frontier)
+            rows = self._conn.execute(
+                f"""SELECT e.id, e.src_entity_id, e.relation, e.dst_entity_id,
+                           e.source_chunk_id, e.valid_from, e.valid_to, e.confidence,
+                           e.status, e.metadata, e.created_at,
+                           s.name AS src_name, d.name AS dst_name
+                    FROM edges e
+                    JOIN entities s ON s.id = e.src_entity_id
+                    JOIN entities d ON d.id = e.dst_entity_id
+                    WHERE e.status='active'
+                    AND (e.src_entity_id IN ({placeholders}) OR e.dst_entity_id IN ({placeholders}))
+                    ORDER BY e.created_at DESC
+                    LIMIT ?""",
+                (*frontier, *frontier, limit),
+            ).fetchall()
+            frontier = set()
+            for r in rows:
+                edge = {
+                    "id": str(r["id"]),
+                    "src_entity_id": str(r["src_entity_id"]),
+                    "src_name": str(r["src_name"]),
+                    "relation": str(r["relation"]),
+                    "dst_entity_id": str(r["dst_entity_id"]),
+                    "dst_name": str(r["dst_name"]),
+                    "source_chunk_id": str(r["source_chunk_id"]),
+                    "valid_from": str(r["valid_from"]),
+                    "valid_to": r["valid_to"],
+                    "confidence": float(r["confidence"]),
+                    "status": str(r["status"]),
+                    "metadata": json_loads(r["metadata"]),
+                    "created_at": str(r["created_at"]),
+                }
+                collected_edges.append(edge)
+                for node_id, node_name in (
+                    (edge["src_entity_id"], edge["src_name"]),
+                    (edge["dst_entity_id"], edge["dst_name"]),
+                ):
+                    if node_id not in collected_nodes:
+                        collected_nodes[node_id] = {
+                            "id": node_id,
+                            "name": node_name,
+                        }
+                    if node_id not in visited:
+                        frontier.add(node_id)
+                        visited.add(node_id)
+
+        return {
+            "entity": seed["name"],
+            "depth": depth,
+            "nodes": list(collected_nodes.values()),
+            "edges": collected_edges,
+        }
+
+    def search_graph_context(self, query: str, limit: int = 20) -> list[SearchResult]:
+        entities = self.search_entities(query, limit=max(1, limit))
+        results: list[SearchResult] = []
+        for ent in entities:
+            graph = self.query_graph(ent["name"], depth=1, limit=max(5, limit))
+            node_count = len(graph.get("nodes", []))
+            edge_count = len(graph.get("edges", []))
+            score = 1.0 + min(edge_count / 10.0, 1.0)
+            content = f"Entity '{ent['name']}' linked to {node_count} nodes via {edge_count} edges"
+            results.append(
+                SearchResult(
+                    id=str(ent["id"]),
+                    content=content,
+                    score=score,
+                    source="graph",
+                    metadata={
+                        "entity_name": ent["name"],
+                        "node_count": node_count,
+                        "edge_count": edge_count,
+                        "_source_kind": "graph",
+                        "_created_at": ent["updated_at"],
+                    },
+                )
+            )
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]
+
+    def count_entities(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM entities").fetchone()
+        return int(row["n"]) if row else 0
+
+    def count_edges(self, active_only: bool = True) -> int:
+        if active_only:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM edges WHERE status='active'"
+            ).fetchone()
+        else:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM edges").fetchone()
+        return int(row["n"]) if row else 0
+
     # --- Audit Log ---
 
     def insert_audit_event(self, event: AuditEvent) -> str:
@@ -519,6 +1029,40 @@ class SQLiteStore:
             )
             for r in rows
         ]
+
+    # --- Memory Access Tracking ---
+
+    def increment_memory_access(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        ts = iso_str(utcnow())
+        for memory_id in memory_ids:
+            self._conn.execute(
+                """INSERT INTO memory_access(memory_id, access_count, last_accessed)
+                   VALUES (?, 1, ?)
+                   ON CONFLICT(memory_id) DO UPDATE SET
+                     access_count = access_count + 1,
+                     last_accessed = excluded.last_accessed""",
+                (memory_id, ts),
+            )
+        self._commit()
+
+    def get_memory_access_count(self, memory_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT access_count FROM memory_access WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        return int(row["access_count"]) if row else 0
+
+    def get_memory_access_counts(self, memory_ids: list[str]) -> dict[str, int]:
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        rows = self._conn.execute(
+            f"SELECT memory_id, access_count FROM memory_access WHERE memory_id IN ({placeholders})",
+            tuple(memory_ids),
+        ).fetchall()
+        return {str(r["memory_id"]): int(r["access_count"]) for r in rows}
 
     # --- Embedding Cache ---
 

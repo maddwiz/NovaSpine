@@ -244,5 +244,43 @@ def anomaly_report(ctx: click.Context) -> None:
     spine.sqlite.close()
 
 
+@main.command(name="graph")
+@click.argument("entity")
+@click.option("--depth", "-d", default=2, type=int, help="Traversal depth")
+@click.pass_context
+def graph_cmd(ctx: click.Context, entity: str, depth: int) -> None:
+    """Query memory graph around an entity."""
+    spine = _get_spine(ctx.obj.get("data_dir"))
+    graph = asyncio.run(spine.graph_query(entity, depth=depth))
+    click.echo(f"Entity: {graph.get('entity', entity)}")
+    click.echo(f"Nodes: {len(graph.get('nodes', []))}")
+    click.echo(f"Edges: {len(graph.get('edges', []))}")
+    for e in graph.get("edges", [])[:10]:
+        click.echo(f"  {e.get('src_name')} -[{e.get('relation')}]-> {e.get('dst_name')}")
+    spine.sqlite.close()
+
+
+@main.command(name="consolidate")
+@click.option("--session-id", default=None, help="Optional session id filter")
+@click.option("--max-chunks", default=1000, type=int, help="Max chunks to process")
+@click.pass_context
+def consolidate_cmd(ctx: click.Context, session_id: str | None, max_chunks: int) -> None:
+    """Run episodic->semantic consolidation."""
+    spine = _get_spine(ctx.obj.get("data_dir"))
+    result = spine.consolidate(session_id=session_id, max_chunks=max_chunks)
+    click.echo(result)
+    spine.sqlite.close()
+
+
+@main.command(name="dream")
+@click.pass_context
+def dream_cmd(ctx: click.Context) -> None:
+    """Run an offline-style dream consolidation pass."""
+    spine = _get_spine(ctx.obj.get("data_dir"))
+    result = spine.dream_consolidate()
+    click.echo(result)
+    spine.sqlite.close()
+
+
 if __name__ == "__main__":
     main()

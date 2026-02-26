@@ -12,8 +12,8 @@ from c3ae.storage.sqlite_store import SQLiteStore
 from c3ae.types import ReasoningEntry, SearchResult
 
 if TYPE_CHECKING:
+    from c3ae.embeddings.backends import EmbeddingBackend
     from c3ae.embeddings.cache import EmbeddingCache
-    from c3ae.embeddings.venice import VeniceEmbedder
     from c3ae.storage.faiss_store import FAISSStore
 
 
@@ -25,7 +25,7 @@ class Guardian:
         store: SQLiteStore,
         config: GovernanceConfig | None = None,
         faiss_store: "FAISSStore | None" = None,
-        embedder: "VeniceEmbedder | None" = None,
+        embedder: "EmbeddingBackend | None" = None,
         embed_cache: "EmbeddingCache | None" = None,
     ) -> None:
         self.store = store
@@ -144,8 +144,8 @@ class Guardian:
     async def _check_contradictions_semantic(self, entry: ReasoningEntry) -> list[str]:
         """Semantic contradiction detection using embeddings + cosine similarity.
 
-        Embeds the new entry's content, searches FAISS for similar existing entries,
-        and flags high-similarity matches as potential contradictions requiring review.
+        Embeds the new entry's content, searches FAISS for similar indexed chunks,
+        then resolves directly to reasoning entries via chunk.source_id where possible.
         """
         issues = []
         if not self.faiss or self.faiss.size == 0:
@@ -165,36 +165,54 @@ class Guardian:
                     self.embed_cache.put(text, vec)
 
             # Search FAISS for similar reasoning entries
-            # We search chunks, but we're interested in reasoning bank overlaps
             hits = self.faiss.search(vec, top_k=5)
 
+            seen_entry_ids: set[str] = set()
             for ext_id, cosine_score in hits:
                 if cosine_score < 0.75:
                     continue  # Not similar enough to flag
 
-                # Look up the chunk to see if it's from a reasoning entry
                 chunk = self.store.get_chunk(ext_id)
                 if not chunk:
                     continue
 
-                # Search reasoning bank for entries with overlapping content
-                try:
-                    # Use first few words as FTS query
-                    words = chunk.content.split()[:5]
-                    fts_query = " ".join(words)
-                    rb_hits = self.store.search_reasoning_fts(fts_query, limit=3)
-                    for rb_hit in rb_hits:
-                        existing = self.store.get_reasoning_entry(rb_hit.id)
-                        if existing and existing.status.value == "active":
-                            issues.append(
-                                f"Semantic overlap (cosine={cosine_score:.3f}) with existing entry "
-                                f"'{existing.title}' ({existing.id[:8]}). "
-                                f"Review for contradiction or consider superseding."
-                            )
-                except Exception:
-                    pass
+                # Directly resolve the linked reasoning entry when the chunk source is an entry id.
+                existing = self.store.get_reasoning_entry(chunk.source_id)
+                if existing is None:
+                    # Fallback search path for legacy chunks without source linkage.
+                    try:
+                        words = chunk.content.split()[:8]
+                        fts_query = " ".join(words)
+                        rb_hits = self.store.search_reasoning_fts(fts_query, limit=1)
+                        if rb_hits:
+                            existing = self.store.get_reasoning_entry(rb_hits[0].id)
+                    except Exception:
+                        existing = None
+
+                if not existing or existing.status.value != "active":
+                    continue
+                if existing.id in seen_entry_ids:
+                    continue
+                seen_entry_ids.add(existing.id)
+
+                polarity_hint = self._polarity_conflict(entry.content, existing.content)
+                conflict_suffix = " Possible polarity conflict detected." if polarity_hint else ""
+                issues.append(
+                    f"Semantic overlap (cosine={cosine_score:.3f}) with existing entry "
+                    f"'{existing.title}' ({existing.id[:8]}).{conflict_suffix} "
+                    "Review for contradiction or consider superseding."
+                )
 
         except Exception:
             pass  # Embedding failures shouldn't block writes
 
         return issues
+
+    @staticmethod
+    def _polarity_conflict(a: str, b: str) -> bool:
+        neg_terms = {"not", "never", "no", "none", "cannot", "can't", "won't", "false"}
+        a_tokens = {t.strip(".,!?;:").lower() for t in a.split()}
+        b_tokens = {t.strip(".,!?;:").lower() for t in b.split()}
+        a_neg = bool(a_tokens & neg_terms)
+        b_neg = bool(b_tokens & neg_terms)
+        return a_neg != b_neg

@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from c3ae.llm.venice_chat import VeniceChat, Message, ChatResponse
+from c3ae.llm.backends import ChatBackend
+from c3ae.llm.venice_chat import Message
 from c3ae.memory_spine.spine import MemorySpine
 from c3ae.types import SearchResult
 
@@ -84,7 +85,7 @@ class AgentLoop:
     def __init__(
         self,
         spine: MemorySpine,
-        chat: VeniceChat,
+        chat: ChatBackend,
         max_turns: int = 20,
         identity: str | None = None,
     ) -> None:

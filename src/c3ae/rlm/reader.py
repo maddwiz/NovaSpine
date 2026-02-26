@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from c3ae.llm import Message, create_chat_backend
 from c3ae.memory_spine.spine import MemorySpine
 from c3ae.types import EvidencePack
 from c3ae.utils import chunk_text
@@ -43,8 +46,16 @@ class RLMReader:
     Budget enforcement prevents unbounded processing.
     """
 
-    def __init__(self, spine: MemorySpine) -> None:
+    def __init__(
+        self,
+        spine: MemorySpine,
+        use_llm_extraction: bool = True,
+        max_claims_per_chunk: int = 5,
+    ) -> None:
         self.spine = spine
+        self.use_llm_extraction = use_llm_extraction
+        self.max_claims_per_chunk = max(1, max_claims_per_chunk)
+        self._claim_chat = None
 
     async def read_text(self, text: str, topic: str = "",
                         budget: ReadBudget | None = None) -> ReadResult:
@@ -74,7 +85,7 @@ class RLMReader:
             result.chunks_processed += 1
 
             # Extract claims from chunk (simplified — in production, LLM would do this)
-            claims = self._extract_claims(chunk, topic)
+            claims = await self._extract_claims(chunk, topic)
             for claim, reasoning in claims:
                 pack = self.spine.add_evidence(
                     claim=claim,
@@ -91,17 +102,106 @@ class RLMReader:
         }
         return result
 
-    @staticmethod
-    def _extract_claims(chunk: str, topic: str) -> list[tuple[str, str]]:
-        """Extract claims from a chunk (heuristic — LLM integration point).
+    async def _extract_claims(self, chunk: str, topic: str) -> list[tuple[str, str]]:
+        """Extract claims from text via LLM-first pipeline with deterministic fallback."""
+        if self.use_llm_extraction:
+            claims = await self._extract_claims_llm(chunk, topic)
+            if claims:
+                return claims
+        return self._extract_claims_heuristic(chunk, topic)
 
-        Returns list of (claim, reasoning) tuples.
-        """
-        claims = []
-        sentences = [s.strip() for s in chunk.split(".") if len(s.strip()) > 20]
-        # Take up to 3 key sentences as claims
-        for s in sentences[:3]:
-            claim = s.strip().rstrip(".")
-            reasoning = f"Extracted from text about '{topic}': '{claim[:100]}...'" if topic else f"Direct extract: '{claim[:100]}...'"
+    async def _extract_claims_llm(self, chunk: str, topic: str) -> list[tuple[str, str]]:
+        api_key = self.spine.config.venice.api_key
+        if not api_key:
+            return []
+
+        if self._claim_chat is None:
+            self._claim_chat = create_chat_backend(
+                provider="venice",
+                api_key=api_key,
+                model=self.spine.config.venice.chat_model,
+                base_url=self.spine.config.venice.base_url,
+                timeout=self.spine.config.venice.chat_timeout,
+                temperature=0.0,
+                max_tokens=900,
+            )
+
+        system = (
+            "Extract only verifiable factual claims from text. "
+            "Return strict JSON with an array under key 'claims'."
+        )
+        user = (
+            f"Topic: {topic or 'general'}\n"
+            "Return JSON as {\"claims\":[{\"claim\":\"...\",\"reasoning\":\"...\"}]}. "
+            f"Include at most {self.max_claims_per_chunk} claims.\n\n"
+            f"Text:\n{chunk}"
+        )
+
+        try:
+            resp = await self._claim_chat.chat(
+                [Message(role="system", content=system), Message(role="user", content=user)],
+                json_mode=True,
+            )
+            payload = json.loads(resp.content)
+        except Exception:
+            return []
+
+        rows: list[dict[str, Any]]
+        if isinstance(payload, list):
+            rows = [x for x in payload if isinstance(x, dict)]
+        elif isinstance(payload, dict):
+            claims_obj = payload.get("claims", [])
+            rows = [x for x in claims_obj if isinstance(x, dict)]
+        else:
+            rows = []
+
+        out: list[tuple[str, str]] = []
+        for row in rows[: self.max_claims_per_chunk]:
+            claim = str(row.get("claim", "")).strip().rstrip(".")
+            reasoning = str(row.get("reasoning", "")).strip()
+            if len(claim) < 20:
+                continue
+            if not reasoning:
+                reasoning = (
+                    f"LLM-extracted claim from topic '{topic}'"
+                    if topic
+                    else "LLM-extracted claim from text chunk"
+                )
+            out.append((claim, reasoning))
+        return out
+
+    def _extract_claims_heuristic(self, chunk: str, topic: str) -> list[tuple[str, str]]:
+        """Fallback extractor when LLM extraction is unavailable."""
+        sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[\.\!\?])\s+|\n+", chunk)
+            if len(s.strip()) >= 20
+        ]
+        ranked: list[tuple[float, str]] = []
+        for sentence in sentences:
+            s = sentence.strip().rstrip(".")
+            score = 0.0
+            if re.search(r"\d", s):
+                score += 1.0
+            if re.search(r"\b(is|are|was|were|has|have|will|must|shows|indicates)\b", s.lower()):
+                score += 0.8
+            if re.search(r"\b(increase|decrease|improve|decline|risk|probability|evidence)\b", s.lower()):
+                score += 0.7
+            score += min(len(s) / 200.0, 1.0)
+            ranked.append((score, s))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        claims: list[tuple[str, str]] = []
+        for _, claim in ranked[: self.max_claims_per_chunk]:
+            reasoning = (
+                f"Heuristic extraction from topic '{topic}': '{claim[:100]}...'"
+                if topic
+                else f"Heuristic extraction: '{claim[:100]}...'"
+            )
             claims.append((claim, reasoning))
         return claims
+
+    async def close(self) -> None:
+        if self._claim_chat is not None:
+            await self._claim_chat.close()
+            self._claim_chat = None

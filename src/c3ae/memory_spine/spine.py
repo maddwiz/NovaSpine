@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -9,30 +11,30 @@ import numpy as np
 
 from c3ae.config import Config
 from c3ae.cos.cos import COSManager
+from c3ae.embeddings.backends import create_embedder
 from c3ae.embeddings.cache import EmbeddingCache
-from c3ae.embeddings.venice import VeniceEmbedder
 from c3ae.exceptions import GovernanceError
+from c3ae.graph.extractor import extract_graph_facts
 from c3ae.governance.audit import AuditLog
 from c3ae.governance.guardian import Guardian
 from c3ae.reasoning_bank.bank import ReasoningBank
 from c3ae.reasoning_bank.evidence import EvidenceManager
+from c3ae.reasoning_bank.manager import MemoryWriteManager
 from c3ae.retrieval.hybrid import HybridSearch
 from c3ae.retrieval.keyword import KeywordSearch
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.skill_capsules.registry import SkillRegistry
 from c3ae.storage.faiss_store import FAISSStore
 from c3ae.storage.sqlite_store import SQLiteStore
-from c3ae.storage.vault import Vault
 from c3ae.usc_bridge.compressed_vault import CompressedVault
 from c3ae.types import (
     Chunk,
     EvidencePack,
-    MemoryTier,
     ReasoningEntry,
     SearchResult,
     SkillCapsule,
 )
-from c3ae.utils import chunk_text
+from c3ae.utils import chunk_text, iso_str, utcnow
 
 
 class MemorySpine:
@@ -52,15 +54,20 @@ class MemorySpine:
         self.vault = CompressedVault(self.config.vault_dir)
 
         # Subsystems
-        self.embedder = VeniceEmbedder(self.config.venice)
+        self.embedder = create_embedder(self.config.venice)
         self.embed_cache = EmbeddingCache(self.sqlite, self.config.venice.embedding_model)
         self.keyword_search = KeywordSearch(self.sqlite)
         self.vector_search = VectorSearch(self.faiss, self.sqlite)
         self.hybrid_search = HybridSearch(
-            self.keyword_search, self.vector_search, self.config.retrieval
+            self.keyword_search,
+            self.vector_search,
+            self.config.retrieval,
+            access_count_getter=self.sqlite.get_memory_access_count,
+            access_counts_getter=self.sqlite.get_memory_access_counts,
         )
-        self.cos = COSManager(self.sqlite)
+        self.cos = COSManager(self.sqlite, self.config.cos)
         self.bank = ReasoningBank(self.sqlite)
+        self.write_manager = MemoryWriteManager(self.bank, self.config.memory_manager)
         self.evidence = EvidenceManager(self.sqlite)
         self.skills = SkillRegistry(self.sqlite)
         self.guardian = Guardian(
@@ -87,6 +94,7 @@ class MemorySpine:
         for ct in chunks_text:
             chunk = Chunk(content=ct, source_id=source_id, metadata=metadata or {})
             self.sqlite.insert_chunk(chunk)
+            self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
 
         # Embed and index
@@ -107,6 +115,7 @@ class MemorySpine:
         for ct in chunks_text:
             chunk = Chunk(content=ct, source_id=source_id, metadata=metadata or {})
             self.sqlite.insert_chunk(chunk)
+            self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
         self.audit.log_write("chunks", source_id or "inline", f"ingested {len(chunk_ids)} chunks (sync)")
         return chunk_ids
@@ -152,6 +161,7 @@ class MemorySpine:
                 metadata=meta,
             )
             self.sqlite.insert_chunk(chunk)
+            self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
             total_ingested += 1
             roles[sc.role] = roles.get(sc.role, 0) + 1
 
@@ -192,14 +202,112 @@ class MemorySpine:
             pass  # Fall back to keyword-only
 
         results = self.hybrid_search.search(query, query_vector=query_vec, top_k=top_k)
+        if self.config.graph.enabled:
+            graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
+            if graph_results:
+                results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
+        self._record_access(results)
         self.audit.log_search(query, len(results))
         return results
 
     def search_keyword(self, query: str, top_k: int = 20) -> list[SearchResult]:
         """Keyword-only search (synchronous, no embedding needed)."""
         results = self.keyword_search.search_all(query, limit=top_k)
+        self._record_access(results)
         self.audit.log_search(query, len(results))
         return results
+
+    # --- Stable Protocol Surface ---
+
+    async def ingest(
+        self,
+        text: str,
+        source_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Stable protocol alias for ingest_text()."""
+        return await self.ingest_text(text, source_id=source_id, metadata=metadata)
+
+    async def recall(
+        self,
+        query: str,
+        top_k: int = 20,
+        session_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Stable protocol method returning normalized recall rows."""
+        results = await self.search(query, top_k=max(top_k * 2, top_k))
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for r in results:
+            meta = r.metadata or {}
+            session_id = str(meta.get("session_id", ""))
+            if session_filter and session_filter not in session_id:
+                continue
+            dedup_key = r.content.strip().lower()[:200]
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            rows.append(
+                {
+                    "id": r.id,
+                    "content": r.content,
+                    "score": float(r.score),
+                    "source": r.source,
+                    "metadata": meta,
+                }
+            )
+            if len(rows) >= top_k:
+                break
+        return rows
+
+    async def augment(
+        self,
+        query: str,
+        top_k: int = 5,
+        format: str = "xml",
+        min_score: float = 0.005,
+        roles: list[str] | None = None,
+    ) -> str:
+        """Stable protocol method producing pre-formatted memory context."""
+        allowed_roles = set(roles or ["user", "assistant"])
+        recalled = await self.recall(query, top_k=max(top_k * 10, top_k))
+        selected: list[dict[str, Any]] = []
+        for row in recalled:
+            meta = row.get("metadata") or {}
+            role = str(meta.get("role", "unknown"))
+            if role not in allowed_roles:
+                continue
+            if float(row.get("score", 0.0)) < min_score:
+                continue
+            selected.append(
+                {
+                    "content": str(row.get("content", "")),
+                    "role": role,
+                }
+            )
+            if len(selected) >= top_k:
+                break
+        return self._render_augmented_context(selected, format=format)
+
+    def protocol_client(self, version: str = "v1") -> Any:
+        """Create a versioned local Spine protocol client."""
+        if version == "v1":
+            from c3ae.protocol.client import SpineClientV1
+
+            return SpineClientV1(self)
+        if version == "v2":
+            from c3ae.protocol.client import SpineClientV2
+
+            return SpineClientV2(self)
+        raise ValueError(f"Unsupported protocol version: {version}")
+
+    def set_decay_config(self, half_life_hours: float) -> None:
+        """V2 protocol hook for decay tuning without changing the interface."""
+        self.config.retrieval.decay_half_life_hours = max(1.0, float(half_life_hours))
+
+    async def graph_query(self, entity: str, depth: int = 2) -> dict[str, Any]:
+        """Query temporal memory graph around an entity."""
+        return self.sqlite.query_graph(entity, depth=depth)
 
     # --- Reasoning Bank (governed) ---
 
@@ -214,6 +322,40 @@ class MemorySpine:
             tags=tags or [], evidence_ids=evidence_ids or [],
             session_id=session_id,
         )
+        decision = self.write_manager.decide(entry)
+        if decision.action == "NOOP" and decision.target_id:
+            existing = self.bank.get(decision.target_id)
+            if existing:
+                self.audit.log(
+                    "reasoning_noop",
+                    "reasoning_entry",
+                    existing.id,
+                    decision.reason,
+                )
+                return existing
+        if decision.action == "UPDATE" and decision.target_id:
+            if not bypass_governance:
+                ok, issues, warnings = await self.guardian.validate_and_report_async(entry)
+                if not ok:
+                    self.audit.log_blocked("reasoning_entry", entry.id, "; ".join(issues))
+                    raise GovernanceError(f"Write blocked: {'; '.join(issues)}")
+                if warnings:
+                    self.audit.log("warning", "reasoning_entry", entry.id, "; ".join(warnings))
+            superseded = self.supersede_knowledge(
+                decision.target_id,
+                new_title=title,
+                new_content=content,
+                tags=tags,
+                evidence_ids=evidence_ids,
+            )
+            self.audit.log(
+                "reasoning_update",
+                "reasoning_entry",
+                superseded.id,
+                decision.reason,
+            )
+            return superseded
+
         if not bypass_governance:
             ok, issues, warnings = await self.guardian.validate_and_report_async(entry)
             if not ok:
@@ -228,8 +370,16 @@ class MemorySpine:
         # Also index as a chunk so it's discoverable via vector search
         # and semantic contradiction detection can find it in FAISS
         combined = f"{title}. {content}"
-        chunk = Chunk(content=combined, source_id=entry.id, metadata={"type": "reasoning_entry"})
+        chunk = Chunk(
+            content=combined,
+            source_id=entry.id,
+            metadata={
+                "type": "reasoning_entry",
+                "reasoning_entry_id": entry.id,
+            },
+        )
         self.sqlite.insert_chunk(chunk)
+        self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
         await self._embed_and_index([chunk.id], [combined])
 
         self.audit.log_write("reasoning_entry", entry.id, title)
@@ -239,6 +389,14 @@ class MemorySpine:
                             tags: list[str] | None = None,
                             evidence_ids: list[str] | None = None) -> ReasoningEntry:
         entry = self.bank.supersede(old_id, new_title, new_content, tags, evidence_ids)
+        combined = f"{new_title}. {new_content}"
+        chunk = Chunk(
+            content=combined,
+            source_id=entry.id,
+            metadata={"type": "reasoning_entry", "reasoning_entry_id": entry.id},
+        )
+        self.sqlite.insert_chunk(chunk)
+        self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
         self.audit.log_write("reasoning_entry", entry.id, f"supersedes {old_id}")
         return entry
 
@@ -564,6 +722,104 @@ class MemorySpine:
 
         return keep
 
+    # --- Consolidation & Forgetting ---
+
+    def consolidate(
+        self,
+        session_id: str | None = None,
+        max_chunks: int = 1000,
+    ) -> dict[str, Any]:
+        """Consolidate episodic chunks into higher-level semantic memories."""
+        if not self.config.consolidation.enabled:
+            return {"enabled": False, "clusters_created": 0, "chunks_processed": 0}
+
+        lookback = utcnow() - timedelta(hours=max(1, int(self.config.consolidation.lookback_hours)))
+        chunks = self.sqlite.list_chunks(
+            limit=max_chunks,
+            older_than=iso_str(utcnow()),
+            session_id=session_id,
+        )
+        recent_chunks = [c for c in chunks if c.created_at >= lookback]
+        if not recent_chunks:
+            return {"enabled": True, "clusters_created": 0, "chunks_processed": 0}
+
+        clusters: dict[str, list[Chunk]] = {}
+        for chunk in recent_chunks:
+            key = self._cluster_key(chunk.content, chunk.metadata)
+            clusters.setdefault(key, []).append(chunk)
+
+        created = 0
+        min_size = max(1, int(self.config.consolidation.min_cluster_size))
+        max_clusters = max(1, int(self.config.consolidation.max_clusters_per_run))
+        for cluster_key, cluster_chunks in list(clusters.items())[:max_clusters]:
+            if len(cluster_chunks) < min_size:
+                continue
+            facts = self._extract_cluster_facts(cluster_chunks)
+            summary = self._summarize_cluster(cluster_chunks, facts=facts)
+            self.sqlite.upsert_consolidated_memory(
+                cluster_key=cluster_key,
+                summary=summary,
+                facts=facts,
+                source_chunk_ids=[c.id for c in cluster_chunks],
+                metadata={
+                    "session_id": session_id or "",
+                    "cluster_size": len(cluster_chunks),
+                },
+            )
+            created += 1
+
+        self.audit.log(
+            "consolidation",
+            "memory",
+            session_id or "global",
+            f"clusters={created}, chunks={len(recent_chunks)}",
+        )
+        return {
+            "enabled": True,
+            "clusters_created": created,
+            "chunks_processed": len(recent_chunks),
+        }
+
+    def forget_stale(
+        self,
+        max_age_days: int = 120,
+        max_access_count: int = 0,
+        limit: int = 1000,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Delete cold memories under age/access thresholds."""
+        cutoff = iso_str(utcnow() - timedelta(days=max(1, max_age_days)))
+        candidates = self.sqlite.list_chunks_with_access(limit=limit, older_than=cutoff)
+        stale = [
+            c for c in candidates
+            if int(c.get("access_count", 0)) <= max_access_count
+        ]
+        if dry_run:
+            return {
+                "dry_run": True,
+                "candidate_count": len(stale),
+                "deleted": 0,
+            }
+        deleted = 0
+        for row in stale:
+            if self.sqlite.delete_chunk(str(row["id"])):
+                deleted += 1
+        self.audit.log("forget", "memory", "stale", f"deleted={deleted}")
+        return {
+            "dry_run": False,
+            "candidate_count": len(stale),
+            "deleted": deleted,
+        }
+
+    def dream_consolidate(self) -> dict[str, Any]:
+        """Run offline-style consolidation pass for idle periods."""
+        consolidation = self.consolidate()
+        forgetting = self.forget_stale(dry_run=True)
+        return {
+            "consolidation": consolidation,
+            "forgetting_preview": forgetting,
+        }
+
     # --- Status ---
 
     def status(self) -> dict[str, Any]:
@@ -574,6 +830,17 @@ class MemorySpine:
             "skills": len(self.skills.list_all()),
             "vault_documents": len(self.vault.list_documents()),
         }
+        try:
+            status["graph"] = {
+                "entities": self.sqlite.count_entities(),
+                "edges": self.sqlite.count_edges(active_only=True),
+            }
+        except Exception:
+            status["graph"] = {"entities": 0, "edges": 0}
+        try:
+            status["consolidated_memories"] = self.sqlite.count_consolidated_memories()
+        except Exception:
+            status["consolidated_memories"] = 0
         # Add compression stats if vault is CompressedVault
         if hasattr(self.vault, 'compression_stats'):
             status["compression"] = self.vault.compression_stats()
@@ -590,6 +857,143 @@ class MemorySpine:
             motifs = self._temporal_tracker.detected_motifs()
             status["temporal"] = {"motifs_detected": len(motifs)}
         return status
+
+    @staticmethod
+    def _render_augmented_context(memories: list[dict[str, str]], format: str = "xml") -> str:
+        if not memories:
+            return ""
+        if format == "xml":
+            lines = []
+            for m in memories:
+                role = m.get("role", "memory")
+                content = m.get("content", "")
+                tag = role if role != "unknown" else "memory"
+                lines.append(f"  <{tag}>{content}</{tag}>")
+            return "<relevant-memories>\n" + "\n".join(lines) + "\n</relevant-memories>"
+        lines = [f"- [{m.get('role', 'memory')}] {m.get('content', '')}" for m in memories]
+        return "Relevant memories:\n" + "\n".join(lines)
+
+    def _record_access(self, results: list[SearchResult]) -> None:
+        if not results:
+            return
+        ids: list[str] = []
+        seen: set[str] = set()
+        for r in results:
+            if r.id not in seen:
+                ids.append(r.id)
+                seen.add(r.id)
+        try:
+            self.sqlite.increment_memory_access(ids)
+        except Exception:
+            # Access tracking must never break retrieval paths.
+            return
+
+    def _merge_with_graph(
+        self,
+        query: str,
+        memory_results: list[SearchResult],
+        graph_results: list[SearchResult],
+        top_k: int,
+    ) -> list[SearchResult]:
+        if not graph_results:
+            return memory_results[:top_k]
+        intent = self.hybrid_search._classify_intent(query)
+        mem_weight = 0.85
+        graph_weight = float(self.config.retrieval.graph_weight)
+        if intent in {"temporal"}:
+            mem_weight = 0.60
+            graph_weight = max(graph_weight, 0.40)
+        elif intent in {"entity_lookup"}:
+            mem_weight = 0.70
+            graph_weight = max(graph_weight, 0.30)
+
+        k = 60
+        scores: dict[str, float] = {}
+        best: dict[str, SearchResult] = {}
+        for rank, r in enumerate(memory_results):
+            scores[r.id] = scores.get(r.id, 0.0) + (mem_weight / (k + rank + 1))
+            best.setdefault(r.id, r)
+        for rank, r in enumerate(graph_results):
+            key = f"graph:{r.id}"
+            scores[key] = scores.get(key, 0.0) + (graph_weight / (k + rank + 1))
+            best.setdefault(key, r)
+        ranked = sorted(scores, key=lambda rid: scores[rid], reverse=True)
+        out: list[SearchResult] = []
+        for rid in ranked[:top_k]:
+            r = best[rid]
+            out.append(
+                SearchResult(
+                    id=r.id,
+                    content=r.content,
+                    score=scores[rid],
+                    source=r.source,
+                    metadata=r.metadata,
+                )
+            )
+        return out
+
+    def _index_graph_chunk(
+        self,
+        chunk_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.config.graph.enabled:
+            return
+        try:
+            extracted = extract_graph_facts(
+                text,
+                max_entities=self.config.graph.max_entities_per_chunk,
+                max_relations=self.config.graph.max_relations_per_chunk,
+            )
+            entity_ids: dict[str, str] = {}
+            for name in extracted.entities:
+                eid = self.sqlite.upsert_entity(name, metadata={"source_chunk_id": chunk_id})
+                self.sqlite.add_entity_mention(eid, chunk_id, confidence=0.4)
+                entity_ids[name] = eid
+            for src_name, relation, dst_name in extracted.relations:
+                src_id = entity_ids.get(src_name) or self.sqlite.upsert_entity(src_name)
+                dst_id = entity_ids.get(dst_name) or self.sqlite.upsert_entity(dst_name)
+                invalidate = relation in {"is", "prefers", "owns"}
+                self.sqlite.add_edge(
+                    src_id,
+                    relation=relation,
+                    dst_entity_id=dst_id,
+                    source_chunk_id=chunk_id,
+                    confidence=0.5,
+                    metadata={"source": metadata or {}},
+                    invalidate_existing_relation=invalidate,
+                )
+        except Exception:
+            # Graph indexing must never block memory ingest.
+            return
+
+    def _cluster_key(self, text: str, metadata: dict[str, Any] | None = None) -> str:
+        norm = " ".join(tok for tok in text.lower().split() if tok[:1].isalnum())
+        sig = hashlib.sha1(norm[:512].encode("utf-8", errors="ignore")).hexdigest()[:16]
+        session_id = str((metadata or {}).get("session_id", "global"))
+        return f"{session_id}:{sig}"
+
+    def _extract_cluster_facts(self, chunks: list[Chunk]) -> list[str]:
+        facts: list[str] = []
+        for chunk in chunks:
+            sentences = [s.strip() for s in chunk.content.replace("\n", " ").split(".") if s.strip()]
+            for sentence in sentences[:2]:
+                if sentence not in facts:
+                    facts.append(sentence)
+                if len(facts) >= 12:
+                    return facts
+        return facts
+
+    def _summarize_cluster(self, chunks: list[Chunk], facts: list[str]) -> str:
+        if not chunks:
+            return ""
+        head = chunks[0].content.strip().replace("\n", " ")
+        if len(head) > 180:
+            head = head[:177] + "..."
+        if facts:
+            return f"{head} (consolidated from {len(chunks)} episodes; {len(facts)} key facts)"
+        return f"{head} (consolidated from {len(chunks)} episodes)"
 
     # --- Internals ---
 

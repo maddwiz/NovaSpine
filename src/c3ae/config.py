@@ -13,6 +13,7 @@ def _default_data_dir() -> Path:
 
 
 class VeniceConfig(BaseModel):
+    embedding_provider: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBED_PROVIDER", "venice"))
     api_key: str = Field(default_factory=lambda: os.environ.get("VENICE_API_KEY", ""))
     base_url: str = "https://api.venice.ai/api/v1"
     embedding_model: str = "text-embedding-bge-m3"
@@ -31,6 +32,40 @@ class RetrievalConfig(BaseModel):
     default_top_k: int = 20
     faiss_ivf_threshold: int = 50_000
     faiss_nprobe: int = 16
+    adaptive_weights: bool = True
+    enable_decay: bool = True
+    decay_half_life_hours: float = 24.0 * 14.0
+    decay_min_factor: float = 0.2
+    access_boost_per_hit: float = 0.05
+    access_boost_cap: float = 2.0
+    evidence_importance_boost: float = 1.25
+    graph_weight: float = 0.2
+
+
+class COSConfig(BaseModel):
+    max_key_facts: int = 40
+    max_open_questions: int = 20
+
+
+class GraphConfig(BaseModel):
+    enabled: bool = True
+    extraction_mode: str = "heuristic"  # heuristic | llm
+    max_entities_per_chunk: int = 16
+    max_relations_per_chunk: int = 8
+
+
+class ConsolidationConfig(BaseModel):
+    enabled: bool = True
+    min_cluster_size: int = 2
+    max_clusters_per_run: int = 100
+    lookback_hours: int = 24 * 30
+
+
+class MemoryManagerConfig(BaseModel):
+    enabled: bool = True
+    use_llm_policy: bool = False
+    similarity_noop_threshold: float = 0.92
+    similarity_update_threshold: float = 0.80
 
 
 class GovernanceConfig(BaseModel):
@@ -49,6 +84,10 @@ class Config(BaseModel):
     data_dir: Path = Field(default_factory=_default_data_dir)
     venice: VeniceConfig = Field(default_factory=VeniceConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    cos: COSConfig = Field(default_factory=COSConfig)
+    graph: GraphConfig = Field(default_factory=GraphConfig)
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
+    memory_manager: MemoryManagerConfig = Field(default_factory=MemoryManagerConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     api: APIConfig = Field(default_factory=APIConfig)
 

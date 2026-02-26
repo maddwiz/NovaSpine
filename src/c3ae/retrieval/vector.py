@@ -23,12 +23,17 @@ class VectorSearch:
         for ext_id, score in hits:
             chunk = self.sqlite.get_chunk(ext_id)
             if chunk:
+                metadata = {
+                    **(chunk.metadata or {}),
+                    "_created_at": chunk.created_at.isoformat(),
+                    "_source_kind": "chunk",
+                }
                 results.append(SearchResult(
                     id=chunk.id,
                     content=chunk.content,
                     score=float(score),
                     source="vector",
-                    metadata=chunk.metadata,
+                    metadata=metadata,
                 ))
         return results
 

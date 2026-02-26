@@ -21,10 +21,14 @@ class KeywordSearch:
     def search_skills(self, query: str, limit: int = 10) -> list[SearchResult]:
         return self.store.search_skills_fts(query, limit=limit)
 
+    def search_consolidated(self, query: str, limit: int = 20) -> list[SearchResult]:
+        return self.store.search_consolidated_fts(query, limit=limit)
+
     def search_all(self, query: str, limit: int = 20) -> list[SearchResult]:
         """Search across chunks + reasoning bank."""
         chunks = self.search_chunks(query, limit=limit)
         reasoning = self.search_reasoning(query, limit=limit)
-        combined = chunks + reasoning
+        consolidated = self.search_consolidated(query, limit=limit)
+        combined = chunks + reasoning + consolidated
         combined.sort(key=lambda r: r.score, reverse=True)
         return combined[:limit]
