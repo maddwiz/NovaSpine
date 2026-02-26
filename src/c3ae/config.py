@@ -12,6 +12,38 @@ def _default_data_dir() -> Path:
     return Path(os.environ.get("C3AE_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in {"1", "true", "yes", "on", "y"}:
+        return True
+    if val in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 class VeniceConfig(BaseModel):
     embedding_provider: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBED_PROVIDER", "venice"))
     api_key: str = Field(default_factory=lambda: os.environ.get("VENICE_API_KEY", ""))
@@ -62,18 +94,28 @@ class ConsolidationConfig(BaseModel):
 
 
 class MemoryManagerConfig(BaseModel):
-    enabled: bool = True
-    use_llm_policy: bool = False
-    similarity_noop_threshold: float = 0.92
-    similarity_update_threshold: float = 0.80
+    enabled: bool = Field(default_factory=lambda: _env_bool("C3AE_MEMORY_MANAGER_ENABLED", True))
+    use_llm_policy: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_MEMORY_MANAGER_USE_LLM_POLICY", False)
+    )
+    similarity_noop_threshold: float = Field(
+        default_factory=lambda: _env_float("C3AE_MEMORY_MANAGER_NOOP_THRESHOLD", 0.92)
+    )
+    similarity_update_threshold: float = Field(
+        default_factory=lambda: _env_float("C3AE_MEMORY_MANAGER_UPDATE_THRESHOLD", 0.80)
+    )
     llm_provider: str = Field(
         default_factory=lambda: os.environ.get("C3AE_MEMORY_MANAGER_PROVIDER", "venice")
     )
     llm_model: str = Field(
         default_factory=lambda: os.environ.get("C3AE_MEMORY_MANAGER_MODEL", "")
     )
-    llm_temperature: float = 0.0
-    llm_max_tokens: int = 256
+    llm_temperature: float = Field(
+        default_factory=lambda: _env_float("C3AE_MEMORY_MANAGER_TEMPERATURE", 0.0)
+    )
+    llm_max_tokens: int = Field(
+        default_factory=lambda: _env_int("C3AE_MEMORY_MANAGER_MAX_TOKENS", 256)
+    )
 
 
 class GovernanceConfig(BaseModel):

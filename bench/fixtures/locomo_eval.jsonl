@@ -1,0 +1,8 @@
+{"query":"desmond prefers dark mode coding tools","expected_doc_ids":["locomo_pref_dark_mode"]}
+{"query":"desmond uses vim keybindings editors terminal","expected_doc_ids":["locomo_pref_vim_keys"]}
+{"query":"favorite dinner spicy salmon sushi","expected_doc_ids":["locomo_food_sushi"]}
+{"query":"dog named pixel","expected_doc_ids":["locomo_pet_name"]}
+{"query":"recurring strategy meeting tuesday 10:30 pacific","expected_doc_ids":["locomo_meeting_slot"]}
+{"query":"codename new memory launch novahelix","expected_doc_ids":["locomo_project_codename"]}
+{"query":"traveling seattle next month systems conference","expected_doc_ids":["locomo_travel_city"]}
+{"query":"lo-fi instrumental playlists focus deep work","expected_doc_ids":["locomo_focus_music"]}

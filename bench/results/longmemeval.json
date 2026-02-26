@@ -1,0 +1,12 @@
+{
+  "benchmark": "longmemeval",
+  "dataset": "./bench/fixtures/longmemeval_eval.jsonl",
+  "rows": 6,
+  "top_k": 10,
+  "recall_at_k": 1.0,
+  "mrr": 1.0,
+  "ingested_documents": 8,
+  "ingested_chunks": 8,
+  "data_dir": "bench/.runs/longmemeval",
+  "ephemeral_data_dir": false
+}

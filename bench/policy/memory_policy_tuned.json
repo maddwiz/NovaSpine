@@ -1,0 +1,14 @@
+{
+  "memory_manager": {
+    "enabled": true,
+    "use_llm_policy": false,
+    "similarity_update_threshold": 0.845,
+    "similarity_noop_threshold": 0.945,
+    "training_samples": 27,
+    "label_distribution": {
+      "ADD": 9,
+      "UPDATE": 10,
+      "NOOP": 8
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{"doc_id":"dmr_risk_cap","text":"The intraday risk cap for strategy Orion is 2.5 percent notional drawdown."}
+{"doc_id":"dmr_abort_rule","text":"Abort execution if slippage exceeds 18 basis points for three consecutive slices."}
+{"doc_id":"dmr_retry_policy","text":"Order router retries venue handoff twice with 120 millisecond backoff."}
+{"doc_id":"dmr_data_freshness","text":"Signal features older than 90 seconds are treated as stale and rejected."}
+{"doc_id":"dmr_rebalance_hour","text":"Cross-hive rebalance is scheduled at 13:00 UTC each trading day."}
+{"doc_id":"dmr_guardian_block","text":"Governance blocks writes when evidence IDs are missing from reasoning entries."}
+{"doc_id":"dmr_context_format","text":"Augment endpoint returns relevant memories wrapped in XML tags by default."}
+{"doc_id":"dmr_escalation","text":"Escalate to human review when anomaly z-score is above 3.0 for 5 minutes."}

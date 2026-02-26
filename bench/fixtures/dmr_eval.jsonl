@@ -1,0 +1,8 @@
+{"query":"intraday risk cap strategy orion 2.5 percent drawdown","expected_doc_ids":["dmr_risk_cap"]}
+{"query":"abort execution slippage exceeds 18 basis points three consecutive slices","expected_doc_ids":["dmr_abort_rule"]}
+{"query":"order router retries venue handoff twice 120 millisecond backoff","expected_doc_ids":["dmr_retry_policy"]}
+{"query":"signal features older than 90 seconds stale rejected","expected_doc_ids":["dmr_data_freshness"]}
+{"query":"cross-hive rebalance scheduled 13:00 utc trading day","expected_doc_ids":["dmr_rebalance_hour"]}
+{"query":"governance blocks writes missing evidence ids reasoning entries","expected_doc_ids":["dmr_guardian_block"]}
+{"query":"augment endpoint relevant memories wrapped xml tags default","expected_doc_ids":["dmr_context_format"]}
+{"query":"escalate human review anomaly z-score above 3.0 for 5 minutes","expected_doc_ids":["dmr_escalation"]}

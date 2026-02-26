@@ -1,0 +1,6 @@
+{"query":"migrated internal api flask fastapi february 14 2026","expected_doc_ids":["lme_api_new"]}
+{"query":"analytics moved postgresql duckdb february 2026","expected_doc_ids":["lme_db_new"]}
+{"query":"recommendation cache ttl 45 minutes february tuning","expected_doc_ids":["lme_cache_ttl"]}
+{"query":"current primary on-call memory infra priya","expected_doc_ids":["lme_oncall_primary"]}
+{"query":"february outage root cause stale dns failover","expected_doc_ids":["lme_incident_root"]}
+{"query":"production deploy window 6:00 PM Pacific weekdays","expected_doc_ids":["lme_deploy_window"]}

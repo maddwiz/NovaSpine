@@ -1,0 +1,12 @@
+{
+  "benchmark": "locomo",
+  "dataset": "./bench/fixtures/locomo_eval.jsonl",
+  "rows": 8,
+  "top_k": 10,
+  "recall_at_k": 0.875,
+  "mrr": 0.875,
+  "ingested_documents": 8,
+  "ingested_chunks": 8,
+  "data_dir": "bench/.runs/locomo",
+  "ephemeral_data_dir": false
+}

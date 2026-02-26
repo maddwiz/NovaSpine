@@ -150,7 +150,19 @@ results = spine.search_keyword("dark mode", top_k=5)
 C3AE_DATA_DIR=/path/to/data          # Database + index location
 C3AE_API_TOKEN=your-secret           # Bearer token for API auth
 VENICE_API_KEY=your-key              # Embedding provider API key
+
+# Memory write manager (runtime-tunable)
+C3AE_MEMORY_MANAGER_ENABLED=1
+C3AE_MEMORY_MANAGER_USE_LLM_POLICY=1
+C3AE_MEMORY_MANAGER_UPDATE_THRESHOLD=0.84
+C3AE_MEMORY_MANAGER_NOOP_THRESHOLD=0.945
+C3AE_MEMORY_MANAGER_PROVIDER=openai   # venice|openai|anthropic|ollama
+C3AE_MEMORY_MANAGER_MODEL=gpt-4.1-mini
+C3AE_MEMORY_MANAGER_TEMPERATURE=0
+C3AE_MEMORY_MANAGER_MAX_TOKENS=256
 ```
+
+See [`examples/memory_manager.env.example`](examples/memory_manager.env.example) for a ready-to-copy profile.
 
 ## Also Includes: USC Compression Engine
 
@@ -158,10 +170,41 @@ NovaSpine includes **USC (Unified State Codec)** — a cognitive compression eng
 
 ## Benchmarks
 
-Use the benchmark harness to evaluate recall@k and MRR on LoCoMo/LongMemEval/DMR-style JSONL datasets:
+Use the benchmark harness to evaluate recall@k and MRR on LoCoMo/LongMemEval/DMR-style JSONL datasets.
+You can ingest a benchmark corpus first and run fully offline (`--ingest-sync`):
 
 ```bash
-python scripts/run_memory_benchmarks.py --name locomo --dataset ./bench/locomo_eval.jsonl --top-k 10
+python scripts/run_memory_benchmarks.py \
+  --name locomo \
+  --corpus ./bench/fixtures/locomo_corpus.jsonl \
+  --dataset ./bench/fixtures/locomo_eval.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --out ./bench/results/locomo.json
+
+python scripts/run_memory_benchmarks.py \
+  --name longmemeval \
+  --corpus ./bench/fixtures/longmemeval_corpus.jsonl \
+  --dataset ./bench/fixtures/longmemeval_eval.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --out ./bench/results/longmemeval.json
+
+python scripts/run_memory_benchmarks.py \
+  --name dmr \
+  --corpus ./bench/fixtures/dmr_corpus.jsonl \
+  --dataset ./bench/fixtures/dmr_eval.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --out ./bench/results/dmr.json
+```
+
+Tune heuristic policy thresholds from labeled similarity decisions:
+
+```bash
+python scripts/train_memory_policy.py \
+  --data ./bench/policy/memory_policy_train.jsonl \
+  --out ./bench/policy/memory_policy_tuned.json
 ```
 
 ## Development

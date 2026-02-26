@@ -1,0 +1,8 @@
+{"doc_id":"lme_api_old","text":"In January 2026 the internal API service used Flask behind Gunicorn."}
+{"doc_id":"lme_api_new","text":"On February 14 2026 the team migrated the internal API from Flask to FastAPI."}
+{"doc_id":"lme_db_old","text":"In early Q1 2026 analytics queries ran on PostgreSQL."}
+{"doc_id":"lme_db_new","text":"By February 2026 analytics moved from PostgreSQL to DuckDB for local research loops."}
+{"doc_id":"lme_cache_ttl","text":"The recommendation cache TTL is 45 minutes after the February tuning pass."}
+{"doc_id":"lme_oncall_primary","text":"The current primary on-call for memory infra is Priya."}
+{"doc_id":"lme_incident_root","text":"The February outage root cause was a stale DNS record in the failover path."}
+{"doc_id":"lme_deploy_window","text":"Production deploy window starts at 6:00 PM Pacific on weekdays."}
