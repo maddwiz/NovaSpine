@@ -66,6 +66,14 @@ class MemoryManagerConfig(BaseModel):
     use_llm_policy: bool = False
     similarity_noop_threshold: float = 0.92
     similarity_update_threshold: float = 0.80
+    llm_provider: str = Field(
+        default_factory=lambda: os.environ.get("C3AE_MEMORY_MANAGER_PROVIDER", "venice")
+    )
+    llm_model: str = Field(
+        default_factory=lambda: os.environ.get("C3AE_MEMORY_MANAGER_MODEL", "")
+    )
+    llm_temperature: float = 0.0
+    llm_max_tokens: int = 256
 
 
 class GovernanceConfig(BaseModel):

@@ -322,7 +322,7 @@ class MemorySpine:
             tags=tags or [], evidence_ids=evidence_ids or [],
             session_id=session_id,
         )
-        decision = self.write_manager.decide(entry)
+        decision = await self.write_manager.decide_async(entry)
         if decision.action == "NOOP" and decision.target_id:
             existing = self.bank.get(decision.target_id)
             if existing:
@@ -333,6 +333,16 @@ class MemorySpine:
                     decision.reason,
                 )
                 return existing
+        if decision.action == "DELETE" and decision.target_id:
+            existing = self.bank.get(decision.target_id)
+            if existing:
+                self.bank.retract(decision.target_id)
+                self.audit.log(
+                    "reasoning_delete",
+                    "reasoning_entry",
+                    decision.target_id,
+                    decision.reason,
+                )
         if decision.action == "UPDATE" and decision.target_id:
             if not bypass_governance:
                 ok, issues, warnings = await self.guardian.validate_and_report_async(entry)
@@ -1030,6 +1040,7 @@ class MemorySpine:
             self.faiss.save()
 
     async def close(self) -> None:
+        await self.write_manager.close()
         await self.embedder.close()
         self.sqlite.close()
         if self.config.faiss_dir:
