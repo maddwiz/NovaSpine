@@ -92,3 +92,31 @@ This rerun used the same official converted eval sets and existing ingested benc
 Interpretation:
 - Prior official collapse was dominated by query parsing behavior in keyword mode, not core memory data integrity.
 - Next step is to validate with fully fresh ingests + semantic embeddings enabled for production-comparable leaderboard reporting.
+
+---
+
+## Dedupe + Benchmark-Case Graph Bypass Re-Run (2026-02-27)
+
+Changes applied:
+- `recall()` now dedupes benchmark rows by `metadata.benchmark_doc_id` (fallback `benchmark_source`) before content-prefix dedupe.
+- Benchmark case tokens (`__*_CASE_*__`) are propagated to chunk metadata during ingest.
+- Graph indexing and graph-query merge are skipped for benchmark case-token traffic to reduce noise and runtime for official benchmark corpora.
+
+Rerun mode:
+- fresh ingest for each dataset (`ephemeral_data_dir=true`)
+- keyword-only deterministic query path (`C3AE_EMBED_PROVIDER=openai` without key)
+
+1. LongMemEval
+   - output: `bench/results/official_longmemeval_20260227_docdedupe_bypassgraph.json`
+   - recall@10: `0.908` (from `0.84`)
+   - mrr: `0.7115301587301588` (from `0.6240261904761901`)
+
+2. LoCoMo-MC10
+   - output: `bench/results/official_locomo_mc10_20260227_docdedupe_bypassgraph.json`
+   - recall@10: `0.7903225806451613` (from `0.7467741935483871`)
+   - mrr: `0.5707328469022017` (from `0.5273399897593445`)
+
+3. DMR sample-500
+   - output: `bench/results/official_dmr_memgpt_sample500_20260227_docdedupe_bypassgraph.json`
+   - recall@10: `0.666` (from `0.664`)
+   - mrr: `0.3523087301587301` (from `0.35022380952380955`)

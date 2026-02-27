@@ -134,6 +134,87 @@ def test_protocol_clients_and_cos_pruning(tmp_path):
             assert spine.config.retrieval.decay_half_life_hours == 12.0
             graph = await client_v2.graph_query("Desmond", depth=2)
             assert graph["mode"] == "graph"
+
+            # Case token is propagated to all chunks from the same source text.
+            case_chunk_ids = await client_v1.ingest(
+                "__DMR_CASE_00001__ " + ("Alpha beta gamma delta " * 120),
+                source_id="bench:case",
+            )
+            assert len(case_chunk_ids) >= 2
+            for chunk_id in case_chunk_ids:
+                row = spine.sqlite.get_chunk(chunk_id)
+                assert row is not None
+                assert row.metadata.get("benchmark_case_token") == "__DMR_CASE_00001__"
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_recall_dedupes_by_benchmark_doc_id(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+
+        spine = MemorySpine(cfg)
+        try:
+            async def _fake_search(query: str, top_k: int | None = None) -> list[SearchResult]:
+                return [
+                    SearchResult(
+                        id="a",
+                        content="Alpha one",
+                        score=0.9,
+                        source="test",
+                        metadata={"benchmark_doc_id": "doc-1", "benchmark_source": "bench:doc-1"},
+                    ),
+                    SearchResult(
+                        id="b",
+                        content="Alpha two",
+                        score=0.8,
+                        source="test",
+                        metadata={"benchmark_doc_id": "doc-1", "benchmark_source": "bench:doc-1"},
+                    ),
+                    SearchResult(
+                        id="c",
+                        content="Bravo one",
+                        score=0.7,
+                        source="test",
+                        metadata={"benchmark_doc_id": "doc-2", "benchmark_source": "bench:doc-2"},
+                    ),
+                ]
+
+            spine.search = _fake_search  # type: ignore[method-assign]
+            rows = await spine.recall("alpha", top_k=3)
+            assert len(rows) == 2
+            assert [r["metadata"]["benchmark_doc_id"] for r in rows] == ["doc-1", "doc-2"]
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_case_token_query_skips_graph_lookup(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+        spine = MemorySpine(cfg)
+        try:
+            spine.ingest_text_sync(
+                "__DMR_CASE_00007__ Alpha memory that should be found quickly.",
+                source_id="bench:case",
+            )
+            called = {"graph": False}
+
+            def _graph_probe(query: str, limit: int = 0):  # noqa: ANN202
+                called["graph"] = True
+                return []
+
+            spine.sqlite.search_graph_context = _graph_probe  # type: ignore[method-assign]
+            rows = await spine.recall("__DMR_CASE_00007__ alpha memory", top_k=3)
+            assert rows
+            assert called["graph"] is False
         finally:
             await spine.close()
 

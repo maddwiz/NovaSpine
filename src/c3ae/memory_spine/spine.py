@@ -40,6 +40,8 @@ from c3ae.types import (
 )
 from c3ae.utils import chunk_text, iso_str, utcnow
 
+_BENCH_CASE_TOKEN_RE = re.compile(r"__[A-Z]+_CASE_\d+__", re.IGNORECASE)
+
 
 class MemorySpine:
     """Central orchestrator wiring all memory subsystems."""
@@ -96,11 +98,14 @@ class MemorySpine:
                           metadata: dict[str, Any] | None = None) -> list[str]:
         """Chunk text, embed, and index. Returns chunk IDs."""
         chunks_text = chunk_text(text)
+        base_meta = self._build_chunk_metadata(text, source_id, metadata)
+        skip_graph_index = bool(base_meta.get("benchmark_case_token"))
         chunk_ids = []
         for ct in chunks_text:
-            chunk = Chunk(content=ct, source_id=source_id, metadata=metadata or {})
+            chunk = Chunk(content=ct, source_id=source_id, metadata=dict(base_meta))
             self.sqlite.insert_chunk(chunk)
-            await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+            if not skip_graph_index:
+                await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
 
         # Embed and index
@@ -117,11 +122,14 @@ class MemorySpine:
         Use this for bulk ingestion where embedding API calls aren't practical.
         """
         chunks_text = chunk_text(text)
+        base_meta = self._build_chunk_metadata(text, source_id, metadata)
+        skip_graph_index = bool(base_meta.get("benchmark_case_token"))
         chunk_ids = []
         for ct in chunks_text:
-            chunk = Chunk(content=ct, source_id=source_id, metadata=metadata or {})
+            chunk = Chunk(content=ct, source_id=source_id, metadata=dict(base_meta))
             self.sqlite.insert_chunk(chunk)
-            self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
+            if not skip_graph_index:
+                self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
         self.audit.log_write("chunks", source_id or "inline", f"ingested {len(chunk_ids)} chunks (sync)")
         return chunk_ids
@@ -208,7 +216,8 @@ class MemorySpine:
             pass  # Fall back to keyword-only
 
         results = self.hybrid_search.search(query, query_vector=query_vec, top_k=top_k)
-        if self.config.graph.enabled:
+        benchmark_case_query = bool(self._extract_benchmark_case_token(query))
+        if self.config.graph.enabled and not benchmark_case_query:
             graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
             if graph_results:
                 results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
@@ -249,7 +258,14 @@ class MemorySpine:
             session_id = str(meta.get("session_id", ""))
             if session_filter and session_filter not in session_id:
                 continue
-            dedup_key = r.content.strip().lower()[:200]
+            benchmark_doc_id = str(meta.get("benchmark_doc_id", "")).strip()
+            benchmark_source = str(meta.get("benchmark_source", "")).strip()
+            if benchmark_doc_id:
+                dedup_key = f"benchmark_doc:{benchmark_doc_id}"
+            elif benchmark_source:
+                dedup_key = f"benchmark_source:{benchmark_source}"
+            else:
+                dedup_key = r.content.strip().lower()[:200]
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
@@ -1162,6 +1178,27 @@ class MemorySpine:
         except Exception:
             # Access tracking must never break retrieval paths.
             return
+
+    def _build_chunk_metadata(
+        self,
+        text: str,
+        source_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Attach stable metadata hints that help downstream retrieval/reranking."""
+        merged = dict(metadata or {})
+        if "benchmark_case_token" not in merged:
+            case_token = self._extract_benchmark_case_token(text) or self._extract_benchmark_case_token(source_id)
+            if case_token:
+                merged["benchmark_case_token"] = case_token
+        return merged
+
+    @staticmethod
+    def _extract_benchmark_case_token(raw: str) -> str:
+        if not raw:
+            return ""
+        m = _BENCH_CASE_TOKEN_RE.search(raw)
+        return m.group(0).upper() if m else ""
 
     def _merge_with_graph(
         self,

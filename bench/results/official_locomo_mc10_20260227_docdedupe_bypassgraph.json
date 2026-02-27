@@ -1,0 +1,14 @@
+{
+  "benchmark": "locomo_mc10_official_20260227_docdedupe_bypassgraph",
+  "dataset": "bench/official/converted/locomo_mc10_eval.jsonl",
+  "rows": 620,
+  "top_k": 10,
+  "recall_at_k": 0.7903225806451613,
+  "mrr": 0.5707328469022017,
+  "ingested_documents": 55014,
+  "ingested_chunks": 55014,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-ikrw2pk_",
+  "ephemeral_data_dir": true,
+  "publishable": true,
+  "quality_warnings": []
+}

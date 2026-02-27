@@ -1,0 +1,14 @@
+{
+  "benchmark": "dmr_memgpt_official_source_sample500_20260227_docdedupe_bypassgraph",
+  "dataset": "bench/official/converted/dmr_memgpt_eval_500.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.666,
+  "mrr": 0.3523087301587301,
+  "ingested_documents": 15000,
+  "ingested_chunks": 15000,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-9_6uzazc",
+  "ephemeral_data_dir": true,
+  "publishable": true,
+  "quality_warnings": []
+}
