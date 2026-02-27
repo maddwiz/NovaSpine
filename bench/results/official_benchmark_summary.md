@@ -153,3 +153,31 @@ Rerun mode:
    - output: `bench/results/official_dmr_memgpt_sample500_20260227_tune3.json`
    - recall@10: `0.706` (from `0.666`)
    - mrr: `0.3655230158730157` (from `0.3523087301587301`)
+
+---
+
+## Full QA Pass (2026-02-27)
+
+Configuration:
+- `--top-k 10`
+- `--ingest-sync`
+- `--skip-chunking`
+- `--answer-mode extractive`
+
+1. LongMemEval QA
+   - output: `bench/results/official_longmemeval_qa_20260227.json`
+   - doc_hit_rate: `1.0`
+   - exact_match: `0.044`
+   - token_f1: `0.12337595754653644`
+
+2. LoCoMo-MC10 QA (sample-500 source rows, 143 QA rows after conversion filters)
+   - output: `bench/results/official_locomo_qa_20260227.json`
+   - doc_hit_rate: `0.8601398601398601`
+   - exact_match: `0.02097902097902098`
+   - token_f1: `0.07363903622574898`
+
+3. DMR QA sample-500
+   - output: `bench/results/official_dmr_qa_20260227.json`
+   - doc_hit_rate: `0.706`
+   - exact_match: `0.012`
+   - token_f1: `0.03704333064830867`
