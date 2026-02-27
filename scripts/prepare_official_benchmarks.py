@@ -4,10 +4,13 @@
 Outputs JSONL files under bench/official/converted/:
   - longmemeval_oracle_corpus.jsonl
   - longmemeval_oracle_eval.jsonl
+  - longmemeval_oracle_qa_eval.jsonl
   - locomo_mc10_corpus.jsonl
   - locomo_mc10_eval.jsonl
+  - locomo_mc10_qa_eval.jsonl
   - dmr_memgpt_corpus.jsonl
   - dmr_memgpt_eval.jsonl
+  - dmr_memgpt_qa_eval.jsonl
 """
 
 from __future__ import annotations
@@ -84,17 +87,20 @@ def main() -> None:
         src=lme_path,
         corpus_out=out_dir / "longmemeval_oracle_corpus.jsonl",
         eval_out=out_dir / "longmemeval_oracle_eval.jsonl",
+        qa_eval_out=out_dir / "longmemeval_oracle_qa_eval.jsonl",
     )
     summary["locomo_mc10"] = _convert_locomo_mc10(
         src=locomo_path,
         corpus_out=out_dir / "locomo_mc10_corpus.jsonl",
         eval_out=out_dir / "locomo_mc10_eval.jsonl",
+        qa_eval_out=out_dir / "locomo_mc10_qa_eval.jsonl",
         max_rows=max(1, int(args.locomo_max_rows)),
     )
     summary["dmr_memgpt"] = _convert_dmr_memgpt(
         src=dmr_path,
         corpus_out=out_dir / "dmr_memgpt_corpus.jsonl",
         eval_out=out_dir / "dmr_memgpt_eval.jsonl",
+        qa_eval_out=out_dir / "dmr_memgpt_qa_eval.jsonl",
         max_rows=max(1, int(args.dmr_max_rows)),
     )
 
@@ -140,10 +146,12 @@ def _convert_longmemeval(
     src: Path,
     corpus_out: Path,
     eval_out: Path,
+    qa_eval_out: Path,
 ) -> dict[str, Any]:
     rows = json.loads(src.read_text(encoding="utf-8"))
     corpus_rows: list[dict[str, Any]] = []
     eval_rows: list[dict[str, Any]] = []
+    qa_eval_rows: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         qid = str(row.get("question_id", f"q_{i:04d}"))
         case_token = f"__LME_CASE_{i:04d}__"
@@ -181,15 +189,27 @@ def _convert_longmemeval(
                 "expected_doc_ids": expected_doc_ids,
             }
         )
+        answer = str(row.get("answer", "")).strip()
+        if answer:
+            qa_eval_rows.append(
+                {
+                    "query": f"{case_token} {str(row.get('question', '')).strip()}",
+                    "expected_doc_ids": expected_doc_ids,
+                    "expected_answers": [answer],
+                }
+            )
 
     _write_jsonl(corpus_out, corpus_rows)
     _write_jsonl(eval_out, eval_rows)
+    _write_jsonl(qa_eval_out, qa_eval_rows)
     return {
         "questions": len(eval_rows),
+        "qa_questions": len(qa_eval_rows),
         "documents": len(corpus_rows),
         "source_file": str(src),
         "corpus_file": str(corpus_out),
         "eval_file": str(eval_out),
+        "qa_eval_file": str(qa_eval_out),
     }
 
 
@@ -242,6 +262,7 @@ def _convert_locomo_mc10(
     src: Path,
     corpus_out: Path,
     eval_out: Path,
+    qa_eval_out: Path,
     max_rows: int,
 ) -> dict[str, Any]:
     dataset_rows: list[dict[str, Any]] = []
@@ -269,6 +290,7 @@ def _convert_locomo_mc10(
 
     corpus_rows: list[dict[str, Any]] = []
     eval_rows: list[dict[str, Any]] = []
+    qa_eval_rows: list[dict[str, Any]] = []
     skipped_no_gold = 0
     n_rows = 0
     for i, row in enumerate(dataset_rows):
@@ -321,18 +343,29 @@ def _convert_locomo_mc10(
                 "expected_doc_ids": expected_doc_ids,
             }
         )
+        if answer and answer != "not answerable":
+            qa_eval_rows.append(
+                {
+                    "query": f"{case_token} {question}",
+                    "expected_doc_ids": expected_doc_ids,
+                    "expected_answers": [str(row.get("answer", "")).strip()],
+                }
+            )
 
     _write_jsonl(corpus_out, corpus_rows)
     _write_jsonl(eval_out, eval_rows)
+    _write_jsonl(qa_eval_out, qa_eval_rows)
     return {
         "rows_read": n_rows,
         "questions": len(eval_rows),
+        "qa_questions": len(qa_eval_rows),
         "documents": len(corpus_rows),
         "skipped_no_gold": skipped_no_gold,
         "dataset": LOCOMO_MC10_DATASET,
         "source_file": str(src),
         "corpus_file": str(corpus_out),
         "eval_file": str(eval_out),
+        "qa_eval_file": str(qa_eval_out),
     }
 
 
@@ -340,10 +373,12 @@ def _convert_dmr_memgpt(
     src: Path,
     corpus_out: Path,
     eval_out: Path,
+    qa_eval_out: Path,
     max_rows: int,
 ) -> dict[str, Any]:
     corpus_rows: list[dict[str, Any]] = []
     eval_rows: list[dict[str, Any]] = []
+    qa_eval_rows: list[dict[str, Any]] = []
     skipped_no_gold = 0
     n_rows = 0
     with gzip.open(src, "rt", encoding="utf-8") as f:
@@ -395,17 +430,33 @@ def _convert_dmr_memgpt(
                     "expected_doc_ids": expected_doc_ids,
                 }
             )
+            answers = row.get("answers", [])
+            if isinstance(answers, list):
+                gold_answers = [str(a).strip() for a in answers if str(a).strip()]
+            else:
+                gold_answers = []
+            if gold_answers:
+                qa_eval_rows.append(
+                    {
+                        "query": f"{case_token} {question}",
+                        "expected_doc_ids": expected_doc_ids,
+                        "expected_answers": gold_answers,
+                    }
+                )
 
     _write_jsonl(corpus_out, corpus_rows)
     _write_jsonl(eval_out, eval_rows)
+    _write_jsonl(qa_eval_out, qa_eval_rows)
     return {
         "rows_read": n_rows,
         "questions": len(eval_rows),
+        "qa_questions": len(qa_eval_rows),
         "documents": len(corpus_rows),
         "skipped_no_gold": skipped_no_gold,
         "source_file": str(src),
         "corpus_file": str(corpus_out),
         "eval_file": str(eval_out),
+        "qa_eval_file": str(qa_eval_out),
     }
 
 

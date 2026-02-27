@@ -236,11 +236,25 @@ python scripts/run_memory_benchmarks.py \
 
 python scripts/run_memory_benchmarks.py \
   --name dmr_memgpt_official_source_sample500 \
-  --corpus ./bench/official/converted/dmr_memgpt_corpus_500.jsonl \
-  --dataset ./bench/official/converted/dmr_memgpt_eval_500.jsonl \
+  --corpus ./bench/official/converted/dmr_memgpt_corpus.jsonl \
+  --dataset ./bench/official/converted/dmr_memgpt_eval.jsonl \
   --top-k 10 \
   --ingest-sync \
   --out ./bench/results/official_dmr_memgpt_sample500.json
+```
+
+Run full QA scoring (doc hit + EM + token-F1) on converted official datasets:
+
+```bash
+python scripts/run_memory_qa.py \
+  --name longmemeval_official_qa \
+  --dataset ./bench/official/converted/longmemeval_oracle_qa_eval.jsonl \
+  --corpus ./bench/official/converted/longmemeval_oracle_corpus.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --skip-chunking \
+  --answer-mode extractive \
+  --out ./bench/results/official_longmemeval_qa.json
 ```
 
 ## Development
