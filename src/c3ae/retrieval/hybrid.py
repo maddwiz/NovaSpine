@@ -70,11 +70,13 @@ class HybridSearch:
         top_k: int,
     ) -> list[SearchResult]:
         """Reciprocal rank fusion with configurable weights."""
-        k = 60  # RRF constant
+        k = max(1, int(self.config.rrf_k))
         keyword_weight, vector_weight = self._weights_for_query(query)
 
         scores: dict[str, float] = {}
         best_result: dict[str, SearchResult] = {}
+        kw_ids: set[str] = set()
+        vec_ids: set[str] = set()
 
         # Keyword contributions
         for rank, r in enumerate(kw_results):
@@ -82,6 +84,7 @@ class HybridSearch:
             scores[r.id] = scores.get(r.id, 0.0) + rrf
             if r.id not in best_result:
                 best_result[r.id] = r
+            kw_ids.add(r.id)
 
         # Vector contributions
         for rank, r in enumerate(vec_results):
@@ -89,6 +92,12 @@ class HybridSearch:
             scores[r.id] = scores.get(r.id, 0.0) + rrf
             if r.id not in best_result:
                 best_result[r.id] = r
+            vec_ids.add(r.id)
+
+        overlap_boost = float(self.config.rrf_overlap_boost)
+        if overlap_boost > 1.0:
+            for rid in (kw_ids & vec_ids):
+                scores[rid] = scores.get(rid, 0.0) * overlap_boost
 
         # Sort by combined score
         sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)

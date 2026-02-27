@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from c3ae.config import Config, RetrievalConfig
+from c3ae.embeddings.backends import HashEmbedder, create_embedder
 from c3ae.memory_spine.spine import MemorySpine
 from c3ae.retrieval.hybrid import HybridSearch
 from c3ae.types import SearchResult
@@ -84,6 +85,59 @@ def test_hybrid_decay_and_access_boost_are_applied():
     hybrid_b = HybridSearch(kw, vec, config=cfg, access_counts_getter=lambda ids: {"old": 10})
     results_b = hybrid_b.search("any query", query_vector=None, top_k=2)
     assert [r.id for r in results_b] == ["old", "fresh"]
+
+
+def test_hybrid_rrf_overlap_bonus_promotes_dual_source_hit():
+    def _r(rid: str) -> SearchResult:
+        return _mk_result(rid, score=0.1, hours_old=0.1)
+
+    kw_results = [_r(f"kw-{i:02d}") for i in range(40)] + [_r("both")]
+    vec_results = [_r("vec-top")] + [_r(f"vec-{i:02d}") for i in range(39)] + [_r("both")]
+
+    cfg_no_boost = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=False,
+        rrf_k=30,
+        rrf_overlap_boost=1.0,
+    )
+    h_no = HybridSearch(_KeywordStub(kw_results), _VectorStub(vec_results), config=cfg_no_boost)
+    out_no = h_no.search("generic query", query_vector=object(), top_k=3)
+    assert out_no[0].id != "both"
+
+    cfg_boost = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=False,
+        rrf_k=30,
+        rrf_overlap_boost=2.0,
+    )
+    h_yes = HybridSearch(_KeywordStub(kw_results), _VectorStub(vec_results), config=cfg_boost)
+    out_yes = h_yes.search("generic query", query_vector=object(), top_k=3)
+    assert out_yes[0].id == "both"
+
+
+def test_hash_embedder_is_deterministic_and_normalized():
+    async def _run() -> None:
+        emb = HashEmbedder(dims=64)
+        v1 = await emb.embed_single("alpha beta gamma")
+        v2 = await emb.embed_single("alpha beta gamma")
+        v3 = await emb.embed_single("delta epsilon zeta")
+        assert v1.shape == (64,)
+        assert abs(float((v1 * v1).sum()) - 1.0) < 1e-5
+        assert abs(float((v2 * v2).sum()) - 1.0) < 1e-5
+        assert (v1 == v2).all()
+        assert not (v1 == v3).all()
+
+        cfg = Config().venice.model_copy(update={"embedding_provider": "hash", "embedding_dims": 64})
+        backend = create_embedder(cfg)
+        arr = await backend.embed(["a b c", "d e f"])
+        assert arr.shape == (2, 64)
+        await backend.close()
+
+    asyncio.run(_run())
 
 
 def test_protocol_clients_and_cos_pruning(tmp_path):

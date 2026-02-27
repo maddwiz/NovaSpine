@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -109,6 +111,44 @@ class OllamaEmbedder:
             self._client = None
 
 
+class HashEmbedder:
+    """Deterministic local embedder using token hashing (no network/API keys)."""
+
+    _TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+    def __init__(self, dims: int = 384) -> None:
+        self.dims = max(32, int(dims))
+
+    def _encode(self, text: str) -> np.ndarray:
+        tokens = self._TOKEN_RE.findall((text or "").lower())
+        vec = np.zeros((self.dims,), dtype=np.float32)
+        if not tokens:
+            return vec
+
+        features = list(tokens)
+        features.extend(f"{tokens[i]}_{tokens[i+1]}" for i in range(len(tokens) - 1))
+        for feat in features:
+            digest = hashlib.blake2b(feat.encode("utf-8"), digest_size=8).digest()
+            idx = int.from_bytes(digest[:4], "little", signed=False) % self.dims
+            sign = 1.0 if (digest[4] & 1) == 0 else -1.0
+            vec[idx] += sign
+        norm = float(np.linalg.norm(vec))
+        if norm > 0.0:
+            vec /= norm
+        return vec
+
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dims), dtype=np.float32)
+        return np.stack([self._encode(t) for t in texts]).astype(np.float32, copy=False)
+
+    async def embed_single(self, text: str) -> np.ndarray:
+        return self._encode(text)
+
+    async def close(self) -> None:
+        return None
+
+
 def create_embedder(config: VeniceConfig | None = None) -> EmbeddingBackend:
     cfg = config or VeniceConfig()
     provider = (cfg.embedding_provider or "venice").strip().lower()
@@ -118,4 +158,6 @@ def create_embedder(config: VeniceConfig | None = None) -> EmbeddingBackend:
         return OpenAIEmbedder(dims=cfg.embedding_dims)
     if provider in {"ollama", "local"}:
         return OllamaEmbedder(dims=cfg.embedding_dims)
+    if provider in {"hash", "localhash"}:
+        return HashEmbedder(dims=cfg.embedding_dims)
     raise ValueError(f"Unsupported embedding provider: {cfg.embedding_provider}")

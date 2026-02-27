@@ -42,6 +42,11 @@ def _parse_args() -> argparse.Namespace:
         help="Ingest each corpus document as a single chunk (benchmark mode).",
     )
     p.add_argument(
+        "--embed-local",
+        action="store_true",
+        help="Use local hash embeddings and vector retrieval (no external API keys).",
+    )
+    p.add_argument(
         "--min-publish-rows",
         type=int,
         default=100,
@@ -59,6 +64,19 @@ def _parse_args() -> argparse.Namespace:
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     cfg = Config()
+    mode_notes: list[str] = []
+    if args.embed_local:
+        cfg.venice.embedding_provider = "hash"
+        cfg.venice.embedding_model = "local-hash-v1"
+        if cfg.venice.embedding_dims > 384:
+            cfg.venice.embedding_dims = 384
+            mode_notes.append("embed_local: reduced embedding_dims to 384 for local hash vectors")
+        # Hash embeddings are weaker semantically than model-based vectors:
+        # keep hybrid mostly lexical and use vectors as a secondary signal.
+        cfg.retrieval.adaptive_weights = False
+        cfg.retrieval.keyword_weight = 0.85
+        cfg.retrieval.vector_weight = 0.15
+        mode_notes.append("embed_local: retrieval profile set to keyword-heavy hybrid (0.85/0.15)")
     tmp_dir: str | None = None
     if args.data_dir:
         cfg.data_dir = Path(args.data_dir)
@@ -75,9 +93,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         corpus_docs = _build_corpus_docs(rows, _load_jsonl(Path(args.corpus)) if args.corpus else [])
         ingested_docs = 0
         ingested_chunks = 0
+        use_ingest_sync = bool(args.ingest_sync) and not bool(args.embed_local)
+        if args.embed_local and args.ingest_sync:
+            mode_notes.append("embed_local enabled: ignoring --ingest-sync to build vector index")
         for doc in corpus_docs:
             text = doc["text"]
-            if args.ingest_sync:
+            if use_ingest_sync:
                 chunk_ids = spine.ingest_text_sync(
                     text,
                     source_id=doc["source_id"],
@@ -153,8 +174,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "data_dir": str(cfg.data_dir),
             "ephemeral_data_dir": bool(tmp_dir),
             "skip_chunking": bool(args.skip_chunking),
+            "embed_local": bool(args.embed_local),
             "publishable": not warnings,
             "quality_warnings": warnings,
+            "mode_notes": mode_notes,
         }
         return result
     finally:

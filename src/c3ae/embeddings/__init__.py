@@ -2,6 +2,7 @@
 
 from c3ae.embeddings.backends import (
     EmbeddingBackend,
+    HashEmbedder,
     OllamaEmbedder,
     OpenAIEmbedder,
     create_embedder,
@@ -13,5 +14,6 @@ __all__ = [
     "VeniceEmbedder",
     "OpenAIEmbedder",
     "OllamaEmbedder",
+    "HashEmbedder",
     "create_embedder",
 ]

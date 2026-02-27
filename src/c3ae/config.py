@@ -80,6 +80,8 @@ class RetrievalConfig(BaseModel):
     access_boost_cap: float = 2.0
     evidence_importance_boost: float = 1.25
     graph_weight: float = 0.2
+    rrf_k: int = 30
+    rrf_overlap_boost: float = 1.25
 
 
 class COSConfig(BaseModel):
