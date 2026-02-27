@@ -21,6 +21,7 @@ class FAISSStore:
         self.ivf_threshold = ivf_threshold
         # rowid → external ID mapping
         self._id_map: list[str] = []
+        self._id_to_pos: dict[str, int] = {}
         self._index: faiss.Index = faiss.IndexFlatIP(dims)
         self._trained = True
         if self.faiss_dir:
@@ -38,6 +39,7 @@ class FAISSStore:
         idx = self._index.ntotal
         self._index.add(vec)
         self._id_map.append(external_id)
+        self._id_to_pos[external_id] = idx
         return idx
 
     def add_batch(self, vectors: np.ndarray, external_ids: list[str]) -> list[int]:
@@ -49,6 +51,8 @@ class FAISSStore:
         start_idx = self._index.ntotal
         self._index.add(vecs)
         self._id_map.extend(external_ids)
+        for offset, external_id in enumerate(external_ids):
+            self._id_to_pos[external_id] = start_idx + offset
         return list(range(start_idx, start_idx + len(external_ids)))
 
     def search(self, query_vector: np.ndarray, top_k: int = 20) -> list[tuple[str, float]]:
@@ -66,6 +70,26 @@ class FAISSStore:
             results.append((self._id_map[idx], float(score)))
         return results
 
+    def get_vector_by_external_id(self, external_id: str) -> np.ndarray | None:
+        """Return stored normalized vector for an external ID if present."""
+        idx = self._id_to_pos.get(external_id)
+        if idx is None:
+            return None
+        if idx < 0 or idx >= self._index.ntotal:
+            return None
+        try:
+            return self._index.reconstruct(int(idx)).astype(np.float32)
+        except Exception:
+            return None
+
+    def get_vectors_by_external_ids(self, external_ids: list[str]) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        for eid in external_ids:
+            vec = self.get_vector_by_external_id(eid)
+            if vec is not None:
+                out[eid] = vec
+        return out
+
     def remove(self, external_id: str) -> bool:
         """Remove by external ID. Rebuilds index (expensive)."""
         if external_id not in self._id_map:
@@ -76,6 +100,7 @@ class FAISSStore:
         if n <= 1:
             self._index = faiss.IndexFlatIP(self.dims)
             self._id_map = []
+            self._id_to_pos = {}
             return True
         all_vecs = np.zeros((n, self.dims), dtype=np.float32)
         for i in range(n):
@@ -84,6 +109,7 @@ class FAISSStore:
         keep_mask.pop(idx)
         keep_vecs = all_vecs[keep_mask]
         self._id_map.pop(idx)
+        self._id_to_pos = {eid: i for i, eid in enumerate(self._id_map)}
         self._index = faiss.IndexFlatIP(self.dims)
         if len(keep_vecs) > 0:
             self._index.add(keep_vecs)
@@ -125,3 +151,4 @@ class FAISSStore:
             self._index = faiss.read_index(str(index_path))
             with open(idmap_path) as f:
                 self._id_map = json.load(f)
+            self._id_to_pos = {eid: i for i, eid in enumerate(self._id_map)}

@@ -562,13 +562,13 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     @app.post("/api/v1/memory/consolidate")
     async def memory_consolidate(req: ConsolidateRequest, spine: MemorySpine = Depends(get_spine)):
         """Run episodic -> semantic consolidation."""
-        result = spine.consolidate(session_id=req.session_id, max_chunks=req.max_chunks)
+        result = await spine.consolidate_async(session_id=req.session_id, max_chunks=req.max_chunks)
         return result
 
     @app.post("/api/v1/memory/dream")
     async def memory_dream(spine: MemorySpine = Depends(get_spine)):
         """Run an offline-style dream consolidation pass."""
-        return spine.dream_consolidate()
+        return await spine.dream_consolidate_async()
 
     @app.post("/api/v1/memory/forget-preview")
     async def memory_forget_preview(

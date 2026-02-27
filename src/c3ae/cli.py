@@ -267,9 +267,11 @@ def graph_cmd(ctx: click.Context, entity: str, depth: int) -> None:
 def consolidate_cmd(ctx: click.Context, session_id: str | None, max_chunks: int) -> None:
     """Run episodic->semantic consolidation."""
     spine = _get_spine(ctx.obj.get("data_dir"))
-    result = spine.consolidate(session_id=session_id, max_chunks=max_chunks)
-    click.echo(result)
-    spine.sqlite.close()
+    try:
+        result = asyncio.run(spine.consolidate_async(session_id=session_id, max_chunks=max_chunks))
+        click.echo(result)
+    finally:
+        asyncio.run(spine.close())
 
 
 @main.command(name="dream")
@@ -277,9 +279,11 @@ def consolidate_cmd(ctx: click.Context, session_id: str | None, max_chunks: int)
 def dream_cmd(ctx: click.Context) -> None:
     """Run an offline-style dream consolidation pass."""
     spine = _get_spine(ctx.obj.get("data_dir"))
-    result = spine.dream_consolidate()
-    click.echo(result)
-    spine.sqlite.close()
+    try:
+        result = asyncio.run(spine.dream_consolidate_async())
+        click.echo(result)
+    finally:
+        asyncio.run(spine.close())
 
 
 if __name__ == "__main__":

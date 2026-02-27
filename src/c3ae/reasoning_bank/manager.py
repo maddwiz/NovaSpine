@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import json
+import math
 import os
+from pathlib import Path
 import re
 from typing import Any
 
@@ -36,6 +38,7 @@ class MemoryWriteManager:
         self.bank = bank
         self.config = config or MemoryManagerConfig()
         self._chat = None
+        self._learned_policy: dict[str, Any] | None = None
 
     def decide(self, entry: ReasoningEntry) -> WriteDecision:
         """Heuristic policy decision."""
@@ -52,6 +55,11 @@ class MemoryWriteManager:
             self._token_similarity(f"{entry.title} {entry.content}", best.content),
             self._token_similarity(entry.content, best.content),
         )
+
+        learned = self._decide_with_learned_policy(entry, best, similarity=similarity)
+        if learned is not None:
+            return learned
+
         if similarity >= float(self.config.similarity_noop_threshold):
             return WriteDecision(
                 action="NOOP",
@@ -223,6 +231,122 @@ class MemoryWriteManager:
             if inspect.isawaitable(maybe):
                 await maybe
         self._chat = None
+
+    def _decide_with_learned_policy(
+        self,
+        entry: ReasoningEntry,
+        best: SearchResult,
+        *,
+        similarity: float,
+    ) -> WriteDecision | None:
+        if not self.config.use_learned_policy:
+            return None
+        policy = self._get_learned_policy()
+        if not policy:
+            return None
+
+        actions = [str(a).upper() for a in policy.get("actions", []) if str(a).strip()]
+        features = [str(f) for f in policy.get("feature_order", []) if str(f).strip()]
+        weights = policy.get("weights", [])
+        bias = policy.get("bias", [])
+        if not actions or not features or not isinstance(weights, list):
+            return None
+        if len(weights) != len(actions):
+            return None
+
+        feature_values = self._feature_values(
+            entry=entry,
+            best=best,
+            similarity=similarity,
+        )
+        x = [float(feature_values.get(name, 0.0)) for name in features]
+        logits: list[float] = []
+        for i, action in enumerate(actions):
+            _ = action
+            row = weights[i] if i < len(weights) and isinstance(weights[i], list) else []
+            dot = 0.0
+            for j, xv in enumerate(x):
+                try:
+                    dot += float(row[j]) * xv
+                except Exception:
+                    continue
+            try:
+                dot += float(bias[i]) if i < len(bias) else 0.0
+            except Exception:
+                dot += 0.0
+            logits.append(dot)
+        if not logits:
+            return None
+        probs = self._softmax(logits)
+        best_idx = max(range(len(probs)), key=lambda i: probs[i])
+        confidence = float(probs[best_idx])
+        min_conf = max(0.1, float(self.config.learned_policy_min_confidence))
+        if confidence < min_conf:
+            return None
+
+        action = actions[best_idx]
+        if action not in {"ADD", "UPDATE", "DELETE", "NOOP"}:
+            return None
+        target_id = best.id if action in {"UPDATE", "DELETE", "NOOP"} else ""
+        return WriteDecision(
+            action=action,
+            target_id=target_id,
+            reason=f"learned_policy_conf={confidence:.3f}",
+        )
+
+    def _get_learned_policy(self) -> dict[str, Any] | None:
+        if self._learned_policy is not None:
+            return self._learned_policy
+        path = str(self.config.learned_policy_path or "").strip()
+        if not path:
+            self._learned_policy = {}
+            return None
+        p = Path(path)
+        if not p.exists():
+            self._learned_policy = {}
+            return None
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            self._learned_policy = {}
+            return None
+        if isinstance(obj, dict) and isinstance(obj.get("memory_manager"), dict):
+            obj = obj.get("memory_manager")
+        if not isinstance(obj, dict):
+            self._learned_policy = {}
+            return None
+        self._learned_policy = obj
+        return self._learned_policy
+
+    @staticmethod
+    def _feature_values(
+        entry: ReasoningEntry,
+        best: SearchResult,
+        *,
+        similarity: float,
+    ) -> dict[str, float]:
+        title_sim = MemoryWriteManager._token_similarity(entry.title, best.content)
+        content_sim = MemoryWriteManager._token_similarity(entry.content, best.content)
+        evidence_ratio = min(1.0, len(entry.evidence_ids) / 5.0)
+        len_norm = min(1.0, len(entry.content) / 1200.0)
+        negation = 1.0 if re.search(r"\b(no|not|never|false|wrong)\b", entry.content.lower()) else 0.0
+        return {
+            "similarity": float(similarity),
+            "title_similarity": float(title_sim),
+            "content_similarity": float(content_sim),
+            "evidence_ratio": float(evidence_ratio),
+            "length_norm": float(len_norm),
+            "negation": float(negation),
+        }
+
+    @staticmethod
+    def _softmax(logits: list[float]) -> list[float]:
+        if not logits:
+            return []
+        m = max(logits)
+        exps = [math.exp(x - m) for x in logits]
+        denom = sum(exps) or 1.0
+        return [x / denom for x in exps]
 
     @staticmethod
     def _parse_json_object(raw: str) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from c3ae.config import Config
 from c3ae.llm.venice_chat import ChatResponse
@@ -70,6 +71,66 @@ def test_llm_policy_noop_and_delete_actions(tmp_path):
             assert first_after is not None
             assert first_after.status.value == "retracted"
             assert replacement.status.value == "active"
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_learned_policy_file_routes_duplicate_to_noop(tmp_path):
+    async def _run() -> None:
+        policy_path = tmp_path / "policy.json"
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "memory_manager": {
+                        "actions": ["ADD", "UPDATE", "DELETE", "NOOP"],
+                        "feature_order": [
+                            "similarity",
+                            "title_similarity",
+                            "content_similarity",
+                            "evidence_ratio",
+                            "length_norm",
+                            "negation",
+                        ],
+                        "weights": [
+                            [-3.0, -2.0, -2.0, 0.0, 0.0, 0.0],  # ADD
+                            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],      # UPDATE
+                            [-1.0, -1.0, -1.0, 0.0, 0.0, 2.0],   # DELETE
+                            [4.0, 2.0, 3.0, 0.0, 0.0, 0.0],      # NOOP
+                        ],
+                        "bias": [0.0, 0.0, -0.5, 0.0],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = Config()
+        cfg.data_dir = tmp_path / "data"
+        cfg.memory_manager.use_learned_policy = True
+        cfg.memory_manager.learned_policy_path = str(policy_path)
+        cfg.memory_manager.learned_policy_min_confidence = 0.2
+        cfg.ensure_dirs()
+        spine = MemorySpine(cfg)
+        try:
+            ev = spine.add_evidence(
+                claim="User prefers concise updates.",
+                sources=["unit-test"],
+                confidence=0.9,
+                reasoning="seed",
+            )
+            first = await spine.add_knowledge(
+                title="Preference",
+                content="User prefers concise updates.",
+                evidence_ids=[ev.id],
+            )
+            second = await spine.add_knowledge(
+                title="Preference",
+                content="User prefers concise updates.",
+                evidence_ids=[ev.id],
+            )
+            assert second.id == first.id
         finally:
             await spine.close()
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import hashlib
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -14,9 +17,10 @@ from c3ae.cos.cos import COSManager
 from c3ae.embeddings.backends import create_embedder
 from c3ae.embeddings.cache import EmbeddingCache
 from c3ae.exceptions import GovernanceError
-from c3ae.graph.extractor import extract_graph_facts
+from c3ae.graph.extractor import ExtractedGraph, extract_graph_facts, extract_graph_facts_async
 from c3ae.governance.audit import AuditLog
 from c3ae.governance.guardian import Guardian
+from c3ae.llm import create_chat_backend
 from c3ae.reasoning_bank.bank import ReasoningBank
 from c3ae.reasoning_bank.evidence import EvidenceManager
 from c3ae.reasoning_bank.manager import MemoryWriteManager
@@ -83,6 +87,8 @@ class MemorySpine:
 
         # USC cognitive deduplication store (lazy init)
         self._cogstore = None
+        self._graph_chat = None
+        self._consolidation_chat = None
 
     # --- Ingest ---
 
@@ -94,7 +100,7 @@ class MemorySpine:
         for ct in chunks_text:
             chunk = Chunk(content=ct, source_id=source_id, metadata=metadata or {})
             self.sqlite.insert_chunk(chunk)
-            self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
+            await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
 
         # Embed and index
@@ -389,7 +395,7 @@ class MemorySpine:
             },
         )
         self.sqlite.insert_chunk(chunk)
-        self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
+        await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
         await self._embed_and_index([chunk.id], [combined])
 
         self.audit.log_write("reasoning_entry", entry.id, title)
@@ -734,7 +740,7 @@ class MemorySpine:
 
     # --- Consolidation & Forgetting ---
 
-    def consolidate(
+    async def consolidate_async(
         self,
         session_id: str | None = None,
         max_chunks: int = 1000,
@@ -743,29 +749,81 @@ class MemorySpine:
         if not self.config.consolidation.enabled:
             return {"enabled": False, "clusters_created": 0, "chunks_processed": 0}
 
-        lookback = utcnow() - timedelta(hours=max(1, int(self.config.consolidation.lookback_hours)))
-        chunks = self.sqlite.list_chunks(
-            limit=max_chunks,
-            older_than=iso_str(utcnow()),
+        recent_chunks = self._list_recent_chunks_for_consolidation(
             session_id=session_id,
+            max_chunks=max_chunks,
         )
-        recent_chunks = [c for c in chunks if c.created_at >= lookback]
         if not recent_chunks:
             return {"enabled": True, "clusters_created": 0, "chunks_processed": 0}
 
-        clusters: dict[str, list[Chunk]] = {}
-        for chunk in recent_chunks:
-            key = self._cluster_key(chunk.content, chunk.metadata)
-            clusters.setdefault(key, []).append(chunk)
-
-        created = 0
+        clusters = self._cluster_chunks_semantic(recent_chunks)
         min_size = max(1, int(self.config.consolidation.min_cluster_size))
         max_clusters = max(1, int(self.config.consolidation.max_clusters_per_run))
-        for cluster_key, cluster_chunks in list(clusters.items())[:max_clusters]:
+
+        created = 0
+        llm_used = 0
+        for cluster_chunks in clusters[:max_clusters]:
+            if len(cluster_chunks) < min_size:
+                continue
+            facts, used_llm_facts = await self._extract_cluster_facts_async(cluster_chunks)
+            summary, used_llm_summary = await self._summarize_cluster_async(cluster_chunks, facts=facts)
+            llm_used += int(used_llm_facts or used_llm_summary)
+            cluster_key = self._cluster_key(cluster_chunks, session_id=session_id)
+            source_chunk_ids = [c.id for c in cluster_chunks]
+            self.sqlite.upsert_consolidated_memory(
+                cluster_key=cluster_key,
+                summary=summary,
+                facts=facts,
+                source_chunk_ids=source_chunk_ids,
+                metadata={
+                    "session_id": session_id or "",
+                    "cluster_size": len(cluster_chunks),
+                    "llm_enriched": bool(used_llm_facts or used_llm_summary),
+                    "cluster_mode": "semantic",
+                },
+            )
+            created += 1
+
+        self.audit.log(
+            "consolidation",
+            "memory",
+            session_id or "global",
+            f"clusters={created}, chunks={len(recent_chunks)}, llm_clusters={llm_used}",
+        )
+        return {
+            "enabled": True,
+            "clusters_created": created,
+            "chunks_processed": len(recent_chunks),
+            "llm_enriched_clusters": llm_used,
+        }
+
+    def consolidate(
+        self,
+        session_id: str | None = None,
+        max_chunks: int = 1000,
+    ) -> dict[str, Any]:
+        """Synchronous consolidation path (semantic clustering + heuristic summaries)."""
+        if not self.config.consolidation.enabled:
+            return {"enabled": False, "clusters_created": 0, "chunks_processed": 0}
+
+        recent_chunks = self._list_recent_chunks_for_consolidation(
+            session_id=session_id,
+            max_chunks=max_chunks,
+        )
+        if not recent_chunks:
+            return {"enabled": True, "clusters_created": 0, "chunks_processed": 0}
+
+        clusters = self._cluster_chunks_semantic(recent_chunks)
+        min_size = max(1, int(self.config.consolidation.min_cluster_size))
+        max_clusters = max(1, int(self.config.consolidation.max_clusters_per_run))
+
+        created = 0
+        for cluster_chunks in clusters[:max_clusters]:
             if len(cluster_chunks) < min_size:
                 continue
             facts = self._extract_cluster_facts(cluster_chunks)
             summary = self._summarize_cluster(cluster_chunks, facts=facts)
+            cluster_key = self._cluster_key(cluster_chunks, session_id=session_id)
             self.sqlite.upsert_consolidated_memory(
                 cluster_key=cluster_key,
                 summary=summary,
@@ -774,6 +832,8 @@ class MemorySpine:
                 metadata={
                     "session_id": session_id or "",
                     "cluster_size": len(cluster_chunks),
+                    "llm_enriched": False,
+                    "cluster_mode": "semantic",
                 },
             )
             created += 1
@@ -788,6 +848,7 @@ class MemorySpine:
             "enabled": True,
             "clusters_created": created,
             "chunks_processed": len(recent_chunks),
+            "llm_enriched_clusters": 0,
         }
 
     def forget_stale(
@@ -821,14 +882,218 @@ class MemorySpine:
             "deleted": deleted,
         }
 
+    async def dream_consolidate_async(self) -> dict[str, Any]:
+        """Run an expanded offline-style dream pass for idle periods."""
+        consolidation = await self.consolidate_async()
+        forgetting = self.forget_stale(dry_run=True)
+        contradictions = self.sqlite.list_graph_contradictions(
+            lookback_hours=max(24, int(self.config.consolidation.lookback_hours)),
+            limit=30,
+        )
+        skill_candidates = self._propose_skill_candidates(limit=10)
+        recompression_preview = self._dream_recompression_preview(limit=200)
+        novelty = self._dream_novelty_estimate(limit=200)
+        report = {
+            "consolidation": consolidation,
+            "forgetting_preview": forgetting,
+            "contradictions": contradictions,
+            "skill_candidates": skill_candidates,
+            "recompression_preview": recompression_preview,
+            "novelty": novelty,
+        }
+        self.audit.log(
+            "dream_consolidation",
+            "memory",
+            "global",
+            (
+                "clusters="
+                f"{consolidation.get('clusters_created', 0)}, "
+                f"contradictions={len(contradictions)}, "
+                f"skills={len(skill_candidates)}"
+            ),
+        )
+        return report
+
     def dream_consolidate(self) -> dict[str, Any]:
-        """Run offline-style consolidation pass for idle periods."""
+        """Run an expanded dream pass; sync-safe wrapper for CLI/tests."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.dream_consolidate_async())
+
         consolidation = self.consolidate()
         forgetting = self.forget_stale(dry_run=True)
+        contradictions = self.sqlite.list_graph_contradictions(
+            lookback_hours=max(24, int(self.config.consolidation.lookback_hours)),
+            limit=30,
+        )
         return {
             "consolidation": consolidation,
             "forgetting_preview": forgetting,
+            "contradictions": contradictions,
+            "skill_candidates": self._propose_skill_candidates(limit=10),
+            "recompression_preview": self._dream_recompression_preview(limit=200),
+            "novelty": self._dream_novelty_estimate(limit=200),
         }
+
+    def _list_recent_chunks_for_consolidation(
+        self,
+        session_id: str | None,
+        max_chunks: int,
+    ) -> list[Chunk]:
+        lookback = utcnow() - timedelta(hours=max(1, int(self.config.consolidation.lookback_hours)))
+        chunks = self.sqlite.list_chunks(
+            limit=max_chunks,
+            older_than=iso_str(utcnow()),
+            session_id=session_id,
+        )
+        return [c for c in chunks if c.created_at >= lookback]
+
+    def _cluster_chunks_semantic(self, chunks: list[Chunk]) -> list[list[Chunk]]:
+        if not chunks:
+            return []
+        if len(chunks) == 1:
+            return [[chunks[0]]]
+
+        class _UnionFind:
+            def __init__(self, n: int) -> None:
+                self.parent = list(range(n))
+                self.rank = [0] * n
+
+            def find(self, x: int) -> int:
+                while self.parent[x] != x:
+                    self.parent[x] = self.parent[self.parent[x]]
+                    x = self.parent[x]
+                return x
+
+            def union(self, a: int, b: int) -> None:
+                ra = self.find(a)
+                rb = self.find(b)
+                if ra == rb:
+                    return
+                if self.rank[ra] < self.rank[rb]:
+                    self.parent[ra] = rb
+                elif self.rank[ra] > self.rank[rb]:
+                    self.parent[rb] = ra
+                else:
+                    self.parent[rb] = ra
+                    self.rank[ra] += 1
+
+        n = len(chunks)
+        uf = _UnionFind(n)
+        chunk_ids = [c.id for c in chunks]
+
+        # Pass 1: exact/near-exact lexical signatures.
+        sig_to_idx: dict[str, list[int]] = {}
+        token_sets: list[set[str]] = []
+        for i, c in enumerate(chunks):
+            tokens = self._token_set(c.content)
+            token_sets.append(tokens)
+            if tokens:
+                sig_base = " ".join(sorted(tokens)[:80])
+            else:
+                sig_base = c.content.strip().lower()[:200]
+            sig = hashlib.sha1(sig_base.encode("utf-8", errors="ignore")).hexdigest()[:20]
+            sig_to_idx.setdefault(sig, []).append(i)
+        for idxs in sig_to_idx.values():
+            if len(idxs) < 2:
+                continue
+            base = idxs[0]
+            for j in idxs[1:]:
+                uf.union(base, j)
+
+        # Pass 2: vector similarity from existing FAISS vectors.
+        vector_map = self.faiss.get_vectors_by_external_ids(chunk_ids)
+        vec_pairs: list[tuple[int, np.ndarray]] = []
+        for i, cid in enumerate(chunk_ids):
+            vec = vector_map.get(cid)
+            if vec is None:
+                continue
+            vec_pairs.append((i, vec))
+        if len(vec_pairs) >= 2:
+            indices = [x[0] for x in vec_pairs]
+            matrix = np.vstack([x[1] for x in vec_pairs]).astype(np.float32)
+            matrix = np.ascontiguousarray(matrix)
+            sims = matrix @ matrix.T
+            sim_thr = float(self.config.consolidation.vector_similarity_threshold)
+            for i in range(len(indices)):
+                for j in range(i + 1, len(indices)):
+                    if float(sims[i, j]) >= sim_thr:
+                        uf.union(indices[i], indices[j])
+
+        # Pass 3: graph entity overlap signal.
+        entity_map = self.sqlite.get_entities_for_chunk_ids(chunk_ids)
+        pair_overlap: dict[tuple[int, int], int] = {}
+        entity_to_idx: dict[str, list[int]] = {}
+        for i, cid in enumerate(chunk_ids):
+            entities = entity_map.get(cid, set())
+            for name in entities:
+                entity_to_idx.setdefault(name, []).append(i)
+        for idxs in entity_to_idx.values():
+            if len(idxs) < 2:
+                continue
+            for a_pos in range(len(idxs)):
+                for b_pos in range(a_pos + 1, len(idxs)):
+                    a, b = idxs[a_pos], idxs[b_pos]
+                    key = (a, b) if a < b else (b, a)
+                    pair_overlap[key] = pair_overlap.get(key, 0) + 1
+
+        entity_thr = float(self.config.consolidation.entity_overlap_threshold)
+        if pair_overlap and entity_thr > 0.0:
+            for (a, b), inter_count in pair_overlap.items():
+                ea = entity_map.get(chunk_ids[a], set())
+                eb = entity_map.get(chunk_ids[b], set())
+                if not ea and not eb:
+                    continue
+                union_n = len(ea | eb)
+                if union_n == 0:
+                    continue
+                jaccard = inter_count / union_n
+                if jaccard >= entity_thr:
+                    uf.union(a, b)
+
+        # Pass 4: lexical overlap for chunks without vectors/entities.
+        lexical_thr = float(self.config.consolidation.lexical_overlap_threshold)
+        token_to_idx: dict[str, list[int]] = {}
+        for i, tokens in enumerate(token_sets):
+            for tok in list(tokens)[:24]:
+                token_to_idx.setdefault(tok, []).append(i)
+        lexical_pairs: dict[tuple[int, int], int] = {}
+        for idxs in token_to_idx.values():
+            if len(idxs) < 2:
+                continue
+            for a_pos in range(len(idxs)):
+                for b_pos in range(a_pos + 1, len(idxs)):
+                    a, b = idxs[a_pos], idxs[b_pos]
+                    key = (a, b) if a < b else (b, a)
+                    lexical_pairs[key] = lexical_pairs.get(key, 0) + 1
+        if lexical_pairs and lexical_thr > 0.0:
+            for (a, b), inter_count in lexical_pairs.items():
+                ta = token_sets[a]
+                tb = token_sets[b]
+                if not ta and not tb:
+                    continue
+                union_n = len(ta | tb)
+                if union_n == 0:
+                    continue
+                jaccard = inter_count / union_n
+                if jaccard >= lexical_thr:
+                    uf.union(a, b)
+
+        groups: dict[int, list[Chunk]] = {}
+        for i, chunk in enumerate(chunks):
+            root = uf.find(i)
+            groups.setdefault(root, []).append(chunk)
+
+        ordered = list(groups.values())
+        ordered.sort(
+            key=lambda g: (
+                len(g),
+                max(c.created_at for c in g),
+            ),
+            reverse=True,
+        )
+        return ordered
 
     # --- Status ---
 
@@ -948,6 +1213,7 @@ class MemorySpine:
         text: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """Synchronous graph indexing path (heuristic extraction only)."""
         if not self.config.graph.enabled:
             return
         try:
@@ -956,44 +1222,245 @@ class MemorySpine:
                 max_entities=self.config.graph.max_entities_per_chunk,
                 max_relations=self.config.graph.max_relations_per_chunk,
             )
-            entity_ids: dict[str, str] = {}
-            for name in extracted.entities:
-                eid = self.sqlite.upsert_entity(name, metadata={"source_chunk_id": chunk_id})
-                self.sqlite.add_entity_mention(eid, chunk_id, confidence=0.4)
-                entity_ids[name] = eid
-            for src_name, relation, dst_name in extracted.relations:
-                src_id = entity_ids.get(src_name) or self.sqlite.upsert_entity(src_name)
-                dst_id = entity_ids.get(dst_name) or self.sqlite.upsert_entity(dst_name)
-                invalidate = relation in {"is", "prefers", "owns"}
-                self.sqlite.add_edge(
-                    src_id,
-                    relation=relation,
-                    dst_entity_id=dst_id,
-                    source_chunk_id=chunk_id,
-                    confidence=0.5,
-                    metadata={"source": metadata or {}},
-                    invalidate_existing_relation=invalidate,
-                )
+            self._apply_graph_extraction(
+                chunk_id=chunk_id,
+                extracted=extracted,
+                metadata=metadata,
+            )
         except Exception:
             # Graph indexing must never block memory ingest.
             return
 
-    def _cluster_key(self, text: str, metadata: dict[str, Any] | None = None) -> str:
-        norm = " ".join(tok for tok in text.lower().split() if tok[:1].isalnum())
-        sig = hashlib.sha1(norm[:512].encode("utf-8", errors="ignore")).hexdigest()[:16]
-        session_id = str((metadata or {}).get("session_id", "global"))
-        return f"{session_id}:{sig}"
+    async def _index_graph_chunk_async(
+        self,
+        chunk_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.config.graph.enabled:
+            return
+        try:
+            chat_backend = None
+            if (self.config.graph.extraction_mode or "").strip().lower() == "llm":
+                chat_backend = self._get_graph_chat_backend()
+            extracted = await extract_graph_facts_async(
+                text,
+                extraction_mode=self.config.graph.extraction_mode,
+                chat_backend=chat_backend,
+                max_entities=self.config.graph.max_entities_per_chunk,
+                max_relations=self.config.graph.max_relations_per_chunk,
+                temperature=float(self.config.graph.llm_temperature),
+                max_tokens=int(self.config.graph.llm_max_tokens),
+            )
+            self._apply_graph_extraction(
+                chunk_id=chunk_id,
+                extracted=extracted,
+                metadata=metadata,
+            )
+        except Exception:
+            return
+
+    def _apply_graph_extraction(
+        self,
+        *,
+        chunk_id: str,
+        extracted: ExtractedGraph,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        entity_ids: dict[str, str] = {}
+        for name in extracted.entities:
+            eid = self.sqlite.upsert_entity(name, metadata={"source_chunk_id": chunk_id})
+            base_conf = extracted.entity_confidence.get(name, float(self.config.graph.mention_base_confidence))
+            mention_conf = self._calibrate_graph_confidence(
+                base=base_conf,
+                metadata=metadata,
+                kind="mention",
+            )
+            self.sqlite.add_entity_mention(eid, chunk_id, confidence=mention_conf)
+            entity_ids[name] = eid
+        for src_name, relation, dst_name in extracted.relations:
+            src_id = entity_ids.get(src_name) or self.sqlite.upsert_entity(src_name)
+            dst_id = entity_ids.get(dst_name) or self.sqlite.upsert_entity(dst_name)
+            invalidate = relation in {"is", "prefers", "owns"}
+            rel_key = (src_name, relation, dst_name)
+            base_edge_conf = extracted.relation_confidence.get(
+                rel_key,
+                float(self.config.graph.edge_base_confidence),
+            )
+            edge_conf = self._calibrate_graph_confidence(
+                base=base_edge_conf,
+                metadata=metadata,
+                kind="edge",
+            )
+            self.sqlite.add_edge(
+                src_id,
+                relation=relation,
+                dst_entity_id=dst_id,
+                source_chunk_id=chunk_id,
+                confidence=edge_conf,
+                metadata={
+                    "source": metadata or {},
+                    "extract_mode": extracted.mode,
+                },
+                invalidate_existing_relation=invalidate,
+            )
+
+    def _calibrate_graph_confidence(
+        self,
+        *,
+        base: float,
+        metadata: dict[str, Any] | None,
+        kind: str,
+    ) -> float:
+        score = float(base)
+        meta = metadata or {}
+        kind_l = kind.lower()
+
+        entry_type = str(meta.get("type", "")).lower()
+        if entry_type == "reasoning_entry":
+            score += float(self.config.graph.reasoning_confidence_boost)
+        if "evidence" in entry_type:
+            score += float(self.config.graph.evidence_confidence_boost)
+        if meta.get("reasoning_entry_id"):
+            score += float(self.config.graph.reasoning_confidence_boost) * 0.5
+        if meta.get("session_id"):
+            score += 0.02
+        if kind_l == "mention":
+            score *= 0.95
+        elif kind_l == "edge":
+            score *= 1.0
+
+        min_conf = max(0.05, float(self.config.graph.min_confidence))
+        return max(min_conf, min(0.99, score))
+
+    def _get_graph_chat_backend(self):
+        if self._graph_chat is not None:
+            return self._graph_chat
+        provider = (self.config.graph.llm_provider or "venice").strip().lower()
+        kwargs: dict[str, Any] = {
+            "temperature": float(self.config.graph.llm_temperature),
+            "max_tokens": int(self.config.graph.llm_max_tokens),
+        }
+        if self.config.graph.llm_model:
+            kwargs["model"] = self.config.graph.llm_model
+        if provider in {"venice", "default"}:
+            kwargs.setdefault("api_key", self.config.venice.api_key)
+            kwargs.setdefault("base_url", self.config.venice.base_url)
+            kwargs.setdefault("timeout", self.config.venice.chat_timeout)
+        elif provider == "openai":
+            import os
+
+            kwargs.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
+        elif provider == "anthropic":
+            import os
+
+            kwargs.setdefault("api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
+        self._graph_chat = create_chat_backend(provider=provider, **kwargs)
+        return self._graph_chat
+
+    def _get_consolidation_chat_backend(self):
+        if self._consolidation_chat is not None:
+            return self._consolidation_chat
+        provider = (self.config.consolidation.llm_provider or "venice").strip().lower()
+        kwargs: dict[str, Any] = {
+            "temperature": float(self.config.consolidation.llm_temperature),
+            "max_tokens": int(self.config.consolidation.llm_max_tokens),
+        }
+        if self.config.consolidation.llm_model:
+            kwargs["model"] = self.config.consolidation.llm_model
+        if provider in {"venice", "default"}:
+            kwargs.setdefault("api_key", self.config.venice.api_key)
+            kwargs.setdefault("base_url", self.config.venice.base_url)
+            kwargs.setdefault("timeout", self.config.venice.chat_timeout)
+        elif provider == "openai":
+            import os
+
+            kwargs.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
+        elif provider == "anthropic":
+            import os
+
+            kwargs.setdefault("api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
+        self._consolidation_chat = create_chat_backend(provider=provider, **kwargs)
+        return self._consolidation_chat
+
+    def _cluster_key(self, chunks: list[Chunk], session_id: str | None = None) -> str:
+        sid = str(session_id or "global")
+        ids = sorted(c.id for c in chunks)
+        sig = hashlib.sha1("|".join(ids).encode("utf-8", errors="ignore")).hexdigest()[:20]
+        return f"{sid}:{sig}"
 
     def _extract_cluster_facts(self, chunks: list[Chunk]) -> list[str]:
-        facts: list[str] = []
+        scored: list[tuple[float, str]] = []
+        seen: set[str] = set()
         for chunk in chunks:
-            sentences = [s.strip() for s in chunk.content.replace("\n", " ").split(".") if s.strip()]
-            for sentence in sentences[:2]:
-                if sentence not in facts:
-                    facts.append(sentence)
-                if len(facts) >= 12:
-                    return facts
+            sentences = re.split(r"(?<=[\.\!\?])\s+", chunk.content.replace("\n", " "))
+            for sentence in sentences:
+                s = sentence.strip().strip(".")
+                if len(s) < 24:
+                    continue
+                norm = s.lower()
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                score = 0.0
+                if re.search(r"\b\d+(\.\d+)?(%|x|ms|s|m|h|d)?\b", s):
+                    score += 1.2
+                if re.search(r"\b(is|are|was|were|has|have|uses|depends|causes|prefers|owns)\b", norm):
+                    score += 1.0
+                if re.search(r"\b(should|must|always|never|before|after)\b", norm):
+                    score += 0.7
+                score += min(len(s) / 240.0, 0.6)
+                scored.append((score, s))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        facts: list[str] = []
+        for _, sentence in scored:
+            facts.append(sentence)
+            if len(facts) >= 12:
+                break
         return facts
+
+    async def _extract_cluster_facts_async(self, chunks: list[Chunk]) -> tuple[list[str], bool]:
+        heuristic = self._extract_cluster_facts(chunks)
+        if not self.config.consolidation.use_llm_enrichment:
+            return heuristic, False
+        try:
+            chat = self._get_consolidation_chat_backend()
+            merged = "\n\n".join(c.content.strip() for c in chunks[:10])
+            payload = (
+                "Extract key stable facts from these episodic memory chunks.\n"
+                "Return strict JSON with key 'facts' as a list of concise factual statements.\n"
+                "Do not include speculation.\n"
+                f"Chunks:\n{merged[:8000]}"
+            )
+            from c3ae.llm.venice_chat import Message
+
+            resp = await chat.chat(
+                [
+                    Message(role="system", content="You extract concise factual memory notes."),
+                    Message(role="user", content=payload),
+                ],
+                temperature=float(self.config.consolidation.llm_temperature),
+                max_tokens=int(self.config.consolidation.llm_max_tokens),
+                json_mode=True,
+            )
+            data = self._parse_json_object(resp.content)
+            rows = data.get("facts", [])
+            out: list[str] = []
+            if isinstance(rows, list):
+                for row in rows:
+                    fact = str(row).strip().strip(".")
+                    if len(fact) < 20:
+                        continue
+                    if fact not in out:
+                        out.append(fact)
+                    if len(out) >= 12:
+                        break
+            if out:
+                return out, True
+        except Exception:
+            pass
+        return heuristic, False
 
     def _summarize_cluster(self, chunks: list[Chunk], facts: list[str]) -> str:
         if not chunks:
@@ -1001,9 +1468,163 @@ class MemorySpine:
         head = chunks[0].content.strip().replace("\n", " ")
         if len(head) > 180:
             head = head[:177] + "..."
+        entities = self.sqlite.get_entities_for_chunk_ids([c.id for c in chunks])
+        flat_entities: dict[str, int] = {}
+        for names in entities.values():
+            for n in names:
+                flat_entities[n] = flat_entities.get(n, 0) + 1
+        top_entities = [k for k, _ in sorted(flat_entities.items(), key=lambda x: x[1], reverse=True)[:3]]
         if facts:
-            return f"{head} (consolidated from {len(chunks)} episodes; {len(facts)} key facts)"
-        return f"{head} (consolidated from {len(chunks)} episodes)"
+            if top_entities:
+                return (
+                    f"{head} (consolidated {len(chunks)} episodes; "
+                    f"{len(facts)} key facts; entities: {', '.join(top_entities)})"
+                )
+            return f"{head} (consolidated {len(chunks)} episodes; {len(facts)} key facts)"
+        return f"{head} (consolidated {len(chunks)} episodes)"
+
+    async def _summarize_cluster_async(self, chunks: list[Chunk], facts: list[str]) -> tuple[str, bool]:
+        heuristic = self._summarize_cluster(chunks, facts)
+        if not self.config.consolidation.use_llm_enrichment:
+            return heuristic, False
+        try:
+            chat = self._get_consolidation_chat_backend()
+            payload = {
+                "facts": facts[:12],
+                "chunk_count": len(chunks),
+                "sample_chunks": [c.content[:260] for c in chunks[:5]],
+            }
+            from c3ae.llm.venice_chat import Message
+
+            resp = await chat.chat(
+                [
+                    Message(
+                        role="system",
+                        content="You produce one concise semantic memory summary from clustered episodes.",
+                    ),
+                    Message(
+                        role="user",
+                        content=(
+                            "Return strict JSON: {\"summary\":\"...\"}\n"
+                            f"Input: {payload}"
+                        ),
+                    ),
+                ],
+                temperature=float(self.config.consolidation.llm_temperature),
+                max_tokens=int(self.config.consolidation.llm_max_tokens),
+                json_mode=True,
+            )
+            data = self._parse_json_object(resp.content)
+            summary = str(data.get("summary", "")).strip()
+            if summary:
+                return summary, True
+        except Exception:
+            pass
+        return heuristic, False
+
+    @staticmethod
+    def _token_set(text: str) -> set[str]:
+        tokens = re.findall(r"[a-z0-9_\-]{3,}", text.lower())
+        return {t for t in tokens if not t.isdigit()}
+
+    def _propose_skill_candidates(self, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.sqlite.list_consolidated_memories(limit=200)
+        verbs = {
+            "run", "check", "verify", "build", "deploy", "monitor", "test",
+            "summarize", "analyze", "track", "compare", "audit",
+        }
+        min_cluster = max(2, int(self.config.consolidation.skill_promotion_min_cluster_size))
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = row.get("metadata", {})
+            cluster_size = int(metadata.get("cluster_size", 0))
+            if cluster_size < min_cluster:
+                continue
+            facts = [str(x).strip() for x in row.get("facts", []) if str(x).strip()]
+            text = f"{row.get('summary', '')} {' '.join(facts)}".lower()
+            present_verbs = sorted(v for v in verbs if re.search(rf"\b{re.escape(v)}\b", text))
+            if not present_verbs:
+                continue
+            keywords = [t for t in sorted(self._token_set(text)) if len(t) >= 4][:3]
+            if not keywords:
+                keywords = ["workflow"]
+            name = " ".join(k.title() for k in keywords)
+            procedure_lines = facts[:5] if facts else [str(row.get("summary", "")).strip()]
+            procedure = "\n".join(f"- {line}" for line in procedure_lines if line)
+            score = min(0.99, 0.18 * cluster_size + 0.06 * len(present_verbs) + 0.03 * len(facts))
+            candidates.append(
+                {
+                    "name": name,
+                    "score": round(score, 4),
+                    "cluster_key": row.get("cluster_key", ""),
+                    "verbs": present_verbs,
+                    "procedure": procedure,
+                }
+            )
+        candidates.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        return candidates[:limit]
+
+    def _dream_recompression_preview(self, limit: int = 200) -> dict[str, Any]:
+        rows = self.sqlite.list_consolidated_memories(limit=limit)
+        if not rows:
+            return {"eligible_memories": 0, "compression_ratio": 0.0}
+        payload = [
+            {
+                "id": r.get("id", ""),
+                "summary": r.get("summary", ""),
+                "facts": r.get("facts", []),
+                "source_chunk_ids": r.get("source_chunk_ids", []),
+            }
+            for r in rows
+        ]
+        try:
+            _, stats = self.compress_memories(payload)
+            return {
+                "eligible_memories": len(rows),
+                "compression_ratio": round(float(stats.get("ratio", 0.0)), 4),
+                "original_size": int(stats.get("original_size", 0)),
+                "compressed_size": int(stats.get("compressed_size", 0)),
+            }
+        except Exception:
+            return {"eligible_memories": len(rows), "compression_ratio": 0.0}
+
+    def _dream_novelty_estimate(self, limit: int = 200) -> dict[str, Any]:
+        rows = self.sqlite.list_consolidated_memories(limit=limit)
+        total_refs = 0
+        unique_refs: set[str] = set()
+        for row in rows:
+            ids = [str(x) for x in row.get("source_chunk_ids", []) if str(x)]
+            total_refs += len(ids)
+            unique_refs.update(ids)
+        if total_refs == 0:
+            return {"novelty_ratio": 0.0, "unique_source_chunks": 0, "total_references": 0}
+        ratio = len(unique_refs) / total_refs
+        return {
+            "novelty_ratio": round(ratio, 4),
+            "unique_source_chunks": len(unique_refs),
+            "total_references": total_refs,
+        }
+
+    @staticmethod
+    def _parse_json_object(raw: str) -> dict[str, Any]:
+        text = (raw or "").strip()
+        if not text:
+            return {}
+        if "```json" in text:
+            m = re.search(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+            if m:
+                text = m.group(1).strip()
+        elif text.startswith("```"):
+            m = re.search(r"```\s*(.*?)\s*```", text, flags=re.DOTALL)
+            if m:
+                text = m.group(1).strip()
+        try:
+            import json
+
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
     # --- Internals ---
 
@@ -1041,6 +1662,17 @@ class MemorySpine:
 
     async def close(self) -> None:
         await self.write_manager.close()
+        for chat_obj in (self._graph_chat, self._consolidation_chat):
+            if chat_obj is None:
+                continue
+            close_fn = getattr(chat_obj, "close", None)
+            if close_fn is None:
+                continue
+            maybe = close_fn()
+            if inspect.isawaitable(maybe):
+                await maybe
+        self._graph_chat = None
+        self._consolidation_chat = None
         await self.embedder.close()
         self.sqlite.close()
         if self.config.faiss_dir:

@@ -44,6 +44,14 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = raw.strip()
+    return val if val else default
+
+
 class VeniceConfig(BaseModel):
     embedding_provider: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBED_PROVIDER", "venice"))
     api_key: str = Field(default_factory=lambda: os.environ.get("VENICE_API_KEY", ""))
@@ -84,6 +92,23 @@ class GraphConfig(BaseModel):
     extraction_mode: str = "heuristic"  # heuristic | llm
     max_entities_per_chunk: int = 16
     max_relations_per_chunk: int = 8
+    llm_provider: str = Field(default_factory=lambda: _env_str("C3AE_GRAPH_LLM_PROVIDER", "venice"))
+    llm_model: str = Field(default_factory=lambda: _env_str("C3AE_GRAPH_LLM_MODEL", ""))
+    llm_temperature: float = Field(default_factory=lambda: _env_float("C3AE_GRAPH_LLM_TEMPERATURE", 0.0))
+    llm_max_tokens: int = Field(default_factory=lambda: _env_int("C3AE_GRAPH_LLM_MAX_TOKENS", 800))
+    min_confidence: float = Field(default_factory=lambda: _env_float("C3AE_GRAPH_MIN_CONFIDENCE", 0.2))
+    mention_base_confidence: float = Field(
+        default_factory=lambda: _env_float("C3AE_GRAPH_MENTION_CONFIDENCE", 0.4)
+    )
+    edge_base_confidence: float = Field(
+        default_factory=lambda: _env_float("C3AE_GRAPH_EDGE_CONFIDENCE", 0.5)
+    )
+    reasoning_confidence_boost: float = Field(
+        default_factory=lambda: _env_float("C3AE_GRAPH_REASONING_BOOST", 0.15)
+    )
+    evidence_confidence_boost: float = Field(
+        default_factory=lambda: _env_float("C3AE_GRAPH_EVIDENCE_BOOST", 0.10)
+    )
 
 
 class ConsolidationConfig(BaseModel):
@@ -91,12 +116,44 @@ class ConsolidationConfig(BaseModel):
     min_cluster_size: int = 2
     max_clusters_per_run: int = 100
     lookback_hours: int = 24 * 30
+    vector_similarity_threshold: float = Field(
+        default_factory=lambda: _env_float("C3AE_CONSOLIDATION_VECTOR_THRESHOLD", 0.84)
+    )
+    entity_overlap_threshold: float = Field(
+        default_factory=lambda: _env_float("C3AE_CONSOLIDATION_ENTITY_THRESHOLD", 0.50)
+    )
+    lexical_overlap_threshold: float = Field(
+        default_factory=lambda: _env_float("C3AE_CONSOLIDATION_LEXICAL_THRESHOLD", 0.35)
+    )
+    use_llm_enrichment: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_CONSOLIDATION_USE_LLM", False)
+    )
+    llm_provider: str = Field(default_factory=lambda: _env_str("C3AE_CONSOLIDATION_LLM_PROVIDER", "venice"))
+    llm_model: str = Field(default_factory=lambda: _env_str("C3AE_CONSOLIDATION_LLM_MODEL", ""))
+    llm_temperature: float = Field(
+        default_factory=lambda: _env_float("C3AE_CONSOLIDATION_LLM_TEMPERATURE", 0.0)
+    )
+    llm_max_tokens: int = Field(
+        default_factory=lambda: _env_int("C3AE_CONSOLIDATION_LLM_MAX_TOKENS", 900)
+    )
+    skill_promotion_min_cluster_size: int = Field(
+        default_factory=lambda: _env_int("C3AE_DREAM_SKILL_MIN_CLUSTER", 3)
+    )
 
 
 class MemoryManagerConfig(BaseModel):
     enabled: bool = Field(default_factory=lambda: _env_bool("C3AE_MEMORY_MANAGER_ENABLED", True))
     use_llm_policy: bool = Field(
         default_factory=lambda: _env_bool("C3AE_MEMORY_MANAGER_USE_LLM_POLICY", False)
+    )
+    use_learned_policy: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_MEMORY_MANAGER_USE_LEARNED_POLICY", False)
+    )
+    learned_policy_path: str = Field(
+        default_factory=lambda: os.environ.get("C3AE_MEMORY_MANAGER_POLICY_PATH", "")
+    )
+    learned_policy_min_confidence: float = Field(
+        default_factory=lambda: _env_float("C3AE_MEMORY_MANAGER_POLICY_MIN_CONFIDENCE", 0.45)
     )
     similarity_noop_threshold: float = Field(
         default_factory=lambda: _env_float("C3AE_MEMORY_MANAGER_NOOP_THRESHOLD", 0.92)

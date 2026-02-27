@@ -36,6 +36,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ingest benchmark corpus via keyword-only sync path (no embedding API required)",
     )
+    p.add_argument(
+        "--min-publish-rows",
+        type=int,
+        default=100,
+        help="Minimum eval rows before results are considered publishable",
+    )
+    p.add_argument(
+        "--min-publish-docs",
+        type=int,
+        default=500,
+        help="Minimum ingested docs before results are considered publishable",
+    )
     p.add_argument("--out", default="", help="Optional output JSON path")
     return p.parse_args()
 
@@ -108,6 +120,20 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 mrr_total += 1.0 / rank_hit
 
         n = max(1, query_rows)
+        warnings: list[str] = []
+        if query_rows < int(args.min_publish_rows):
+            warnings.append(
+                f"eval rows ({query_rows}) below publish threshold ({int(args.min_publish_rows)})"
+            )
+        if ingested_docs < int(args.min_publish_docs):
+            warnings.append(
+                f"ingested docs ({ingested_docs}) below publish threshold ({int(args.min_publish_docs)})"
+            )
+        dataset_l = str(args.dataset).lower()
+        corpus_l = str(args.corpus).lower()
+        if "bench/fixtures" in dataset_l or "bench/fixtures" in corpus_l:
+            warnings.append("fixture dataset detected; use official converted corpora for publishable claims")
+
         result = {
             "benchmark": args.name,
             "dataset": str(args.dataset),
@@ -119,6 +145,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "ingested_chunks": ingested_chunks,
             "data_dir": str(cfg.data_dir),
             "ephemeral_data_dir": bool(tmp_dir),
+            "publishable": not warnings,
+            "quality_warnings": warnings,
         }
         return result
     finally:

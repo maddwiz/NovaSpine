@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import re
 import sqlite3
 from pathlib import Path
@@ -847,6 +848,26 @@ class SQLiteStore:
         self._commit()
         return mention_id
 
+    def get_entities_for_chunk_ids(self, chunk_ids: list[str]) -> dict[str, set[str]]:
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" for _ in chunk_ids)
+        rows = self._conn.execute(
+            f"""SELECT m.chunk_id, e.name
+                FROM entity_mentions m
+                JOIN entities e ON e.id = m.entity_id
+                WHERE m.chunk_id IN ({placeholders})""",
+            tuple(chunk_ids),
+        ).fetchall()
+        out: dict[str, set[str]] = {cid: set() for cid in chunk_ids}
+        for row in rows:
+            cid = str(row["chunk_id"])
+            name = str(row["name"]).strip().lower()
+            if not name:
+                continue
+            out.setdefault(cid, set()).add(name)
+        return out
+
     def add_edge(
         self,
         src_entity_id: str,
@@ -996,6 +1017,65 @@ class SQLiteStore:
         else:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM edges").fetchone()
         return int(row["n"]) if row else 0
+
+    def list_graph_contradictions(
+        self,
+        lookback_hours: int = 24 * 30,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        since = iso_str(utcnow() - timedelta(hours=max(1, int(lookback_hours))))
+        rows = self._conn.execute(
+            """SELECT e.src_entity_id, s.name AS src_name, e.relation,
+                      COUNT(DISTINCT e.dst_entity_id) AS dst_count,
+                      MAX(e.created_at) AS last_seen
+               FROM edges e
+               JOIN entities s ON s.id = e.src_entity_id
+               WHERE e.created_at >= ?
+               GROUP BY e.src_entity_id, e.relation
+               HAVING COUNT(DISTINCT e.dst_entity_id) > 1
+               ORDER BY last_seen DESC
+               LIMIT ?""",
+            (since, limit),
+        ).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            src_id = str(row["src_entity_id"])
+            relation = str(row["relation"])
+            evid_rows = self._conn.execute(
+                """SELECT e.dst_entity_id, d.name AS dst_name, e.status, e.confidence,
+                          e.valid_from, e.valid_to, e.source_chunk_id, e.created_at
+                   FROM edges e
+                   JOIN entities d ON d.id = e.dst_entity_id
+                   WHERE e.src_entity_id=? AND e.relation=?
+                   ORDER BY e.created_at DESC
+                   LIMIT 8""",
+                (src_id, relation),
+            ).fetchall()
+            evidence = [
+                {
+                    "dst_entity_id": str(e["dst_entity_id"]),
+                    "dst_name": str(e["dst_name"]),
+                    "status": str(e["status"]),
+                    "confidence": float(e["confidence"]),
+                    "valid_from": str(e["valid_from"]),
+                    "valid_to": e["valid_to"],
+                    "source_chunk_id": str(e["source_chunk_id"]),
+                    "created_at": str(e["created_at"]),
+                }
+                for e in evid_rows
+            ]
+            out.append(
+                {
+                    "src_entity_id": src_id,
+                    "src_name": str(row["src_name"]),
+                    "relation": relation,
+                    "dst_count": int(row["dst_count"]),
+                    "last_seen": str(row["last_seen"]),
+                    "evidence": evidence,
+                }
+            )
+        return out
 
     # --- Audit Log ---
 
