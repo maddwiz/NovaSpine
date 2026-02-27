@@ -1,0 +1,10 @@
+{
+  "benchmark": "locomo_mc10_official_20260227_ftsfix",
+  "dataset": "bench/official/converted/locomo_mc10_eval.jsonl",
+  "rows": 620,
+  "top_k": 10,
+  "recall_at_k": 0.7467741935483871,
+  "mrr": 0.5273399897593445,
+  "data_dir": "bench/.runs/locomo_mc10_official_source",
+  "reuse_ingest": true
+}

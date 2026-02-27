@@ -1,0 +1,10 @@
+{
+  "benchmark": "longmemeval_official_20260227_ftsfix",
+  "dataset": "bench/official/converted/longmemeval_oracle_eval.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.84,
+  "mrr": 0.6240261904761901,
+  "data_dir": "bench/.runs/longmemeval_official_20260227",
+  "reuse_ingest": true
+}

@@ -63,3 +63,32 @@ Comparison against the 2026-02-26 official results in this retrieval mode:
 - LongMemEval: no change
 - LoCoMo-MC10: no change
 - DMR sample-500: no change
+
+---
+
+## FTS Retrieval Fix Re-Run (2026-02-27)
+
+A retrieval bugfix was applied in `sqlite_store._sanitize_fts_query`:
+- short queries: precise AND-style token matching
+- long natural-language queries: OR-style matching to avoid over-constrained FTS recall
+
+This rerun used the same official converted eval sets and existing ingested benchmark DBs (`reuse_ingest=true`) to isolate query-time retrieval behavior.
+
+1. LongMemEval
+   - output: `bench/results/official_longmemeval_20260227_ftsfix.json`
+   - recall@10: `0.84` (from `0.004`)
+   - mrr: `0.6240261904761901` (from `0.004`)
+
+2. LoCoMo-MC10
+   - output: `bench/results/official_locomo_mc10_20260227_ftsfix.json`
+   - recall@10: `0.7467741935483871` (from `0.0016129032258064516`)
+   - mrr: `0.5273399897593445` (from `0.0016129032258064516`)
+
+3. DMR sample-500
+   - output: `bench/results/official_dmr_memgpt_sample500_20260227_ftsfix.json`
+   - recall@10: `0.664` (from `0.012`)
+   - mrr: `0.35022380952380955` (from `0.012`)
+
+Interpretation:
+- Prior official collapse was dominated by query parsing behavior in keyword mode, not core memory data integrity.
+- Next step is to validate with fully fresh ingests + semantic embeddings enabled for production-comparable leaderboard reporting.

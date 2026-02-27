@@ -264,14 +264,35 @@ def _sanitize_fts_query(query: str) -> str:
 
     Strips special FTS5 operators and wraps each token in double quotes
     to prevent syntax errors from punctuation like '?'.
+    For longer natural-language queries, use OR semantics to avoid
+    over-constraining recall.
     """
     # Remove FTS5 special chars
     cleaned = re.sub(r'[^\w\s]', ' ', query)
-    tokens = cleaned.split()
+    raw_tokens = cleaned.split()
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for tok in raw_tokens:
+        t = tok.strip()
+        if not t:
+            continue
+        # Ignore ultra-short tokens except numeric anchors like years.
+        if len(t) < 2 and not t.isdigit():
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tokens.append(t)
     if not tokens:
         return '""'
-    # Quote each token to prevent operator interpretation
-    return " ".join(f'"{t}"' for t in tokens)
+    # Cap term count to keep MATCH plans predictable.
+    tokens = tokens[:24]
+
+    # Precision for terse queries (IDs/names). Broad recall for long NL queries.
+    if len(tokens) <= 3:
+        return " ".join(f'"{t}"' for t in tokens)
+    return " OR ".join(f'"{t}"' for t in tokens)
 
 
 def _normalize_entity_name(name: str) -> str:
