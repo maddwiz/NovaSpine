@@ -94,10 +94,15 @@ class MemorySpine:
 
     # --- Ingest ---
 
-    async def ingest_text(self, text: str, source_id: str = "",
-                          metadata: dict[str, Any] | None = None) -> list[str]:
+    async def ingest_text(
+        self,
+        text: str,
+        source_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        skip_chunking: bool = False,
+    ) -> list[str]:
         """Chunk text, embed, and index. Returns chunk IDs."""
-        chunks_text = chunk_text(text)
+        chunks_text = [text] if skip_chunking else chunk_text(text)
         base_meta = self._build_chunk_metadata(text, source_id, metadata)
         skip_graph_index = bool(base_meta.get("benchmark_case_token"))
         chunk_ids = []
@@ -113,15 +118,20 @@ class MemorySpine:
         self.audit.log_write("chunks", source_id or "inline", f"ingested {len(chunk_ids)} chunks")
         return chunk_ids
 
-    def ingest_text_sync(self, text: str, source_id: str = "",
-                         metadata: dict[str, Any] | None = None) -> list[str]:
+    def ingest_text_sync(
+        self,
+        text: str,
+        source_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        skip_chunking: bool = False,
+    ) -> list[str]:
         """Chunk text and index for FTS5 keyword search (no embeddings needed).
 
         This is the synchronous counterpart to ingest_text — it stores chunks
         in SQLite with full-text search but skips FAISS vector indexing.
         Use this for bulk ingestion where embedding API calls aren't practical.
         """
-        chunks_text = chunk_text(text)
+        chunks_text = [text] if skip_chunking else chunk_text(text)
         base_meta = self._build_chunk_metadata(text, source_id, metadata)
         skip_graph_index = bool(base_meta.get("benchmark_case_token"))
         chunk_ids = []
@@ -241,7 +251,12 @@ class MemorySpine:
         metadata: dict[str, Any] | None = None,
     ) -> list[str]:
         """Stable protocol alias for ingest_text()."""
-        return await self.ingest_text(text, source_id=source_id, metadata=metadata)
+        return await self.ingest_text(
+            text,
+            source_id=source_id,
+            metadata=metadata,
+            skip_chunking=False,
+        )
 
     async def recall(
         self,

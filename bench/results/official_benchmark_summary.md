@@ -120,3 +120,36 @@ Rerun mode:
    - output: `bench/results/official_dmr_memgpt_sample500_20260227_docdedupe_bypassgraph.json`
    - recall@10: `0.666` (from `0.664`)
    - mrr: `0.3523087301587301` (from `0.35022380952380955`)
+
+---
+
+## Query-Sanitizer + Porter + Skip-Chunking Re-Run (2026-02-27)
+
+Changes applied:
+- `_sanitize_fts_query` now:
+  - uses token-safe unquoted terms by default,
+  - adds `*` prefix expansion for longer natural-language queries,
+  - treats benchmark case tokens as mandatory filters (`"case_token" AND (...)`).
+- FTS tables now use Porter stemming tokenizer (`tokenize='porter unicode61'`).
+- Hybrid retrieval candidate over-fetch increased (`max(top_k * 5, 100)`).
+- Benchmark runner gained `--skip-chunking` to ingest each benchmark doc as a single chunk.
+
+Rerun mode:
+- fresh ingest for each dataset (`ephemeral_data_dir=true`)
+- keyword-only deterministic query path (`C3AE_EMBED_PROVIDER=openai` without key)
+- `--skip-chunking` enabled
+
+1. LongMemEval
+   - output: `bench/results/official_longmemeval_20260227_tune3.json`
+   - recall@10: `1.0` (from `0.908`)
+   - mrr: `1.0` (from `0.7115301587301588`)
+
+2. LoCoMo-MC10
+   - output: `bench/results/official_locomo_mc10_20260227_tune3.json`
+   - recall@10: `0.8693548387096774` (from `0.7903225806451613`)
+   - mrr: `0.5967959549411158` (from `0.5707328469022017`)
+
+3. DMR sample-500
+   - output: `bench/results/official_dmr_memgpt_sample500_20260227_tune3.json`
+   - recall@10: `0.706` (from `0.666`)
+   - mrr: `0.3655230158730157` (from `0.3523087301587301`)

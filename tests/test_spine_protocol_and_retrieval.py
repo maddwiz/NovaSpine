@@ -219,3 +219,22 @@ def test_case_token_query_skips_graph_lookup(tmp_path):
             await spine.close()
 
     asyncio.run(_run())
+
+
+def test_ingest_sync_skip_chunking_uses_single_chunk(tmp_path):
+    cfg = Config()
+    cfg.data_dir = tmp_path
+    cfg.ensure_dirs()
+    spine = MemorySpine(cfg)
+    try:
+        long_text = "__DMR_CASE_00099__ " + ("alpha beta gamma delta " * 250)
+        chunked_ids = spine.ingest_text_sync(long_text, source_id="bench:chunked")
+        single_ids = spine.ingest_text_sync(
+            long_text,
+            source_id="bench:single",
+            skip_chunking=True,
+        )
+        assert len(chunked_ids) > 1
+        assert len(single_ids) == 1
+    finally:
+        asyncio.run(spine.close())

@@ -20,7 +20,7 @@ from c3ae.types import (
 )
 from c3ae.utils import iso_str, json_dumps, json_loads, parse_iso, utcnow
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS reasoning_bank (
 CREATE INDEX IF NOT EXISTS idx_rb_status ON reasoning_bank(status);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_bank_fts USING fts5(
-    title, content, tags, content=reasoning_bank, content_rowid=rowid
+    title, content, tags,
+    content=reasoning_bank, content_rowid=rowid,
+    tokenize='porter unicode61'
 );
 
 CREATE TABLE IF NOT EXISTS evidence_packs (
@@ -88,7 +90,9 @@ CREATE TABLE IF NOT EXISTS skill_capsules (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS skill_capsules_fts USING fts5(
-    name, description, procedure, tags, content=skill_capsules, content_rowid=rowid
+    name, description, procedure, tags,
+    content=skill_capsules, content_rowid=rowid,
+    tokenize='porter unicode61'
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -100,7 +104,9 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    content, content=chunks, content_rowid=rowid
+    content,
+    content=chunks, content_rowid=rowid,
+    tokenize='porter unicode61'
 );
 
 CREATE TABLE IF NOT EXISTS embedding_cache (
@@ -181,7 +187,9 @@ CREATE TABLE IF NOT EXISTS consolidated_memories (
 CREATE INDEX IF NOT EXISTS idx_consolidated_cluster ON consolidated_memories(cluster_key);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_memories_fts USING fts5(
-    summary, facts, content=consolidated_memories, content_rowid=rowid
+    summary, facts,
+    content=consolidated_memories, content_rowid=rowid,
+    tokenize='porter unicode61'
 );
 
 CREATE TABLE IF NOT EXISTS files (
@@ -262,18 +270,17 @@ END;
 def _sanitize_fts_query(query: str) -> str:
     """Sanitize a query for FTS5 MATCH syntax.
 
-    Strips special FTS5 operators and wraps each token in double quotes
-    to prevent syntax errors from punctuation like '?'.
+    Strips special FTS5 operators and builds token-safe MATCH queries.
     For longer natural-language queries, use OR semantics to avoid
     over-constraining recall.
     """
-    # Remove FTS5 special chars
-    cleaned = re.sub(r'[^\w\s]', ' ', query)
+    # Remove FTS5 special chars while preserving alnum/underscore tokens.
+    cleaned = re.sub(r"[^\w\s]", " ", query)
     raw_tokens = cleaned.split()
     tokens: list[str] = []
     seen: set[str] = set()
     for tok in raw_tokens:
-        t = tok.strip()
+        t = tok.strip().strip("_")
         if not t:
             continue
         # Ignore ultra-short tokens except numeric anchors like years.
@@ -289,10 +296,29 @@ def _sanitize_fts_query(query: str) -> str:
     # Cap term count to keep MATCH plans predictable.
     tokens = tokens[:24]
 
+    def _fts_term(tok: str, use_prefix: bool) -> str:
+        t = tok.lower()
+        if use_prefix and t.isalpha() and len(t) >= 4:
+            return f"{t}*"
+        return t
+
+    case_terms = [t for t in tokens if re.fullmatch(r"[a-z0-9_]*case_\d+", t.lower())]
+    if case_terms:
+        # Keep benchmark case token mandatory to avoid cross-case contamination.
+        case_term = _fts_term(case_terms[0], use_prefix=False)
+        tail = [t for t in tokens if t != case_terms[0]]
+        if not tail:
+            return f'"{case_term}"'
+        if len(tail) <= 3:
+            tail_query = " ".join(_fts_term(t, use_prefix=False) for t in tail)
+        else:
+            tail_query = " OR ".join(_fts_term(t, use_prefix=True) for t in tail)
+        return f'"{case_term}" AND ({tail_query})'
+
     # Precision for terse queries (IDs/names). Broad recall for long NL queries.
     if len(tokens) <= 3:
-        return " ".join(f'"{t}"' for t in tokens)
-    return " OR ".join(f'"{t}"' for t in tokens)
+        return " ".join(_fts_term(t, use_prefix=False) for t in tokens)
+    return " OR ".join(_fts_term(t, use_prefix=True) for t in tokens)
 
 
 def _normalize_entity_name(name: str) -> str:

@@ -1,0 +1,15 @@
+{
+  "benchmark": "dmr_memgpt_official_20260227_tune3",
+  "dataset": "bench/official/converted/dmr_memgpt_eval_500.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.706,
+  "mrr": 0.3655230158730157,
+  "ingested_documents": 15000,
+  "ingested_chunks": 15000,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-jw8f3fl3",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "publishable": true,
+  "quality_warnings": []
+}

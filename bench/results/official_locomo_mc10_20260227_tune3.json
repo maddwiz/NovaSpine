@@ -1,0 +1,15 @@
+{
+  "benchmark": "locomo_mc10_official_20260227_tune3",
+  "dataset": "bench/official/converted/locomo_mc10_eval.jsonl",
+  "rows": 620,
+  "top_k": 10,
+  "recall_at_k": 0.8693548387096774,
+  "mrr": 0.5967959549411158,
+  "ingested_documents": 55014,
+  "ingested_chunks": 55014,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-ghosz_1o",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "publishable": true,
+  "quality_warnings": []
+}

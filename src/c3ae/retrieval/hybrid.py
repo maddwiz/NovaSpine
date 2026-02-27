@@ -43,8 +43,8 @@ class HybridSearch:
         If query_vector is None, falls back to keyword-only search.
         """
         top_k = top_k or self.config.default_top_k
-        # Fetch more candidates for merging
-        fetch_k = max(top_k * 3, top_k)
+        # Over-fetch aggressively to reduce false negatives before fusion.
+        fetch_k = max(top_k * 5, 100)
 
         # Keyword results
         kw_results = self.keyword.search_all(query, limit=fetch_k)

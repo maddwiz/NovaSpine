@@ -37,6 +37,11 @@ def _parse_args() -> argparse.Namespace:
         help="Ingest benchmark corpus via keyword-only sync path (no embedding API required)",
     )
     p.add_argument(
+        "--skip-chunking",
+        action="store_true",
+        help="Ingest each corpus document as a single chunk (benchmark mode).",
+    )
+    p.add_argument(
         "--min-publish-rows",
         type=int,
         default=100,
@@ -77,12 +82,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     text,
                     source_id=doc["source_id"],
                     metadata=doc["metadata"],
+                    skip_chunking=args.skip_chunking,
                 )
             else:
                 chunk_ids = await spine.ingest_text(
                     text,
                     source_id=doc["source_id"],
                     metadata=doc["metadata"],
+                    skip_chunking=args.skip_chunking,
                 )
             ingested_docs += 1
             ingested_chunks += len(chunk_ids)
@@ -145,6 +152,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "ingested_chunks": ingested_chunks,
             "data_dir": str(cfg.data_dir),
             "ephemeral_data_dir": bool(tmp_dir),
+            "skip_chunking": bool(args.skip_chunking),
             "publishable": not warnings,
             "quality_warnings": warnings,
         }

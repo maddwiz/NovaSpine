@@ -1,0 +1,15 @@
+{
+  "benchmark": "longmemeval_official_20260227_tune3",
+  "dataset": "bench/official/converted/longmemeval_oracle_eval.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 1.0,
+  "mrr": 1.0,
+  "ingested_documents": 948,
+  "ingested_chunks": 948,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-n8yszzyb",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "publishable": true,
+  "quality_warnings": []
+}
