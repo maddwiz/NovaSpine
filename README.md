@@ -257,6 +257,36 @@ python scripts/run_memory_qa.py \
   --out ./bench/results/official_longmemeval_qa.json
 ```
 
+Use an LLM answerer (competitor-style end-to-end QA):
+
+```bash
+export OPENAI_API_KEY=...
+
+python scripts/run_memory_qa.py \
+  --name longmemeval_official_qa_openai \
+  --dataset ./bench/official/converted/longmemeval_oracle_qa_eval.jsonl \
+  --corpus ./bench/official/converted/longmemeval_oracle_corpus.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --skip-chunking \
+  --answer-mode llm \
+  --answer-provider openai \
+  --answer-model gpt-4.1-mini \
+  --answer-context-k 8 \
+  --answer-max-context-chars 12000 \
+  --out ./bench/results/official_longmemeval_qa_openai.json
+```
+
+Optional retrieval tuning presets:
+
+```bash
+# Strong keyword profile (best for case-token benchmark runs)
+--tune-preset keyword_plus
+
+# Hybrid QA profile (semantic-heavy; use with async ingest + embeddings)
+--tune-preset hybrid_qa --embed-provider openai
+```
+
 ## Development
 
 See [HANDOFF-MVP.md](HANDOFF-MVP.md) for detailed technical documentation, architecture guide, and MVP roadmap.
