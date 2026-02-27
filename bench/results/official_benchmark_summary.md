@@ -181,3 +181,36 @@ Configuration:
    - doc_hit_rate: `0.706`
    - exact_match: `0.012`
    - token_f1: `0.03704333064830867`
+
+---
+
+## Full QA Pass With OpenAI LLM Answering (2026-02-27)
+
+Configuration:
+- `--top-k 10`
+- `--ingest-sync`
+- `--skip-chunking`
+- `--answer-mode llm`
+- `--answer-provider openai`
+- `--answer-model gpt-4.1-mini`
+- `--answer-context-k 8`
+- `--answer-max-context-chars 12000`
+- `--answer-max-tokens 96`
+
+1. LongMemEval QA
+   - output: `bench/results/official_longmemeval_qa_openai_20260227.json`
+   - doc_hit_rate: `1.0`
+   - exact_match: `0.15`
+   - token_f1: `0.28580880146443954`
+
+2. LoCoMo-MC10 QA (sample-500 source rows, 143 QA rows after conversion filters)
+   - output: `bench/results/official_locomo_qa_openai_20260227.json`
+   - doc_hit_rate: `0.8601398601398601`
+   - exact_match: `0.2937062937062937`
+   - token_f1: `0.4550066927318543`
+
+3. DMR QA sample-500
+   - output: `bench/results/official_dmr_qa_openai_20260227.json`
+   - doc_hit_rate: `0.706`
+   - exact_match: `0.396`
+   - token_f1: `0.5285792235018651`

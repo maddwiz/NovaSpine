@@ -275,9 +275,11 @@ async def _answer_with_llm(
         json_mode=True,
     )
     obj = _extract_json_dict(resp.content)
-    ans = _clean_answer(str(obj.get("answer", ""))) if obj else ""
-    if ans:
-        return ans
+    if obj:
+        ans = _clean_answer(str(obj.get("answer", "")))
+        if ans:
+            return ans
+        return ""
     return _clean_answer(resp.content)
 
 

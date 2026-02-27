@@ -12,3 +12,4 @@ build/
 data/
 bench/.runs/
 bench/official/
+.DS_Store
