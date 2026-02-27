@@ -1,0 +1,12 @@
+{
+  "benchmark": "dmr_memgpt_official_source_sample500",
+  "dataset": "./bench/official/converted/dmr_memgpt_eval_500.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.012,
+  "mrr": 0.012,
+  "ingested_documents": 15000,
+  "ingested_chunks": 15000,
+  "data_dir": "bench/.runs/dmr_memgpt_official_source_sample500",
+  "ephemeral_data_dir": false
+}

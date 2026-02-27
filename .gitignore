@@ -11,3 +11,4 @@ build/
 *.db
 data/
 bench/.runs/
+bench/official/

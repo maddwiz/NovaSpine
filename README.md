@@ -207,6 +207,42 @@ python scripts/train_memory_policy.py \
   --out ./bench/policy/memory_policy_tuned.json
 ```
 
+### Official-Source Benchmark Prep
+
+Prepare official-source benchmark conversions (LongMemEval cleaned oracle, LoCoMo-MC10, and MemGPT QA DMR-style):
+
+```bash
+python scripts/prepare_official_benchmarks.py
+```
+
+Run converted official benchmarks:
+
+```bash
+python scripts/run_memory_benchmarks.py \
+  --name longmemeval_official \
+  --corpus ./bench/official/converted/longmemeval_oracle_corpus.jsonl \
+  --dataset ./bench/official/converted/longmemeval_oracle_eval.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --out ./bench/results/official_longmemeval.json
+
+python scripts/run_memory_benchmarks.py \
+  --name locomo_mc10_official_source \
+  --corpus ./bench/official/converted/locomo_mc10_corpus.jsonl \
+  --dataset ./bench/official/converted/locomo_mc10_eval.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --out ./bench/results/official_locomo_mc10.json
+
+python scripts/run_memory_benchmarks.py \
+  --name dmr_memgpt_official_source_sample500 \
+  --corpus ./bench/official/converted/dmr_memgpt_corpus_500.jsonl \
+  --dataset ./bench/official/converted/dmr_memgpt_eval_500.jsonl \
+  --top-k 10 \
+  --ingest-sync \
+  --out ./bench/results/official_dmr_memgpt_sample500.json
+```
+
 ## Development
 
 See [HANDOFF-MVP.md](HANDOFF-MVP.md) for detailed technical documentation, architecture guide, and MVP roadmap.
