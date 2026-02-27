@@ -1,0 +1,14 @@
+{
+  "benchmark": "longmemeval_official_20260227",
+  "dataset": "bench/official/converted/longmemeval_oracle_eval.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.004,
+  "mrr": 0.004,
+  "ingested_documents": 948,
+  "ingested_chunks": 9058,
+  "data_dir": "bench/.runs/longmemeval_official_20260227",
+  "ephemeral_data_dir": false,
+  "publishable": true,
+  "quality_warnings": []
+}

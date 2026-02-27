@@ -36,3 +36,30 @@ python scripts/prepare_official_benchmarks.py
 
 - The full DMR run was started, but was terminated after prolonged runtime; sampled run was completed in this turn for deterministic reporting.
 - These numbers reflect NovaSpine running in keyword-only retrieval mode (`--ingest-sync`) due missing embedding provider API keys.
+
+---
+
+## Re-Run (2026-02-27)
+
+Official rerun after NovaSpine upgrade commit `30f1bab`:
+
+1. LongMemEval
+   - output: `bench/results/official_longmemeval_20260227.json`
+   - recall@10: `0.004`
+   - mrr: `0.004`
+
+2. LoCoMo-MC10
+   - output: `bench/results/official_locomo_mc10_20260227_reuse_ingest.json`
+   - mode: query-time rerun over previously completed official ingest DB
+   - recall@10: `0.0016129032258064516`
+   - mrr: `0.0016129032258064516`
+
+3. DMR sample-500
+   - output: `bench/results/official_dmr_memgpt_sample500_20260227.json`
+   - recall@10: `0.012`
+   - mrr: `0.012`
+
+Comparison against the 2026-02-26 official results in this retrieval mode:
+- LongMemEval: no change
+- LoCoMo-MC10: no change
+- DMR sample-500: no change

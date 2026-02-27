@@ -1,0 +1,10 @@
+{
+  "benchmark": "locomo_mc10_official_20260227_reuse_ingest",
+  "dataset": "bench/official/converted/locomo_mc10_eval.jsonl",
+  "rows": 620,
+  "top_k": 10,
+  "recall_at_k": 0.0016129032258064516,
+  "mrr": 0.0016129032258064516,
+  "data_dir": "bench/.runs/locomo_mc10_official_source",
+  "reuse_ingest": true
+}
