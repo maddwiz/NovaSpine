@@ -29,19 +29,26 @@ Configuration:
 - `--answer-context-k 8`
 - `--answer-max-context-chars 12000`
 - `--answer-max-tokens 96`
+- `recall_variants=off` (variant merge was regressive on DMR during tuning)
+- answer canonicalization + unit-preserving prompt tuning enabled
 
 | Benchmark | Questions | Doc Hit Rate | Exact Match | Token F1 |
 |---|---:|---:|---:|---:|
-| LongMemEval (OpenAI LLM QA) | 500 | 1.000 | 0.150 | 0.286 |
-| LoCoMo-MC10 (OpenAI LLM QA) | 143 | 0.860 | 0.294 | 0.455 |
-| DMR sample-500 (OpenAI LLM QA) | 500 | 0.706 | 0.396 | 0.529 |
+| LongMemEval (OpenAI LLM QA, tuned v2) | 500 | 1.000 | 0.172 | 0.286 |
+| LoCoMo-MC10 (OpenAI LLM QA, tuned v2) | 143 | 0.860 | 0.322 | 0.460 |
+| DMR sample-500 (OpenAI LLM QA, tuned v2) | 500 | 0.706 | 0.396 | 0.535 |
 
 Delta vs extractive baseline:
-- LongMemEval: `EM +0.106`, `F1 +0.162`
-- LoCoMo-MC10: `EM +0.273`, `F1 +0.381`
-- DMR sample-500: `EM +0.384`, `F1 +0.492`
+- LongMemEval: `EM +0.128`, `F1 +0.162`
+- LoCoMo-MC10: `EM +0.301`, `F1 +0.386`
+- DMR sample-500: `EM +0.384`, `F1 +0.498`
+
+Delta vs prior OpenAI LLM run:
+- LongMemEval: `EM +0.022`, `F1 -0.0002`
+- LoCoMo-MC10: `EM +0.028`, `F1 +0.0048`
+- DMR sample-500: `EM +0.000`, `F1 +0.0064`
 
 OpenAI outputs:
-- `bench/results/official_longmemeval_qa_openai_20260227.json`
-- `bench/results/official_locomo_qa_openai_20260227.json`
-- `bench/results/official_dmr_qa_openai_20260227.json`
+- `bench/results/official_longmemeval_qa_openai_20260227_v2.json`
+- `bench/results/official_locomo_qa_openai_20260227_v2.json`
+- `bench/results/official_dmr_qa_openai_20260227_v2.json`

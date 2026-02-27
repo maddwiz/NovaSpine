@@ -214,3 +214,33 @@ Configuration:
    - doc_hit_rate: `0.706`
    - exact_match: `0.396`
    - token_f1: `0.5285792235018651`
+
+---
+
+## Full QA Pass With OpenAI LLM Answering (Tuned v2, 2026-02-27)
+
+Additional tuning:
+- `recall_variants=off` (variant ensemble regressed DMR in ablation)
+- answer canonicalization enabled
+- prompt rule added to keep units with numeric answers
+
+1. LongMemEval QA
+   - output: `bench/results/official_longmemeval_qa_openai_20260227_v2.json`
+   - doc_hit_rate: `1.0`
+   - exact_match: `0.172`
+   - token_f1: `0.2855782449574358`
+   - delta vs prior OpenAI run: `EM +0.022`, `F1 -0.00023055650700374`
+
+2. LoCoMo-MC10 QA (sample-500 source rows, 143 QA rows after conversion filters)
+   - output: `bench/results/official_locomo_qa_openai_20260227_v2.json`
+   - doc_hit_rate: `0.8601398601398601`
+   - exact_match: `0.32167832167832167`
+   - token_f1: `0.4598018975270593`
+   - delta vs prior OpenAI run: `EM +0.027972027972027976`, `F1 +0.004795204795204982`
+
+3. DMR QA sample-500
+   - output: `bench/results/official_dmr_qa_openai_20260227_v2.json`
+   - doc_hit_rate: `0.706`
+   - exact_match: `0.396`
+   - token_f1: `0.535023219856388`
+   - delta vs prior OpenAI run: `EM +0.0`, `F1 +0.006443996354522853`

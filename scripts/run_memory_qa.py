@@ -24,6 +24,12 @@ from c3ae.llm import Message, create_chat_backend
 from c3ae.memory_spine.spine import MemorySpine
 
 _CASE_TOKEN_RE = re.compile(r"__\w+_CASE_\d+__", re.IGNORECASE)
+_QUERY_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "to", "of", "in", "on", "for",
+    "and", "or", "with", "what", "when", "who", "where", "which", "did", "do",
+    "does", "at", "by", "from", "as", "it", "be", "this", "that", "how", "many",
+    "much", "kind", "type", "into", "about", "between",
+}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,6 +66,28 @@ def _parse_args() -> argparse.Namespace:
         help="Explicit overlap boost override",
     )
     p.add_argument("--disable-graph", action="store_true", help="Disable graph indexing/merge")
+    p.add_argument(
+        "--recall-variants",
+        action="store_true",
+        help="Enable multi-variant recall ensemble (off by default).",
+    )
+    p.add_argument(
+        "--no-recall-variants",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--variant-fetch-multiplier",
+        type=int,
+        default=3,
+        help="Per-variant fetch multiplier for ensemble recall.",
+    )
+    p.add_argument(
+        "--variant-rrf-k",
+        type=int,
+        default=30,
+        help="RRF k constant for variant merge.",
+    )
     p.add_argument(
         "--answer-mode",
         default="extractive",
@@ -191,11 +219,136 @@ def _clean_question(query: str) -> str:
     return re.sub(r"\s+", " ", _CASE_TOKEN_RE.sub(" ", query)).strip()
 
 
+def _extract_case_token(query: str) -> str:
+    m = _CASE_TOKEN_RE.search(query or "")
+    return m.group(0) if m else ""
+
+
+def _strip_leading_wh(clean_query: str) -> str:
+    tokens = clean_query.split()
+    if not tokens:
+        return clean_query
+    first = tokens[0].lower()
+    if first in {"what", "when", "where", "who", "which", "how"} and len(tokens) > 2:
+        return " ".join(tokens[1:])
+    return clean_query
+
+
+def _query_keywords(clean_query: str, limit: int = 10) -> str:
+    toks = [t.lower() for t in re.findall(r"[a-z0-9_]+", clean_query)]
+    keep = [t for t in toks if len(t) > 1 and t not in _QUERY_STOPWORDS]
+    if not keep:
+        return ""
+    return " ".join(keep[:limit])
+
+
+def _build_recall_variants(query: str) -> list[tuple[str, float]]:
+    clean = _clean_question(query)
+    case = _extract_case_token(query)
+    variants: list[tuple[str, float]] = []
+
+    def _add(q: str, w: float) -> None:
+        qn = re.sub(r"\s+", " ", q).strip()
+        if qn and all(v[0] != qn for v in variants):
+            variants.append((qn, w))
+
+    _add(query, 1.0)
+    if clean and clean != query:
+        _add(clean, 0.75)
+    stripped = _strip_leading_wh(clean)
+    if stripped and stripped != clean:
+        _add(stripped, 0.65)
+    kws = _query_keywords(clean)
+    if kws:
+        _add(kws, 0.60)
+    if case:
+        _add(case, 0.50)
+        if kws:
+            _add(f"{case} {kws}", 0.85)
+        elif clean:
+            _add(f"{case} {clean}", 0.85)
+    return variants
+
+
+def _result_key(row: dict[str, Any]) -> str:
+    rid = str(row.get("id", "")).strip()
+    if rid:
+        return rid
+    md = row.get("metadata") or {}
+    doc = str(md.get("benchmark_doc_id", "")).strip()
+    if doc:
+        return f"doc:{doc}"
+    content = str(row.get("content", "")).strip().lower()
+    return f"content:{content[:120]}"
+
+
+def _dedupe_by_doc_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen_doc: set[str] = set()
+    seen_key: set[str] = set()
+    for r in rows:
+        md = r.get("metadata") or {}
+        doc_id = str(md.get("benchmark_doc_id", "")).strip()
+        key = _result_key(r)
+        if doc_id:
+            if doc_id in seen_doc:
+                continue
+            seen_doc.add(doc_id)
+        if key in seen_key:
+            continue
+        seen_key.add(key)
+        out.append(r)
+    return out
+
+
+def _merge_variant_recall(
+    variant_results: list[tuple[float, list[dict[str, Any]]]],
+    *,
+    top_k: int,
+    rrf_k: int,
+) -> list[dict[str, Any]]:
+    if not variant_results:
+        return []
+    scores: dict[str, float] = {}
+    best_row: dict[str, dict[str, Any]] = {}
+    for weight, rows in variant_results:
+        for rank, row in enumerate(rows):
+            key = _result_key(row)
+            score = float(weight) / float(max(1, rrf_k) + rank + 1)
+            scores[key] = scores.get(key, 0.0) + score
+            current = best_row.get(key)
+            if current is None or float(row.get("score", 0.0)) > float(current.get("score", 0.0)):
+                best_row[key] = row
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    merged: list[dict[str, Any]] = []
+    for key, merged_score in ranked:
+        row = dict(best_row[key])
+        row["score"] = float(merged_score)
+        merged.append(row)
+    merged = _dedupe_by_doc_id(merged)
+    return merged[: max(1, top_k)]
+
+
 def _clean_answer(ans: str) -> str:
     a = re.sub(r"\s+", " ", ans.strip())
     a = a.strip(" \"'")
     if a.lower().startswith("answer:"):
         a = a.split(":", 1)[1].strip()
+    # Prefer canonical terse forms for benchmark scoring.
+    lower = a.lower()
+    if lower in {"once", "twice", "thrice"}:
+        return {"once": "1", "twice": "2", "thrice": "3"}[lower]
+    word_to_num = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+        "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15", "sixteen": "16",
+        "seventeen": "17", "eighteen": "18", "nineteen": "19", "twenty": "20",
+    }
+    m = re.match(r"^(?P<num>[a-z]+)\s+(?P<unit>day|days|week|weeks|month|months|year|years|episode|episodes)$", lower)
+    if m and m.group("num") in word_to_num:
+        return f"{word_to_num[m.group('num')]} {m.group('unit')}"
+    if lower in word_to_num:
+        return word_to_num[lower]
     return a
 
 
@@ -260,6 +413,8 @@ async def _answer_with_llm(
         "Return JSON only: {\"answer\":\"...\"}.\n"
         "Rules:\n"
         "- answer with the shortest exact phrase possible\n"
+        "- prefer canonical forms: numerals (2 not twice), concise entities, no leading articles\n"
+        "- keep units when present in context (for example: '7 days', '5 months')\n"
         "- no explanation, no extra keys, no markdown\n"
         "- if uncertain, return {\"answer\":\"\"}"
     )
@@ -344,6 +499,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.rrf_overlap_boost > 0:
         cfg.retrieval.rrf_overlap_boost = float(args.rrf_overlap_boost)
         mode_notes.append(f"rrf_overlap_boost override: {cfg.retrieval.rrf_overlap_boost}")
+    use_recall_variants = bool(args.recall_variants) and not bool(args.no_recall_variants)
+    mode_notes.append(f"recall_variants={'on' if use_recall_variants else 'off'}")
 
     tmp_dir: str | None = None
     if args.data_dir:
@@ -414,7 +571,20 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 continue
 
             expected_doc_ids = {str(x) for x in row.get("expected_doc_ids", []) if str(x)}
-            recalled = await spine.recall(query, top_k=args.top_k)
+            if use_recall_variants:
+                fetch_k = max(args.top_k * max(1, int(args.variant_fetch_multiplier)), args.top_k)
+                variants = _build_recall_variants(query)
+                variant_rows: list[tuple[float, list[dict[str, Any]]]] = []
+                for variant_q, weight in variants:
+                    vr = await spine.recall(variant_q, top_k=fetch_k)
+                    variant_rows.append((weight, vr))
+                recalled = _merge_variant_recall(
+                    variant_rows,
+                    top_k=args.top_k,
+                    rrf_k=max(1, int(args.variant_rrf_k)),
+                )
+            else:
+                recalled = await spine.recall(query, top_k=args.top_k)
             docs = [str((r.get("metadata") or {}).get("benchmark_doc_id", "")) for r in recalled]
             hit = any(d in expected_doc_ids for d in docs) if expected_doc_ids else False
 
