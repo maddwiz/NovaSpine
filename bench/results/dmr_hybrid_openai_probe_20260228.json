@@ -1,0 +1,23 @@
+{
+  "benchmark": "dmr_hybrid_openai_probe_20260228",
+  "dataset": "./bench/official/converted/dmr_memgpt_eval_500.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.808,
+  "mrr": 0.49830158730158736,
+  "ingested_documents": 15000,
+  "ingested_chunks": 15000,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-y384yrs7",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "embed_local": false,
+  "publishable": true,
+  "quality_warnings": [],
+  "mode_notes": [
+    "embed_provider override: openai",
+    "embed_model override: text-embedding-3-small",
+    "embed_dims override: 1536",
+    "query_expansion=on",
+    "ingest_batch_size=128"
+  ]
+}

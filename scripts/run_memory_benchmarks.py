@@ -38,6 +38,12 @@ def _parse_args() -> argparse.Namespace:
         help="Ingest benchmark corpus via keyword-only sync path (no embedding API required)",
     )
     p.add_argument(
+        "--ingest-batch-size",
+        type=int,
+        default=64,
+        help="Batch size for async bulk ingestion (ignored with --ingest-sync).",
+    )
+    p.add_argument(
         "--skip-chunking",
         action="store_true",
         help="Ingest each corpus document as a single chunk (benchmark mode).",
@@ -129,24 +135,37 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         use_ingest_sync = bool(args.ingest_sync) and not bool(args.embed_local)
         if args.embed_local and args.ingest_sync:
             mode_notes.append("embed_local enabled: ignoring --ingest-sync to build vector index")
-        for doc in corpus_docs:
-            text = doc["text"]
-            if use_ingest_sync:
+        if use_ingest_sync:
+            for doc in corpus_docs:
+                text = doc["text"]
                 chunk_ids = spine.ingest_text_sync(
                     text,
                     source_id=doc["source_id"],
                     metadata=doc["metadata"],
                     skip_chunking=args.skip_chunking,
                 )
-            else:
-                chunk_ids = await spine.ingest_text(
-                    text,
-                    source_id=doc["source_id"],
-                    metadata=doc["metadata"],
+                ingested_docs += 1
+                ingested_chunks += len(chunk_ids)
+        else:
+            batch_size = max(1, int(args.ingest_batch_size))
+            mode_notes.append(f"ingest_batch_size={batch_size}")
+            if batch_size > 1:
+                ingested_docs, ingested_chunks = await spine.ingest_documents(
+                    corpus_docs,
                     skip_chunking=args.skip_chunking,
+                    batch_size=batch_size,
                 )
-            ingested_docs += 1
-            ingested_chunks += len(chunk_ids)
+            else:
+                for doc in corpus_docs:
+                    text = doc["text"]
+                    chunk_ids = await spine.ingest_text(
+                        text,
+                        source_id=doc["source_id"],
+                        metadata=doc["metadata"],
+                        skip_chunking=args.skip_chunking,
+                    )
+                    ingested_docs += 1
+                    ingested_chunks += len(chunk_ids)
 
         hits = 0
         mrr_total = 0.0

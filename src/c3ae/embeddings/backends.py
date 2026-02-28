@@ -53,9 +53,12 @@ class OpenAIEmbedder:
         if not texts:
             return np.zeros((0, self.dims), dtype=np.float32)
         client = await self._get_client()
+        payload: dict[str, object] = {"model": self.model, "input": texts}
+        if self.model.startswith("text-embedding-3") and self.dims > 0:
+            payload["dimensions"] = int(self.dims)
         resp = await client.post(
             "/embeddings",
-            json={"model": self.model, "input": texts},
+            json=payload,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -213,9 +216,15 @@ def create_embedder(config: VeniceConfig | None = None) -> EmbeddingBackend:
     if provider in {"venice", "default"}:
         return VeniceEmbedder(cfg)
     if provider == "openai":
-        return OpenAIEmbedder(dims=cfg.embedding_dims)
+        return OpenAIEmbedder(
+            model=cfg.embedding_model,
+            dims=cfg.embedding_dims,
+        )
     if provider in {"ollama", "local"}:
-        return OllamaEmbedder(dims=cfg.embedding_dims)
+        return OllamaEmbedder(
+            model=cfg.embedding_model,
+            dims=cfg.embedding_dims,
+        )
     if provider in {"hash", "localhash"}:
         return HashEmbedder(dims=cfg.embedding_dims)
     if provider in {"sbert", "sentence-transformers", "sentence_transformers"}:

@@ -42,6 +42,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--top-k", type=int, default=10, help="Recall depth")
     p.add_argument("--data-dir", default="", help="Optional persistent data dir")
     p.add_argument("--ingest-sync", action="store_true", help="Use sync ingest path")
+    p.add_argument(
+        "--ingest-batch-size",
+        type=int,
+        default=64,
+        help="Batch size for async bulk ingestion (ignored with --ingest-sync).",
+    )
     p.add_argument("--skip-chunking", action="store_true", help="Ingest docs as single chunks")
     p.add_argument("--embed-local", action="store_true", help="Use local hash embeddings")
     p.add_argument(
@@ -630,23 +636,35 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
         ingested_docs = 0
         ingested_chunks = 0
-        for doc in corpus_docs:
-            if use_ingest_sync:
+        if use_ingest_sync:
+            for doc in corpus_docs:
                 cids = spine.ingest_text_sync(
                     doc["text"],
                     source_id=doc["source_id"],
                     metadata=doc["metadata"],
                     skip_chunking=args.skip_chunking,
                 )
-            else:
-                cids = await spine.ingest_text(
-                    doc["text"],
-                    source_id=doc["source_id"],
-                    metadata=doc["metadata"],
+                ingested_docs += 1
+                ingested_chunks += len(cids)
+        else:
+            batch_size = max(1, int(args.ingest_batch_size))
+            mode_notes.append(f"ingest_batch_size={batch_size}")
+            if batch_size > 1:
+                ingested_docs, ingested_chunks = await spine.ingest_documents(
+                    corpus_docs,
                     skip_chunking=args.skip_chunking,
+                    batch_size=batch_size,
                 )
-            ingested_docs += 1
-            ingested_chunks += len(cids)
+            else:
+                for doc in corpus_docs:
+                    cids = await spine.ingest_text(
+                        doc["text"],
+                        source_id=doc["source_id"],
+                        metadata=doc["metadata"],
+                        skip_chunking=args.skip_chunking,
+                    )
+                    ingested_docs += 1
+                    ingested_chunks += len(cids)
 
         n = 0
         doc_hits = 0

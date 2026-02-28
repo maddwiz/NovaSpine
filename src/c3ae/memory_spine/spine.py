@@ -148,6 +148,60 @@ class MemorySpine:
         self.audit.log_write("chunks", source_id or "inline", f"ingested {len(chunk_ids)} chunks (sync)")
         return chunk_ids
 
+    async def ingest_documents(
+        self,
+        docs: list[dict[str, Any]],
+        *,
+        skip_chunking: bool = False,
+        batch_size: int = 64,
+    ) -> tuple[int, int]:
+        """Bulk async ingestion with batched embedding/indexing."""
+        if not docs:
+            return 0, 0
+
+        bsz = max(1, int(batch_size))
+        pending_ids: list[str] = []
+        pending_texts: list[str] = []
+        ingested_docs = 0
+        ingested_chunks = 0
+
+        for doc in docs:
+            text = str(doc.get("text", "")).strip()
+            if not text:
+                continue
+            source_id = str(doc.get("source_id", ""))
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+
+            chunks_text = [text] if skip_chunking else chunk_text(text)
+            base_meta = self._build_chunk_metadata(text, source_id, metadata)
+            skip_graph_index = bool(base_meta.get("benchmark_case_token"))
+
+            for ct in chunks_text:
+                chunk = Chunk(content=ct, source_id=source_id, metadata=dict(base_meta))
+                self.sqlite.insert_chunk(chunk)
+                if not skip_graph_index:
+                    await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+                pending_ids.append(chunk.id)
+                pending_texts.append(ct)
+                ingested_chunks += 1
+
+            ingested_docs += 1
+
+            if len(pending_ids) >= bsz:
+                await self._embed_and_index(pending_ids, pending_texts)
+                pending_ids = []
+                pending_texts = []
+
+        if pending_ids:
+            await self._embed_and_index(pending_ids, pending_texts)
+
+        self.audit.log_write(
+            "chunks",
+            "bulk",
+            f"ingested {ingested_chunks} chunks from {ingested_docs} docs (batch={bsz})",
+        )
+        return ingested_docs, ingested_chunks
+
     def ingest_session(self, session_path: Path) -> dict:
         """Parse and ingest an agent session file into searchable memory.
 

@@ -1,0 +1,187 @@
+{
+  "benchmark": "dmr_retrieval_probe_variants",
+  "dataset": "./bench/official/converted/dmr_memgpt_qa_eval.jsonl",
+  "rows_total": 500,
+  "rows_scored": 500,
+  "rows_skipped": 0,
+  "top_k": 10,
+  "answer_mode": "extractive",
+  "doc_hit_rate": 0.696,
+  "exact_match": 0.018,
+  "token_f1": 0.0391016504265405,
+  "ingested_documents": 15000,
+  "ingested_chunks": 15000,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-qa-p76ga660",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "embed_local": false,
+  "mode_notes": [
+    "query_expansion=on",
+    "tune_preset=keyword_plus",
+    "recall_variants=on"
+  ],
+  "answer_provider": "",
+  "answer_model": "",
+  "samples": [
+    {
+      "query": "__DMR_CASE_00000__ who got the first nobel prize in physics",
+      "prediction": "Wilhelm Conrad R\u00f6ntgen",
+      "gold": "Wilhelm Conrad R\u00f6ntgen",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00001__ when is the next deadpool movie being released",
+      "prediction": "Deadpool: The Video Game",
+      "gold": "May 18, 2018",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00002__ the south west wind blows across nigeria between",
+      "prediction": "The Tropical continental airmass (CT) loses its strength as a major airmass in the region of west Africa and over Nigeria at this time (around February in the southern part of Nigeria to June in northern Nigeria) and begins to retreat coupl",
+      "gold": "till September",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00003__ what does hp mean in war and order",
+      "prediction": "Frege shows that HP and suitable definitions of arithmetical notions entail all axioms of what we now call second-order arithmetic.",
+      "gold": "hit points or health points",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00004__ who wrote the first declaration of human rights",
+      "prediction": "an international document of the first order of importance",
+      "gold": "Cyrus",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00005__ who is the owner of reading football club",
+      "prediction": "Thames Valley Royals",
+      "gold": "Xiu Li Dai",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00006__ when is the last time the philadelphia won the superbowl",
+      "prediction": "consecutive, appearance in the title game (they have won in all of their previous trips), against the National Conference Champions Philadelphia Soul, who were making their first appearance in the franchise's history in the ArenaBowl.",
+      "gold": "Super Bowl LII,",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00007__ how many episodes are there in dragon ball z",
+      "prediction": "17",
+      "gold": "291 episodes",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00008__ who designed the garden city of new earswick",
+      "prediction": "Benjamin Seebohm Rowntree",
+      "gold": "planner Raymond Unwin",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00009__ what is the first step in the evolution of the eye",
+      "prediction": "Origin of Species",
+      "gold": "photoreceptor proteins that sense light",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00010__ where is the tv show the curse of oak island filmed",
+      "prediction": "The Curse of Oak Island follows brothers Marty and Rick Lagina, originally from Kingsford, Michigan, through their efforts to find the speculated treasure or historical artifacts believed to be on Oak Island.",
+      "gold": "Oak Island",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.125
+    },
+    {
+      "query": "__DMR_CASE_00011__ where is gall bladder situated in human body",
+      "prediction": "The Gall bladder is traditionally described thus: 'It is situated on the right side of the body closely in contact with the inferior surface of",
+      "gold": "beneath the liver",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00012__ who is the current director of the us mint",
+      "prediction": "Chief Information Officer",
+      "gold": "David J. Ryder",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00013__ what is the main mineral in lithium batteries",
+      "prediction": "rechargeable and have a high energy density",
+      "gold": "Lithium",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00014__ right to property according to the constitution of india is a",
+      "prediction": "Seven fundamental rights were originally provided by the Constitution \u2013 right to equality, right to freedom, right against exploitation, right to freedom of religion, cultural and educational rights, right to property and right to constitut",
+      "gold": "constitutional right",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.1111111111111111
+    },
+    {
+      "query": "__DMR_CASE_00015__ who is the president of usa right now",
+      "prediction": "In his new book, \u201cRight Now,\u201d Republican National Committee chairman Michael Steele writes that Republicans have made the mistake of drifting away from their conservative roots.",
+      "gold": "Donald Trump",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00016__ what part of the brain is in the middle cranial fossa",
+      "prediction": "thus the weakest part",
+      "gold": "pituitary gland",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00017__ where do the greasers live in the outsiders",
+      "prediction": "West Side Story",
+      "gold": "Tulsa, Oklahoma",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00018__ who died in the plane crash greys anatomy",
+      "prediction": "Kevin McKidd",
+      "gold": "Dr. Lexie Grey",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00019__ where do they grow hops in the us",
+      "prediction": "Humulus lupulus.",
+      "gold": "Yakima (Washington)",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    }
+  ]
+}
