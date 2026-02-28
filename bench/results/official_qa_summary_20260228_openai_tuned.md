@@ -1,67 +1,76 @@
-# NovaSpine QA Summary (OpenAI tuned, 2026-02-28)
+# NovaSpine QA Summary (OpenAI tuned, overnight 2026-02-28)
 
-Best-per-benchmark runs (same retrieval profile, benchmark-specific answer tuning):
+Updated from fresh full QA runs using the timeout-safe pipeline and tuned retrieval profiles.
 
-- LongMemEval: `official_longmemeval_qa_openai_20260228_r4.json`
-- LoCoMo-MC10: `official_locomo_qa_openai_20260228_r6_mini.json`
-- DMR-500: `dmr_hybrid_openai_qa_llm_20260228_fast.json`
+## Best Artifacts
 
-## Best Results
+- LongMemEval: `official_longmemeval_qa_openai_20260228_r7.json`
+- LoCoMo-MC10 (answer quality profile): `official_locomo_qa_openai_20260228_r6_mini.json`
+- LoCoMo-MC10 (high-recall profile): `official_locomo_qa_openai_20260228_r7_k15.json`
+- DMR-500: `official_dmr_qa_openai_20260228_r7_k15.json`
 
-| Benchmark | doc_hit | EM | F1 |
+## Current Results
+
+| Benchmark | Profile | doc_hit | EM | F1 |
+|---|---|---:|---:|---:|
+| LongMemEval | `r7` | 1.000 | 0.296 | 0.360 |
+| LoCoMo-MC10 | `r6_mini` (quality) | 0.860 | 0.455 | 0.484 |
+| LoCoMo-MC10 | `r7_k15` (recall) | 0.944 | 0.420 | 0.457 |
+| DMR-500 | `r7_k15` | 0.884 | 0.576 | 0.581 |
+
+## Delta vs Prior OpenAI Tuned Summary
+
+| Benchmark | doc_hit delta | EM delta | F1 delta |
 |---|---:|---:|---:|
-| LongMemEval | 1.000 | 0.218 | 0.343 |
-| LoCoMo-MC10 | 0.860 | 0.455 | 0.484 |
-| DMR-500 | 0.806 | 0.498 | 0.584 |
+| LongMemEval (`r7` vs `r4`) | +0.000 | +0.078 | +0.017 |
+| DMR-500 (`r7_k15` vs `fast`) | +0.078 | +0.078 | -0.003 |
 
-## Delta vs 2026-02-27 v2
+Notes:
+- DMR improvements are large on retrieval and EM; F1 is effectively flat (slightly lower by 0.003).
+- LoCoMo currently has a retrieval-vs-answer tradeoff: `k15` improves doc-hit strongly, while `k10` profile remains stronger on EM/F1.
 
-| Benchmark | EM delta | F1 delta |
-|---|---:|---:|
-| LongMemEval | +0.046 | +0.057 |
-| LoCoMo-MC10 | +0.133 | +0.024 |
-| DMR-500 | +0.102 | +0.049 |
+## High-Impact Tuning Confirmed
 
-## Tuned Profiles Used
+1. DMR retrieval sensitivity to weighting/profile:
+- `keyword_plus` underused semantic retrieval on DMR (doc-hit regressed).
+- Default/adaptive weighting with OpenAI embeddings + `top_k=15` produced best DMR doc-hit (`0.882` retrieval-only; `0.884` in QA run).
 
-### LongMemEval (`r4`)
-- `--answer-context-k 8`
-- `--answer-max-context-chars 12000`
-- `--answer-chunk-chars 1400`
-- `--answer-min-score-ratio 0.0`
-- `--answer-max-tokens 256`
-- `--answer-reasoning on`
+2. LongMemEval answer routing:
+- `gpt-4.1-mini` with reasoning enabled and broader context remained best overall in full-run EM/F1.
+- Hard-route to `gpt-4.1` helped some slices but regressed on larger runs.
 
-### LoCoMo (`r5`)
-- Same as above except: `--answer-reasoning off` and `--answer-max-tokens 220`
+3. GPT-5-mini probe in this pipeline:
+- `long_probe_gpt5mini_20260228.json` underperformed (`EM 0.200`, `F1 0.206` on 40-row slice).
+- Current chat-completions QA path remains best with `gpt-4.1-mini` for stable benchmark output.
 
-### LoCoMo (`r6_mini`, timeout-safe Round 3)
-- `--answer-model gpt-4.1-mini`
-- `--answer-timeout-seconds 20`
-- `--answer-retries 1`
-- `--answer-min-interval-seconds 0.03`
-- `--session_diversity=on` (auto-enabled for LoCoMo)
-- Result: `doc_hit 0.860`, `EM 0.455`, `F1 0.484`
+## Recommended Command Profiles
 
-### DMR-500 (`dmr_hybrid_openai_qa_llm_20260228_fast`)
+### LongMemEval (best current)
+- `--top-k 10`
+- `--tune-preset keyword_plus --query-expansion`
+- `--answer-model gpt-4.1-mini --answer-route-hard off`
+- `--answer-context-k 8 --answer-max-context-chars 12000 --answer-chunk-chars 1400`
+- `--answer-max-tokens 256 --answer-reasoning on`
+
+### LoCoMo-MC10
+- Quality profile:
+  - `--top-k 10`
+  - `--tune-preset keyword_plus --query-expansion`
+  - `--answer-model gpt-4.1-mini --answer-reasoning off`
+- High-recall profile:
+  - same as above but `--top-k 15`
+
+### DMR-500 (best current)
+- `--top-k 15`
 - `--embed-provider openai --embed-model text-embedding-3-small --embed-dims 1536`
 - `--query-expansion`
-- `--answer-context-k 6`
-- `--answer-max-context-chars 10000`
-- `--answer-chunk-chars 1200`
-- `--answer-min-score-ratio 0.0`
-- `--answer-max-tokens 180`
-- `--answer-reasoning off`
-- `--answer-retries 1`
-- `--reuse-index` against prebuilt DMR corpus index
+- `--answer-model gpt-4.1-mini --answer-route-hard off --answer-reasoning off`
+- `--answer-context-k 6 --answer-max-context-chars 10000 --answer-chunk-chars 1200`
 
-## Notes
+## New/Relevant Artifacts Added This Round
 
-- Round 3 adds timeout-safe QA execution to prevent OpenAI 429/latency stalls from aborting full runs.
-- Full re-runs of LongMemEval/DMR under the new timeout-safe path were started but not completed within this session window; best published artifacts above remain valid.
-
-Common retrieval flags:
-- `--tune-preset keyword_plus`
-- `--query-expansion`
-- `--ingest-sync --skip-chunking`
-- `--answer-mode llm --answer-provider openai --answer-model gpt-4.1-mini`
+- `bench/results/official_longmemeval_qa_openai_20260228_r7.json`
+- `bench/results/official_dmr_qa_openai_20260228_r7_k15.json`
+- `bench/results/dmr_retrieval_full_openai_small_r7_default_k15_20260228.json`
+- `bench/results/official_locomo_qa_openai_20260228_r7_k15.json`
+- probe artifacts for ablations in `bench/results/*_20260228.json`

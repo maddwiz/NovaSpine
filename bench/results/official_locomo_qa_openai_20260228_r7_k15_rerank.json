@@ -1,0 +1,195 @@
+{
+  "benchmark": "official_locomo_qa_openai_20260228_r7_k15_rerank",
+  "dataset": "bench/official/converted/locomo_mc10_qa_eval.jsonl",
+  "rows_total": 143,
+  "rows_scored": 143,
+  "rows_skipped": 0,
+  "row_offset": 0,
+  "row_limit": 0,
+  "top_k": 15,
+  "answer_mode": "llm",
+  "doc_hit_rate": 0.8531468531468531,
+  "exact_match": 0.38461538461538464,
+  "token_f1": 0.44474453498923605,
+  "ingested_documents": 0,
+  "ingested_chunks": 0,
+  "data_dir": "/tmp/novaspine-qa-locomo-r7",
+  "ephemeral_data_dir": false,
+  "skip_chunking": true,
+  "reuse_index": true,
+  "embed_local": false,
+  "mode_notes": [
+    "query_expansion=on",
+    "tune_preset=keyword_plus",
+    "recall_variants=off",
+    "session_diversity=on min_sessions=3",
+    "answer_llm: provider=openai, model=gpt-4.1-mini, temp=0.0",
+    "answer_hard_route:off",
+    "llm_rerank:on candidates=12 keep_top_n=10",
+    "reuse_index=on (existing_chunks=12039, ingestion_skipped)"
+  ],
+  "answer_provider": "openai",
+  "answer_model": "gpt-4.1-mini",
+  "samples": [
+    {
+      "query": "__LOCOMO_CASE_0003__ What did Caroline research?",
+      "prediction": "counseling or mental health work",
+      "gold": "Adoption agencies",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0004__ What is Caroline's identity?",
+      "prediction": "mentor for LGBTQ youth",
+      "gold": "Transgender woman",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0007__ What is Caroline's relationship status?",
+      "prediction": "not stated",
+      "gold": "Single",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0010__ How long has Caroline had her current group of friends for?",
+      "prediction": "since 8 May 2023",
+      "gold": "4 years",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0011__ Where did Caroline move from 4 years ago?",
+      "prediction": "Melanie mentioned being married for 5 years and Caroline expressed congratulations and well-wishes.",
+      "gold": "Sweden",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0037__ What did Melanie paint recently?",
+      "prediction": "nature-inspired paintings",
+      "gold": "sunset",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0040__ How many times has Melanie gone to the beach in 2023?",
+      "prediction": "Caroline gave Melanie some advice on how to get started with the adoption process, emphasizing the importance of research and emotional preparation.",
+      "gold": "2",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0043__ What kind of art does Caroline make?",
+      "prediction": "abstract art",
+      "gold": "abstract art",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0055__ What subject have Caroline and Melanie both painted?",
+      "prediction": "horse",
+      "gold": "Sunsets",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0066__ What does Melanie do with her family on hikes?",
+      "prediction": "Caroline compliments Melanie on the quality time she spends with her family and remarks on the priceless nature of these experiences.",
+      "gold": "Roast marshmallows, tell stories",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0071__ What book did Melanie read from Caroline's suggestion?",
+      "prediction": "Becoming Nicole",
+      "gold": "\"Becoming Nicole\"",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0075__ How many children does Melanie have?",
+      "prediction": "Melanie then asks Caroline about her plans for the summer, to which Caroline replies that she is researching adoption agencies as she wants to give a loving home to children in need.",
+      "gold": "3",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0082__ What did the charity race raise awareness for?",
+      "prediction": "mental health",
+      "gold": "mental health",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0085__ What are Caroline's plans for the summer?",
+      "prediction": "volunteering at LGBTQ+ youth center",
+      "gold": "researching adoption agencies",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0091__ What does Caroline's necklace symbolize?",
+      "prediction": "love, faith, and strength",
+      "gold": "love, faith, and strength",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0092__ What country is Caroline's grandma from?",
+      "prediction": "Sweden",
+      "gold": "Sweden",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0093__ What was grandma's gift to Caroline?",
+      "prediction": "special necklace",
+      "gold": "necklace",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.6666666666666666
+    },
+    {
+      "query": "__LOCOMO_CASE_0094__ What is Melanie's hand-painted bowl a reminder of?",
+      "prediction": "art and self-expression",
+      "gold": "art and self-expression",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LOCOMO_CASE_0096__ What kind of counseling and mental health services is Caroline interested in pursuing?",
+      "prediction": "counseling or mental health work",
+      "gold": "working with trans people, helping them accept themselves and supporting their mental health",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.2222222222222222
+    },
+    {
+      "query": "__LOCOMO_CASE_0097__ What workshop did Caroline attend recently?",
+      "prediction": "LGBTQ conference",
+      "gold": "LGBTQ+ counseling workshop",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.4
+    }
+  ]
+}
