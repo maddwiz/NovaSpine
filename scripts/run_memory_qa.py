@@ -204,6 +204,12 @@ def _parse_args() -> argparse.Namespace:
         help="Absolute minimum score for context inclusion (except top-1).",
     )
     p.add_argument(
+        "--answer-normalize-mode",
+        default="typed",
+        choices=["typed", "legacy"],
+        help="Answer normalization mode (typed improves EM on short factual answers).",
+    )
+    p.add_argument(
         "--answer-context-rerank",
         default="none",
         choices=["none", "lexical"],
@@ -437,6 +443,14 @@ def _normalize_answer_by_type(answer: str, answer_type: str) -> str:
             m = re.search(pat, a, re.IGNORECASE)
             if m:
                 return _clean_answer(m.group(0))
+        word_num = re.search(
+            r"\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+            r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|once|twice|thrice)\b",
+            a,
+            re.IGNORECASE,
+        )
+        if word_num:
+            return _clean_answer(word_num.group(0))
         return _clean_answer(a)
 
     if answer_type == "DATE":
@@ -607,6 +621,7 @@ async def _answer_with_llm(
     context_rerank: str,
     context_pool_multiplier: int,
     context_overlap_weight: float,
+    normalize_mode: str,
     temperature: float,
     max_tokens: int,
     retries: int,
@@ -672,11 +687,18 @@ async def _answer_with_llm(
             )
             obj = parse_json_object(resp.content)
             if obj:
-                ans = _normalize_answer_by_type(str(obj.get("answer", "")), answer_type)
+                raw = str(obj.get("answer", ""))
+                ans = (
+                    _normalize_answer_by_type(raw, answer_type)
+                    if normalize_mode == "typed"
+                    else _clean_answer(raw)
+                )
                 if ans:
                     return ans
                 return ""
-            return _normalize_answer_by_type(resp.content, answer_type)
+            if normalize_mode == "typed":
+                return _normalize_answer_by_type(resp.content, answer_type)
+            return _clean_answer(resp.content)
         except Exception as e:
             last_exc = e
             if attempt >= max_tries - 1:
@@ -1053,6 +1075,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     context_rerank=args.answer_context_rerank,
                     context_pool_multiplier=args.answer_context_pool_multiplier,
                     context_overlap_weight=args.answer_context_overlap_weight,
+                    normalize_mode=args.answer_normalize_mode,
                     temperature=args.answer_temperature,
                     max_tokens=args.answer_max_tokens,
                     retries=args.answer_retries,

@@ -1,0 +1,195 @@
+{
+  "benchmark": "official_dmr_qa_openai_20260228_r11_k15",
+  "dataset": "bench/official/converted/dmr_memgpt_qa_eval.jsonl",
+  "rows_total": 500,
+  "rows_scored": 500,
+  "rows_skipped": 0,
+  "row_offset": 0,
+  "row_limit": 0,
+  "top_k": 15,
+  "answer_mode": "llm",
+  "doc_hit_rate": 0.884,
+  "exact_match": 0.576,
+  "token_f1": 0.573568175493757,
+  "ingested_documents": 0,
+  "ingested_chunks": 0,
+  "data_dir": "/tmp/novaspine-qa-dmr-openai-small-r7",
+  "ephemeral_data_dir": false,
+  "skip_chunking": true,
+  "reuse_index": true,
+  "embed_local": false,
+  "mode_notes": [
+    "embed_provider override: openai",
+    "embed_model override: text-embedding-3-small",
+    "embed_dims override: 1536",
+    "query_expansion=on",
+    "recall_variants=off",
+    "answer_llm: provider=openai, model=gpt-4.1-mini, temp=0.0",
+    "answer_hard_route:off",
+    "reuse_index=on (existing_chunks=15000, ingestion_skipped)"
+  ],
+  "answer_provider": "openai",
+  "answer_model": "gpt-4.1-mini",
+  "samples": [
+    {
+      "query": "__DMR_CASE_00000__ who got the first nobel prize in physics",
+      "prediction": "Wilhelm Conrad R\u00f6ntgen",
+      "gold": "Wilhelm Conrad R\u00f6ntgen",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00001__ when is the next deadpool movie being released",
+      "prediction": "Deadpool: The Video Game",
+      "gold": "May 18, 2018",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00002__ the south west wind blows across nigeria between",
+      "prediction": "February to June",
+      "gold": "till September",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00003__ what does hp mean in war and order",
+      "prediction": "health points",
+      "gold": "hit points or health points",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.5714285714285715
+    },
+    {
+      "query": "__DMR_CASE_00004__ who wrote the first declaration of human rights",
+      "prediction": "John Peters Humphrey",
+      "gold": "Cyrus",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00005__ who is the owner of reading football club",
+      "prediction": "Xiu Li Dai and Yongge Dai",
+      "gold": "Xiu Li Dai",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.6666666666666666
+    },
+    {
+      "query": "__DMR_CASE_00006__ when is the last time the philadelphia won the superbowl",
+      "prediction": "consecutive, appearance in the title game (they have won in all of their previous trips), against the National Conference Champions Philadelphia Soul, who were making their first appearance in the franchise's history in the ArenaBowl.",
+      "gold": "Super Bowl LII,",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00007__ how many episodes are there in dragon ball z",
+      "prediction": "291 episodes",
+      "gold": "291 episodes",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00008__ who designed the garden city of new earswick",
+      "prediction": "Raymond Unwin and Barry Parker",
+      "gold": "planner Raymond Unwin",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.5714285714285715
+    },
+    {
+      "query": "__DMR_CASE_00009__ what is the first step in the evolution of the eye",
+      "prediction": "patch of photoreceptors",
+      "gold": "photoreceptor proteins that sense light",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00010__ where is the tv show the curse of oak island filmed",
+      "prediction": "Oak Island",
+      "gold": "Oak Island",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00011__ where is gall bladder situated in human body",
+      "prediction": "beneath the liver",
+      "gold": "beneath the liver",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00012__ who is the current director of the us mint",
+      "prediction": "vacant",
+      "gold": "David J. Ryder",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00013__ what is the main mineral in lithium batteries",
+      "prediction": "lithium",
+      "gold": "Lithium",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00014__ right to property according to the constitution of india is a",
+      "prediction": "constitutional right",
+      "gold": "constitutional right",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00015__ who is the president of usa right now",
+      "prediction": "Donald Trump",
+      "gold": "Donald Trump",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00016__ what part of the brain is in the middle cranial fossa",
+      "prediction": "temporal lobes",
+      "gold": "pituitary gland",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00017__ where do the greasers live in the outsiders",
+      "prediction": "Windrixville",
+      "gold": "Tulsa, Oklahoma",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00018__ who died in the plane crash greys anatomy",
+      "prediction": "Mark Sloan",
+      "gold": "Dr. Lexie Grey",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00019__ where do they grow hops in the us",
+      "prediction": "Yakima (Washington) and Willamette (Oregon) valleys, western Canyon",
+      "gold": "Yakima (Washington)",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.4
+    }
+  ]
+}

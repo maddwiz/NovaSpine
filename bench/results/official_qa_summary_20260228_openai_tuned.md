@@ -28,6 +28,7 @@ Updated from fresh full QA runs using the timeout-safe pipeline and tuned retrie
 Notes:
 - DMR improvements are large on retrieval and EM; F1 remains near-flat (slightly lower vs earlier fast profile).
 - LoCoMo still has a retrieval-vs-answer tradeoff, but `k15` with lexical context rerank closes much of the EM gap while retaining high doc-hit.
+- Additional r10/r11 ablations (legacy normalization variants, wider LoCoMo context, LLM rerank-order-only, stricter typed fallback) were run; none beat the current best-per-benchmark profiles above.
 
 ## High-Impact Tuning Confirmed
 
