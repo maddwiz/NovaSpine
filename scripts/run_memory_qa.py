@@ -203,6 +203,24 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="Absolute minimum score for context inclusion (except top-1).",
     )
+    p.add_argument(
+        "--answer-context-rerank",
+        default="none",
+        choices=["none", "lexical"],
+        help="Re-rank answer-context candidates before truncation.",
+    )
+    p.add_argument(
+        "--answer-context-pool-multiplier",
+        type=int,
+        default=3,
+        help="Candidate pool multiplier for answer-context reranking.",
+    )
+    p.add_argument(
+        "--answer-context-overlap-weight",
+        type=float,
+        default=0.35,
+        help="Weight of query-content lexical overlap in answer-context reranking.",
+    )
     p.add_argument("--answer-retries", type=int, default=3, help="Retry attempts for answer LLM calls.")
     p.add_argument(
         "--answer-retry-base-seconds",
@@ -400,6 +418,53 @@ def _clean_answer(ans: str) -> str:
     return a
 
 
+def _normalize_answer_by_type(answer: str, answer_type: str) -> str:
+    a = (answer or "").strip()
+    if not a:
+        return ""
+    # Normalize obvious wrappers before type-specific extraction.
+    a = re.sub(r"^\s*(?:answer|final answer)\s*:\s*", "", a, flags=re.IGNORECASE).strip()
+
+    if answer_type == "YES_NO":
+        m = re.search(r"\b(yes|no)\b", a, re.IGNORECASE)
+        return m.group(1).lower() if m else _clean_answer(a)
+
+    if answer_type == "NUMBER":
+        for pat in (
+            r"\b\d+(?:\.\d+)?\s*(?:days?|weeks?|months?|years?|times?|episodes?|children|kids|hours?|minutes?)\b",
+            r"\b\d+(?:\.\d+)?\b",
+        ):
+            m = re.search(pat, a, re.IGNORECASE)
+            if m:
+                return _clean_answer(m.group(0))
+        return _clean_answer(a)
+
+    if answer_type == "DATE":
+        month = (
+            r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+        )
+        for pat in (
+            rf"\b{month}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*\d{{4}})?\b",
+            r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+            r"\b\d{4}-\d{2}-\d{2}\b",
+            r"\b\d{4}\b",
+        ):
+            m = re.search(pat, a, re.IGNORECASE)
+            if m:
+                return _clean_answer(m.group(0))
+        return _clean_answer(a)
+
+    # Most benchmark answers are short phrases. Keep first clause and cap length.
+    clause = re.split(r"[\n\r;.!?]", a, maxsplit=1)[0].strip(" \"'")
+    toks = clause.split()
+    if len(toks) > 8:
+        clause = " ".join(toks[:8])
+    if answer_type == "PLACE":
+        clause = re.sub(r"^\s*(?:in|at|on|from)\s+", "", clause, flags=re.IGNORECASE)
+    return _clean_answer(clause)
+
+
 def _detect_answer_type(query: str) -> str:
     q = _clean_question(query).lower().strip()
     if q.startswith(("who ", "whose ")):
@@ -472,20 +537,45 @@ def _derive_hard_model(base_model: str, explicit_hard_model: str) -> str:
 
 
 def _build_answer_context(
+    query: str,
     recalled: list[dict[str, Any]],
     k: int,
     per_chunk_chars: int,
     total_chars: int,
     min_score_ratio: float,
     min_score_abs: float,
+    context_rerank: str = "none",
+    context_pool_multiplier: int = 3,
+    context_overlap_weight: float = 0.35,
 ) -> str:
     chunks: list[str] = []
     used = 0
     if not recalled:
         return ""
-    top_score = float(recalled[0].get("score", 0.0))
+    rows = recalled[: max(1, k)]
+    if context_rerank == "lexical":
+        pool = max(1, int(context_pool_multiplier))
+        pool_rows = recalled[: max(1, k * pool)]
+        q_toks = set(re.findall(r"[a-z0-9_]+", _clean_question(query).lower()))
+        q_toks = {t for t in q_toks if len(t) > 1 and t not in _QUERY_STOPWORDS}
+        if q_toks and pool_rows:
+            top_raw = max(float(r.get("score", 0.0)) for r in pool_rows)
+            top_raw = top_raw if top_raw > 0.0 else 1.0
+            w = min(1.0, max(0.0, float(context_overlap_weight)))
+            scored_rows: list[tuple[float, int, dict[str, Any]]] = []
+            for idx, row in enumerate(pool_rows):
+                content = str(row.get("content", "")).lower()
+                s_toks = set(re.findall(r"[a-z0-9_]+", content))
+                overlap = (len(q_toks & s_toks) / max(1, len(q_toks))) if s_toks else 0.0
+                base = float(row.get("score", 0.0)) / top_raw
+                fused = (1.0 - w) * base + w * overlap
+                scored_rows.append((fused, -idx, row))
+            scored_rows.sort(reverse=True)
+            rows = [row for _, _, row in scored_rows[: max(1, k)]]
+
+    top_score = max(float(r.get("score", 0.0)) for r in rows) if rows else 0.0
     min_score = max(float(min_score_abs), top_score * max(0.0, float(min_score_ratio)))
-    for i, row in enumerate(recalled[: max(1, k)]):
+    for i, row in enumerate(rows):
         score = float(row.get("score", 0.0))
         if i > 0 and score < min_score:
             continue
@@ -514,6 +604,9 @@ async def _answer_with_llm(
     total_chars: int,
     min_score_ratio: float,
     min_score_abs: float,
+    context_rerank: str,
+    context_pool_multiplier: int,
+    context_overlap_weight: float,
     temperature: float,
     max_tokens: int,
     retries: int,
@@ -524,12 +617,16 @@ async def _answer_with_llm(
 ) -> str:
     clean_q = _clean_question(query)
     context = _build_answer_context(
+        clean_q,
         recalled,
         context_k,
         per_chunk_chars,
         total_chars,
         min_score_ratio=min_score_ratio,
         min_score_abs=min_score_abs,
+        context_rerank=context_rerank,
+        context_pool_multiplier=context_pool_multiplier,
+        context_overlap_weight=context_overlap_weight,
     )
     if not context:
         return ""
@@ -575,11 +672,11 @@ async def _answer_with_llm(
             )
             obj = parse_json_object(resp.content)
             if obj:
-                ans = _clean_answer(str(obj.get("answer", "")))
+                ans = _normalize_answer_by_type(str(obj.get("answer", "")), answer_type)
                 if ans:
                     return ans
                 return ""
-            return _clean_answer(resp.content)
+            return _normalize_answer_by_type(resp.content, answer_type)
         except Exception as e:
             last_exc = e
             if attempt >= max_tries - 1:
@@ -953,6 +1050,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     total_chars=args.answer_max_context_chars,
                     min_score_ratio=args.answer_min_score_ratio,
                     min_score_abs=args.answer_min_score_abs,
+                    context_rerank=args.answer_context_rerank,
+                    context_pool_multiplier=args.answer_context_pool_multiplier,
+                    context_overlap_weight=args.answer_context_overlap_weight,
                     temperature=args.answer_temperature,
                     max_tokens=args.answer_max_tokens,
                     retries=args.answer_retries,

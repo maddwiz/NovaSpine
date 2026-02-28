@@ -4,30 +4,30 @@ Updated from fresh full QA runs using the timeout-safe pipeline and tuned retrie
 
 ## Best Artifacts
 
-- LongMemEval: `official_longmemeval_qa_openai_20260228_r7.json`
+- LongMemEval: `official_longmemeval_qa_openai_20260228_r9.json`
 - LoCoMo-MC10 (answer quality profile): `official_locomo_qa_openai_20260228_r6_mini.json`
-- LoCoMo-MC10 (high-recall profile): `official_locomo_qa_openai_20260228_r7_k15.json`
-- DMR-500: `official_dmr_qa_openai_20260228_r7_k15.json`
+- LoCoMo-MC10 (high-recall profile): `official_locomo_qa_openai_20260228_r9_k15_lexctx.json`
+- DMR-500: `official_dmr_qa_openai_20260228_r9_k15.json`
 
 ## Current Results
 
 | Benchmark | Profile | doc_hit | EM | F1 |
 |---|---|---:|---:|---:|
-| LongMemEval | `r7` | 1.000 | 0.296 | 0.360 |
+| LongMemEval | `r9` | 1.000 | 0.304 | 0.367 |
 | LoCoMo-MC10 | `r6_mini` (quality) | 0.860 | 0.455 | 0.484 |
-| LoCoMo-MC10 | `r7_k15` (recall) | 0.944 | 0.420 | 0.457 |
-| DMR-500 | `r7_k15` | 0.884 | 0.576 | 0.581 |
+| LoCoMo-MC10 | `r9_k15_lexctx` (recall) | 0.944 | 0.448 | 0.458 |
+| DMR-500 | `r9_k15` | 0.884 | 0.590 | 0.579 |
 
 ## Delta vs Prior OpenAI Tuned Summary
 
 | Benchmark | doc_hit delta | EM delta | F1 delta |
 |---|---:|---:|---:|
-| LongMemEval (`r7` vs `r4`) | +0.000 | +0.078 | +0.017 |
-| DMR-500 (`r7_k15` vs `fast`) | +0.078 | +0.078 | -0.003 |
+| LongMemEval (`r9` vs `r4`) | +0.000 | +0.086 | +0.024 |
+| DMR-500 (`r9_k15` vs `fast`) | +0.078 | +0.092 | -0.005 |
 
 Notes:
-- DMR improvements are large on retrieval and EM; F1 is effectively flat (slightly lower by 0.003).
-- LoCoMo currently has a retrieval-vs-answer tradeoff: `k15` improves doc-hit strongly, while `k10` profile remains stronger on EM/F1.
+- DMR improvements are large on retrieval and EM; F1 remains near-flat (slightly lower vs earlier fast profile).
+- LoCoMo still has a retrieval-vs-answer tradeoff, but `k15` with lexical context rerank closes much of the EM gap while retaining high doc-hit.
 
 ## High-Impact Tuning Confirmed
 
@@ -43,6 +43,10 @@ Notes:
 3. GPT-5-mini probe in this pipeline:
 - `long_probe_gpt5mini_20260228.json` underperformed (`EM 0.200`, `F1 0.206` on 40-row slice).
 - Current chat-completions QA path remains best with `gpt-4.1-mini` for stable benchmark output.
+
+4. Answer-stage normalization + context selection:
+- Typed answer normalization (`NUMBER/DATE/YES_NO` focused extraction) improved formatting consistency and reduced verbose answer drift.
+- LoCoMo high-recall profile improved with answer-context lexical reranking (`EM 0.420 -> 0.448` at `doc_hit 0.944`).
 
 ## Recommended Command Profiles
 
@@ -60,6 +64,7 @@ Notes:
   - `--answer-model gpt-4.1-mini --answer-reasoning off`
 - High-recall profile:
   - same as above but `--top-k 15`
+  - add `--answer-context-rerank lexical --answer-context-pool-multiplier 4 --answer-context-overlap-weight 0.45`
 
 ### DMR-500 (best current)
 - `--top-k 15`
@@ -70,8 +75,8 @@ Notes:
 
 ## New/Relevant Artifacts Added This Round
 
-- `bench/results/official_longmemeval_qa_openai_20260228_r7.json`
-- `bench/results/official_dmr_qa_openai_20260228_r7_k15.json`
+- `bench/results/official_longmemeval_qa_openai_20260228_r9.json`
+- `bench/results/official_dmr_qa_openai_20260228_r9_k15.json`
 - `bench/results/dmr_retrieval_full_openai_small_r7_default_k15_20260228.json`
-- `bench/results/official_locomo_qa_openai_20260228_r7_k15.json`
+- `bench/results/official_locomo_qa_openai_20260228_r9_k15_lexctx.json`
 - probe artifacts for ablations in `bench/results/*_20260228.json`
