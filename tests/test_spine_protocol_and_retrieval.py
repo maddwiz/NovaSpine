@@ -13,8 +13,10 @@ from c3ae.types import SearchResult
 class _KeywordStub:
     def __init__(self, results: list[SearchResult]) -> None:
         self.results = results
+        self.last_query = ""
 
     def search_all(self, query: str, limit: int = 20) -> list[SearchResult]:
+        self.last_query = query
         return list(self.results[:limit])
 
 
@@ -57,6 +59,43 @@ def test_hybrid_entity_query_shifts_weight_to_keyword():
 
     merged = hybrid.search("find user_id abc-123", query_vector=object(), top_k=5)
     assert merged[0].id == "kw-hit"
+
+
+def test_hybrid_query_expansion_applies_to_open_domain_queries():
+    cfg = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=False,
+        enable_query_expansion=True,
+        query_expansion_max_terms=4,
+    )
+    kw = _KeywordStub([_mk_result("kw-hit", 0.2, 0.1)])
+    vec = _VectorStub([])
+    hybrid = HybridSearch(kw, vec, config=cfg)
+    query = "who is the owner of reading football club"
+    out = hybrid.search(query, query_vector=None, top_k=5)
+    assert out and out[0].id == "kw-hit"
+    assert kw.last_query != query
+    assert "owns" in kw.last_query or "person" in kw.last_query
+
+
+def test_hybrid_query_expansion_skips_benchmark_case_tokens():
+    cfg = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=False,
+        enable_query_expansion=True,
+        query_expansion_max_terms=4,
+    )
+    kw = _KeywordStub([_mk_result("kw-hit", 0.2, 0.1)])
+    vec = _VectorStub([])
+    hybrid = HybridSearch(kw, vec, config=cfg)
+    query = "__DMR_CASE_00012__ who is the owner of reading football club"
+    out = hybrid.search(query, query_vector=None, top_k=5)
+    assert out and out[0].id == "kw-hit"
+    assert kw.last_query == query
 
 
 def test_hybrid_decay_and_access_boost_are_applied():

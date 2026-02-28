@@ -38,9 +38,13 @@ from c3ae.types import (
     SearchResult,
     SkillCapsule,
 )
-from c3ae.utils import chunk_text, iso_str, utcnow
-
-_BENCH_CASE_TOKEN_RE = re.compile(r"__[A-Z]+_CASE_\d+__", re.IGNORECASE)
+from c3ae.utils import (
+    chunk_text,
+    extract_benchmark_case_token,
+    iso_str,
+    parse_json_object,
+    utcnow,
+)
 
 
 class MemorySpine:
@@ -280,7 +284,9 @@ class MemorySpine:
             elif benchmark_source:
                 dedup_key = f"benchmark_source:{benchmark_source}"
             else:
-                dedup_key = r.content.strip().lower()[:200]
+                dedup_key = f"id:{r.id}" if r.id else hashlib.sha1(
+                    r.content.strip().lower().encode("utf-8", errors="ignore")
+                ).hexdigest()
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
@@ -1210,10 +1216,7 @@ class MemorySpine:
 
     @staticmethod
     def _extract_benchmark_case_token(raw: str) -> str:
-        if not raw:
-            return ""
-        m = _BENCH_CASE_TOKEN_RE.search(raw)
-        return m.group(0).upper() if m else ""
+        return extract_benchmark_case_token(raw)
 
     def _merge_with_graph(
         self,
@@ -1496,7 +1499,7 @@ class MemorySpine:
                 max_tokens=int(self.config.consolidation.llm_max_tokens),
                 json_mode=True,
             )
-            data = self._parse_json_object(resp.content)
+            data = parse_json_object(resp.content)
             rows = data.get("facts", [])
             out: list[str] = []
             if isinstance(rows, list):
@@ -1566,7 +1569,7 @@ class MemorySpine:
                 max_tokens=int(self.config.consolidation.llm_max_tokens),
                 json_mode=True,
             )
-            data = self._parse_json_object(resp.content)
+            data = parse_json_object(resp.content)
             summary = str(data.get("summary", "")).strip()
             if summary:
                 return summary, True
@@ -1656,27 +1659,6 @@ class MemorySpine:
             "unique_source_chunks": len(unique_refs),
             "total_references": total_refs,
         }
-
-    @staticmethod
-    def _parse_json_object(raw: str) -> dict[str, Any]:
-        text = (raw or "").strip()
-        if not text:
-            return {}
-        if "```json" in text:
-            m = re.search(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-            if m:
-                text = m.group(1).strip()
-        elif text.startswith("```"):
-            m = re.search(r"```\s*(.*?)\s*```", text, flags=re.DOTALL)
-            if m:
-                text = m.group(1).strip()
-        try:
-            import json
-
-            data = json.loads(text)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
 
     # --- Internals ---
 

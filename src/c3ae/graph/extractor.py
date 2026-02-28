@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import json
 import re
 from typing import Any
 
+from c3ae.utils import parse_json_object
 
 _STOPWORDS = {
     "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "at", "by",
@@ -154,7 +154,7 @@ async def _extract_graph_facts_llm(
         max_tokens=max_tokens,
         json_mode=True,
     )
-    payload = _parse_json_object(response.content)
+    payload = parse_json_object(response.content)
     entity_rows = payload.get("entities", [])
     relation_rows = payload.get("relations", [])
 
@@ -273,21 +273,3 @@ def _coerce_float(value: Any, default: float) -> float:
 def _clamp_confidence(value: float) -> float:
     return max(0.05, min(0.99, float(value)))
 
-
-def _parse_json_object(raw: str) -> dict[str, Any]:
-    text = (raw or "").strip()
-    if not text:
-        return {}
-    if "```json" in text:
-        m = re.search(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-        if m:
-            text = m.group(1).strip()
-    elif text.startswith("```"):
-        m = re.search(r"```\s*(.*?)\s*```", text, flags=re.DOTALL)
-        if m:
-            text = m.group(1).strip()
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        return {}

@@ -82,6 +82,12 @@ class RetrievalConfig(BaseModel):
     graph_weight: float = 0.2
     rrf_k: int = 30
     rrf_overlap_boost: float = 1.25
+    enable_query_expansion: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_QUERY_EXPANSION", False)
+    )
+    query_expansion_max_terms: int = Field(
+        default_factory=lambda: _env_int("C3AE_QUERY_EXPANSION_MAX_TERMS", 4)
+    )
 
 
 class COSConfig(BaseModel):

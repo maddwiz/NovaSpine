@@ -25,10 +25,45 @@ class KeywordSearch:
         return self.store.search_consolidated_fts(query, limit=limit)
 
     def search_all(self, query: str, limit: int = 20) -> list[SearchResult]:
-        """Search across chunks + reasoning bank."""
-        chunks = self.search_chunks(query, limit=limit)
-        reasoning = self.search_reasoning(query, limit=limit)
-        consolidated = self.search_consolidated(query, limit=limit)
-        combined = chunks + reasoning + consolidated
+        """Search across chunks + reasoning bank with per-source score normalization."""
+        fetch = max(limit * 3, limit)
+        groups = [
+            self.search_chunks(query, limit=fetch),
+            self.search_reasoning(query, limit=fetch),
+            self.search_consolidated(query, limit=fetch),
+        ]
+        combined: list[SearchResult] = []
+        for rows in groups:
+            combined.extend(self._normalize_scores(rows))
         combined.sort(key=lambda r: r.score, reverse=True)
-        return combined[:limit]
+        out: list[SearchResult] = []
+        seen: set[str] = set()
+        for row in combined:
+            if row.id in seen:
+                continue
+            seen.add(row.id)
+            out.append(row)
+            if len(out) >= limit:
+                break
+        return out
+
+    @staticmethod
+    def _normalize_scores(rows: list[SearchResult]) -> list[SearchResult]:
+        if not rows:
+            return []
+        scores = [float(r.score) for r in rows]
+        lo = min(scores)
+        hi = max(scores)
+        span = (hi - lo) if hi > lo else 1.0
+        out: list[SearchResult] = []
+        for r in rows:
+            out.append(
+                SearchResult(
+                    id=r.id,
+                    content=r.content,
+                    score=(float(r.score) - lo) / span,
+                    source=r.source,
+                    metadata=r.metadata,
+                )
+            )
+        return out

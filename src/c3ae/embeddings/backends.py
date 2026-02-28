@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -149,6 +150,63 @@ class HashEmbedder:
         return None
 
 
+class SentenceTransformerEmbedder:
+    """Local semantic embedder using sentence-transformers."""
+
+    def __init__(self, model: str = "all-MiniLM-L6-v2", dims: int = 384) -> None:
+        self.model_name = model or "all-MiniLM-L6-v2"
+        self.dims = max(32, int(dims))
+        self._model = None
+
+    def _ensure_model(self):
+        if self._model is not None:
+            return self._model
+        try:
+            from sentence_transformers import SentenceTransformer
+        except Exception as exc:
+            raise RuntimeError(
+                "sentence-transformers is required for embedding_provider='sbert'. "
+                "Install with: pip install 'novaspine[semantic]'"
+            ) from exc
+        self._model = SentenceTransformer(self.model_name)
+        return self._model
+
+    def _fit_dims(self, arr: np.ndarray) -> np.ndarray:
+        if arr.shape[1] == self.dims:
+            out = arr
+        elif arr.shape[1] > self.dims:
+            out = arr[:, : self.dims]
+        else:
+            pad = np.zeros((arr.shape[0], self.dims - arr.shape[1]), dtype=np.float32)
+            out = np.concatenate([arr, pad], axis=1)
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        return (out / norms).astype(np.float32, copy=False)
+
+    def _encode_sync(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dims), dtype=np.float32)
+        model = self._ensure_model()
+        vectors = model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        arr = np.asarray(vectors, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        return self._fit_dims(arr)
+
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        return await asyncio.to_thread(self._encode_sync, texts)
+
+    async def embed_single(self, text: str) -> np.ndarray:
+        return (await self.embed([text]))[0]
+
+    async def close(self) -> None:
+        return None
+
+
 def create_embedder(config: VeniceConfig | None = None) -> EmbeddingBackend:
     cfg = config or VeniceConfig()
     provider = (cfg.embedding_provider or "venice").strip().lower()
@@ -160,4 +218,9 @@ def create_embedder(config: VeniceConfig | None = None) -> EmbeddingBackend:
         return OllamaEmbedder(dims=cfg.embedding_dims)
     if provider in {"hash", "localhash"}:
         return HashEmbedder(dims=cfg.embedding_dims)
+    if provider in {"sbert", "sentence-transformers", "sentence_transformers"}:
+        model = cfg.embedding_model.strip() if cfg.embedding_model else "all-MiniLM-L6-v2"
+        if model == "text-embedding-bge-m3":
+            model = "all-MiniLM-L6-v2"
+        return SentenceTransformerEmbedder(model=model, dims=cfg.embedding_dims)
     raise ValueError(f"Unsupported embedding provider: {cfg.embedding_provider}")

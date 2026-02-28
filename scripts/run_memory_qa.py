@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import os
 import re
 import tempfile
@@ -19,11 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from c3ae.config import Config
+from c3ae.eval.corpus import build_corpus_docs, load_jsonl
 from c3ae.eval import best_exact_match, best_f1, extractive_answer
 from c3ae.llm import Message, create_chat_backend
 from c3ae.memory_spine.spine import MemorySpine
+from c3ae.utils import extract_benchmark_case_token, parse_json_object, strip_benchmark_case_tokens
 
-_CASE_TOKEN_RE = re.compile(r"__\w+_CASE_\d+__", re.IGNORECASE)
 _QUERY_STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "to", "of", "in", "on", "for",
     "and", "or", "with", "what", "when", "who", "where", "which", "did", "do",
@@ -45,7 +47,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--embed-provider",
         default="",
-        choices=["", "venice", "openai", "ollama", "hash", "localhash"],
+        choices=["", "venice", "openai", "ollama", "hash", "localhash", "sbert"],
         help="Override embedding provider (defaults to config/env).",
     )
     p.add_argument("--embed-model", default="", help="Optional embedding model override")
@@ -66,6 +68,11 @@ def _parse_args() -> argparse.Namespace:
         help="Explicit overlap boost override",
     )
     p.add_argument("--disable-graph", action="store_true", help="Disable graph indexing/merge")
+    p.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Enable keyword query expansion in hybrid retrieval.",
+    )
     p.add_argument(
         "--recall-variants",
         action="store_true",
@@ -106,24 +113,66 @@ def _parse_args() -> argparse.Namespace:
         help="LLM model for --answer-mode llm.",
     )
     p.add_argument("--answer-temperature", type=float, default=0.0, help="LLM answer temperature")
-    p.add_argument("--answer-max-tokens", type=int, default=160, help="LLM answer max tokens")
+    p.add_argument("--answer-max-tokens", type=int, default=192, help="LLM answer max tokens")
     p.add_argument(
         "--answer-context-k",
         type=int,
-        default=8,
+        default=5,
         help="Number of recalled chunks to provide to answer LLM",
     )
     p.add_argument(
         "--answer-max-context-chars",
         type=int,
-        default=12000,
+        default=9000,
         help="Global max context chars provided to answer LLM",
     )
     p.add_argument(
         "--answer-chunk-chars",
         type=int,
-        default=1400,
+        default=1200,
         help="Per-chunk truncation length for answer context",
+    )
+    p.add_argument(
+        "--answer-min-score-ratio",
+        type=float,
+        default=0.3,
+        help="Minimum score ratio vs top score for context inclusion (except top-1).",
+    )
+    p.add_argument(
+        "--answer-min-score-abs",
+        type=float,
+        default=0.0,
+        help="Absolute minimum score for context inclusion (except top-1).",
+    )
+    p.add_argument("--answer-retries", type=int, default=3, help="Retry attempts for answer LLM calls.")
+    p.add_argument(
+        "--answer-retry-base-seconds",
+        type=float,
+        default=0.8,
+        help="Base delay for exponential retry backoff.",
+    )
+    p.add_argument(
+        "--answer-reasoning",
+        default="auto",
+        choices=["off", "on", "auto"],
+        help="Reasoning mode for answer generation.",
+    )
+    p.add_argument(
+        "--rerank-with-llm",
+        action="store_true",
+        help="Use LLM to re-rank retrieved candidates before answering.",
+    )
+    p.add_argument(
+        "--rerank-candidates",
+        type=int,
+        default=10,
+        help="Number of candidates passed to LLM reranker.",
+    )
+    p.add_argument(
+        "--rerank-top-n",
+        type=int,
+        default=0,
+        help="Keep top-N after reranking (0 keeps all candidates).",
     )
     p.add_argument(
         "--no-answer-fallback",
@@ -134,94 +183,12 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if isinstance(obj, dict):
-                rows.append(obj)
-    return rows
-
-
-def _build_corpus_docs(
-    eval_rows: list[dict[str, Any]],
-    corpus_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    docs: list[dict[str, Any]] = []
-
-    def _append_doc(
-        *,
-        text: str,
-        doc_id: str,
-        source_id: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        t = text.strip()
-        if not t:
-            return
-        meta = dict(metadata or {})
-        meta.setdefault("benchmark_doc_id", doc_id)
-        meta.setdefault("benchmark_source", source_id)
-        docs.append(
-            {
-                "text": t,
-                "doc_id": doc_id,
-                "source_id": source_id,
-                "metadata": meta,
-            }
-        )
-
-    for idx, row in enumerate(corpus_rows):
-        text = str(row.get("text") or row.get("content") or row.get("memory") or "").strip()
-        if not text:
-            continue
-        doc_id = str(row.get("doc_id") or row.get("id") or f"corpus_{idx:04d}")
-        source_id = str(row.get("source_id") or f"benchmark:{doc_id}")
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        _append_doc(text=text, doc_id=doc_id, source_id=source_id, metadata=metadata)
-
-    for idx, row in enumerate(eval_rows):
-        base_doc_id = str(row.get("doc_id") or f"eval_{idx:04d}")
-        source_id = str(row.get("source_id") or f"benchmark:{base_doc_id}")
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        memory = row.get("memory")
-        if isinstance(memory, str) and memory.strip():
-            _append_doc(
-                text=memory,
-                doc_id=base_doc_id,
-                source_id=source_id,
-                metadata=metadata,
-            )
-        memories = row.get("memories")
-        if isinstance(memories, list):
-            for j, mem in enumerate(memories):
-                if isinstance(mem, str) and mem.strip():
-                    _append_doc(
-                        text=mem,
-                        doc_id=f"{base_doc_id}_m{j}",
-                        source_id=f"{source_id}:m{j}",
-                        metadata=metadata,
-                    )
-
-    unique: dict[tuple[str, str], dict[str, Any]] = {}
-    for doc in docs:
-        key = (doc["doc_id"], doc["text"])
-        if key not in unique:
-            unique[key] = doc
-    return list(unique.values())
-
-
 def _clean_question(query: str) -> str:
-    return re.sub(r"\s+", " ", _CASE_TOKEN_RE.sub(" ", query)).strip()
+    return strip_benchmark_case_tokens(query)
 
 
 def _extract_case_token(query: str) -> str:
-    m = _CASE_TOKEN_RE.search(query or "")
-    return m.group(0) if m else ""
+    return extract_benchmark_case_token(query)
 
 
 def _strip_leading_wh(clean_query: str) -> str:
@@ -352,31 +319,52 @@ def _clean_answer(ans: str) -> str:
     return a
 
 
-def _extract_json_dict(s: str) -> dict[str, Any]:
-    raw = s.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE | re.DOTALL).strip()
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-    m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            return {}
-    return {}
+def _detect_answer_type(query: str) -> str:
+    q = _clean_question(query).lower().strip()
+    if q.startswith(("who ", "whose ")):
+        return "PERSON_NAME"
+    if q.startswith("when ") or "what date" in q or "what year" in q:
+        return "DATE"
+    if q.startswith("where "):
+        return "PLACE"
+    if "how many" in q or "how much" in q:
+        return "NUMBER"
+    if " or " in q:
+        return "CHOICE"
+    if q.startswith(("is ", "are ", "was ", "were ", "did ", "does ", "do ", "has ", "can ")):
+        return "YES_NO"
+    return "SHORT_PHRASE"
 
 
-def _build_answer_context(recalled: list[dict[str, Any]], k: int, per_chunk_chars: int, total_chars: int) -> str:
+_TYPE_HINTS = {
+    "PERSON_NAME": "Answer with just the person's name.",
+    "DATE": "Answer with just the date, year, or time span.",
+    "PLACE": "Answer with just the place/location name.",
+    "NUMBER": "Answer with just the number and unit.",
+    "CHOICE": "Answer with one of the provided options only.",
+    "YES_NO": "Answer yes or no only.",
+    "SHORT_PHRASE": "Answer with the shortest phrase possible (1-6 words).",
+}
+
+
+def _build_answer_context(
+    recalled: list[dict[str, Any]],
+    k: int,
+    per_chunk_chars: int,
+    total_chars: int,
+    min_score_ratio: float,
+    min_score_abs: float,
+) -> str:
     chunks: list[str] = []
     used = 0
+    if not recalled:
+        return ""
+    top_score = float(recalled[0].get("score", 0.0))
+    min_score = max(float(min_score_abs), top_score * max(0.0, float(min_score_ratio)))
     for i, row in enumerate(recalled[: max(1, k)]):
+        score = float(row.get("score", 0.0))
+        if i > 0 and score < min_score:
+            continue
         content = str(row.get("content", "")).strip()
         if not content:
             continue
@@ -384,7 +372,6 @@ def _build_answer_context(recalled: list[dict[str, Any]], k: int, per_chunk_char
             content = content[:per_chunk_chars].rstrip() + " ..."
         md = row.get("metadata") or {}
         doc_id = str(md.get("benchmark_doc_id", "")).strip() or str(row.get("id", ""))
-        score = float(row.get("score", 0.0))
         block = f"[{i+1}] doc_id={doc_id} score={score:.4f}\n{content}"
         if used + len(block) > total_chars:
             break
@@ -401,26 +388,103 @@ async def _answer_with_llm(
     context_k: int,
     per_chunk_chars: int,
     total_chars: int,
+    min_score_ratio: float,
+    min_score_abs: float,
     temperature: float,
     max_tokens: int,
+    retries: int,
+    retry_base_seconds: float,
+    reasoning_mode: str,
 ) -> str:
     clean_q = _clean_question(query)
-    context = _build_answer_context(recalled, context_k, per_chunk_chars, total_chars)
+    context = _build_answer_context(
+        recalled,
+        context_k,
+        per_chunk_chars,
+        total_chars,
+        min_score_ratio=min_score_ratio,
+        min_score_abs=min_score_abs,
+    )
     if not context:
         return ""
+    answer_type = _detect_answer_type(clean_q)
+    use_reasoning = reasoning_mode == "on" or (
+        reasoning_mode == "auto" and answer_type in {"NUMBER", "DATE", "CHOICE"}
+    )
+    response_schema = "{\"reasoning\":\"...\", \"answer\":\"...\"}" if use_reasoning else "{\"answer\":\"...\"}"
     system = (
         "You are a strict QA answerer. Use only the provided context.\n"
-        "Return JSON only: {\"answer\":\"...\"}.\n"
+        f"Return JSON only: {response_schema}.\n"
         "Rules:\n"
         "- answer with the shortest exact phrase possible\n"
         "- prefer canonical forms: numerals (2 not twice), concise entities, no leading articles\n"
         "- keep units when present in context (for example: '7 days', '5 months')\n"
+        f"- expected answer type: {answer_type} ({_TYPE_HINTS[answer_type]})\n"
         "- no explanation, no extra keys, no markdown\n"
-        "- if uncertain, return {\"answer\":\"\"}"
+        "- if uncertain, return an empty answer"
     )
+    if use_reasoning:
+        system += "\n- include concise reasoning (<= 40 words) before final answer"
     user = (
         f"Question:\n{clean_q}\n\n"
         f"Context:\n{context}\n\n"
+        "Return JSON now."
+    )
+    last_exc: Exception | None = None
+    max_tries = max(1, int(retries))
+    for attempt in range(max_tries):
+        try:
+            resp = await llm_backend.chat(
+                [Message(role="system", content=system), Message(role="user", content=user)],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=True,
+            )
+            obj = parse_json_object(resp.content)
+            if obj:
+                ans = _clean_answer(str(obj.get("answer", "")))
+                if ans:
+                    return ans
+                return ""
+            return _clean_answer(resp.content)
+        except Exception as e:
+            last_exc = e
+            if attempt >= max_tries - 1:
+                break
+            delay = float(retry_base_seconds) * (2**attempt) + random.uniform(0.0, 0.25)
+            await asyncio.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    return ""
+
+
+async def _rerank_with_llm(
+    *,
+    query: str,
+    recalled: list[dict[str, Any]],
+    llm_backend: Any,
+    candidates: int,
+    top_n: int,
+    temperature: float,
+    max_tokens: int,
+) -> list[dict[str, Any]]:
+    if not recalled:
+        return []
+    pool = recalled[: max(1, int(candidates))]
+    prompt_lines = []
+    for i, row in enumerate(pool, start=1):
+        text = str(row.get("content", "")).strip().replace("\n", " ")
+        if len(text) > 220:
+            text = text[:220].rstrip() + " ..."
+        prompt_lines.append(f"[{i}] {text}")
+    system = (
+        "Rank passages by relevance to the question. "
+        "Return strict JSON: {\"ranking\": [indices in best-to-worst order]}."
+    )
+    user = (
+        f"Question:\n{_clean_question(query)}\n\n"
+        "Passages:\n"
+        f"{chr(10).join(prompt_lines)}\n\n"
         "Return JSON now."
     )
     resp = await llm_backend.chat(
@@ -429,13 +493,28 @@ async def _answer_with_llm(
         max_tokens=max_tokens,
         json_mode=True,
     )
-    obj = _extract_json_dict(resp.content)
-    if obj:
-        ans = _clean_answer(str(obj.get("answer", "")))
-        if ans:
-            return ans
-        return ""
-    return _clean_answer(resp.content)
+    parsed = parse_json_object(resp.content)
+    ranking = parsed.get("ranking", []) if isinstance(parsed, dict) else []
+    order: list[int] = []
+    if isinstance(ranking, list):
+        for x in ranking:
+            try:
+                idx = int(x)
+            except Exception:
+                continue
+            if 1 <= idx <= len(pool) and idx not in order:
+                order.append(idx)
+    reordered = [pool[i - 1] for i in order]
+    seen_ids = {_result_key(r) for r in reordered}
+    for row in pool:
+        key = _result_key(row)
+        if key not in seen_ids:
+            reordered.append(row)
+            seen_ids.add(key)
+    tail = [r for r in recalled if _result_key(r) not in seen_ids]
+    out = reordered + tail
+    keep = int(top_n) if int(top_n) > 0 else len(out)
+    return out[:keep]
 
 
 def _validate_llm_provider(provider: str, cfg: Config) -> None:
@@ -466,6 +545,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.embed_provider:
         cfg.venice.embedding_provider = args.embed_provider
         mode_notes.append(f"embed_provider override: {args.embed_provider}")
+        if args.embed_provider == "sbert":
+            if not args.embed_model:
+                cfg.venice.embedding_model = "all-MiniLM-L6-v2"
+                mode_notes.append("sbert default model: all-MiniLM-L6-v2")
+            if args.embed_dims <= 0:
+                cfg.venice.embedding_dims = 384
+                mode_notes.append("sbert default dims: 384")
     if args.embed_model:
         cfg.venice.embedding_model = args.embed_model
         mode_notes.append(f"embed_model override: {args.embed_model}")
@@ -475,6 +561,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.disable_graph:
         cfg.graph.enabled = False
         mode_notes.append("graph disabled")
+    if args.query_expansion:
+        cfg.retrieval.enable_query_expansion = True
+        mode_notes.append("query_expansion=on")
     if args.tune_preset == "keyword_plus":
         cfg.retrieval.adaptive_weights = False
         cfg.retrieval.keyword_weight = 0.88
@@ -525,10 +614,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             mode_notes.append(
                 f"answer_llm: provider={args.answer_provider}, model={args.answer_model}, temp={args.answer_temperature}"
             )
-        rows = _load_jsonl(Path(args.dataset))
+            if args.rerank_with_llm:
+                mode_notes.append(
+                    "llm_rerank:on"
+                    f" candidates={max(1, int(args.rerank_candidates))}"
+                    f" keep_top_n={max(0, int(args.rerank_top_n))}"
+                )
+        rows = load_jsonl(Path(args.dataset))
         if not rows:
             raise ValueError("dataset has no rows")
-        corpus_docs = _build_corpus_docs(rows, _load_jsonl(Path(args.corpus)) if args.corpus else [])
+        corpus_docs = build_corpus_docs(rows, load_jsonl(Path(args.corpus)) if args.corpus else [])
         use_ingest_sync = bool(args.ingest_sync) and not bool(args.embed_local)
         if args.embed_local and args.ingest_sync:
             mode_notes.append("embed_local enabled: ignoring --ingest-sync to build vector index")
@@ -573,6 +668,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             expected_doc_ids = {str(x) for x in row.get("expected_doc_ids", []) if str(x)}
             if use_recall_variants:
                 fetch_k = max(args.top_k * max(1, int(args.variant_fetch_multiplier)), args.top_k)
+                fetch_k = max(fetch_k, max(1, int(args.rerank_candidates)))
                 variants = _build_recall_variants(query)
                 variant_rows: list[tuple[float, list[dict[str, Any]]]] = []
                 for variant_q, weight in variants:
@@ -584,7 +680,27 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     rrf_k=max(1, int(args.variant_rrf_k)),
                 )
             else:
-                recalled = await spine.recall(query, top_k=args.top_k)
+                fetch_k = max(args.top_k, max(1, int(args.rerank_candidates)))
+                recalled = await spine.recall(query, top_k=fetch_k)
+            if (
+                args.answer_mode == "llm"
+                and bool(args.rerank_with_llm)
+                and llm_backend is not None
+                and recalled
+            ):
+                try:
+                    recalled = await _rerank_with_llm(
+                        query=query,
+                        recalled=recalled,
+                        llm_backend=llm_backend,
+                        candidates=max(1, int(args.rerank_candidates)),
+                        top_n=max(0, int(args.rerank_top_n)),
+                        temperature=args.answer_temperature,
+                        max_tokens=max(128, min(512, int(args.answer_max_tokens))),
+                    )
+                except Exception:
+                    pass
+            recalled = recalled[: max(1, int(args.top_k))]
             docs = [str((r.get("metadata") or {}).get("benchmark_doc_id", "")) for r in recalled]
             hit = any(d in expected_doc_ids for d in docs) if expected_doc_ids else False
 
@@ -598,8 +714,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     context_k=args.answer_context_k,
                     per_chunk_chars=args.answer_chunk_chars,
                     total_chars=args.answer_max_context_chars,
+                    min_score_ratio=args.answer_min_score_ratio,
+                    min_score_abs=args.answer_min_score_abs,
                     temperature=args.answer_temperature,
                     max_tokens=args.answer_max_tokens,
+                    retries=args.answer_retries,
+                    retry_base_seconds=args.answer_retry_base_seconds,
+                    reasoning_mode=args.answer_reasoning,
                 )
                 if not pred and not args.no_answer_fallback:
                     pred = extractive_answer(query, recalled)

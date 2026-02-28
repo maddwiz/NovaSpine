@@ -19,6 +19,17 @@ def test_exact_match_and_f1():
     assert best_f1(pred, answers) > 0.7
 
 
+def test_exact_match_accepts_multi_answer_subclauses():
+    answers = ["7 days. 8 days (including the last day) is also acceptable."]
+    assert best_exact_match("7 days", answers) == 1.0
+    assert best_f1("7 days", answers) >= 0.99
+
+
+def test_normalize_numeric_words_in_exact_match():
+    answers = ["twice"]
+    assert best_exact_match("2", answers) == 1.0
+
+
 def test_extractive_answer_prefers_query_overlap():
     recalled = [
         {"content": "This paragraph is unrelated to the question."},

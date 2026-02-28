@@ -6,16 +6,50 @@ import re
 import unicodedata
 from typing import Any
 
+from c3ae.utils import strip_benchmark_case_tokens
+
 _STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "to", "of", "in", "on", "for",
     "and", "or", "with", "what", "when", "who", "where", "which", "did", "do",
     "does", "at", "by", "from", "as", "it", "be", "this", "that",
 }
-_CASE_TOKEN_RE = re.compile(r"__\w+_CASE_\d+__", re.IGNORECASE)
 _MONTH_RE = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
     r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+_NUM_WORDS = {
+    "once": "1",
+    "twice": "2",
+    "thrice": "3",
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+}
+
+
+def _normalize_numeric_words(text: str) -> str:
+    toks = text.split()
+    if not toks:
+        return text
+    return " ".join(_NUM_WORDS.get(t, t) for t in toks)
 
 
 def normalize_text(s: str) -> str:
@@ -24,7 +58,28 @@ def normalize_text(s: str) -> str:
     t = t.lower()
     t = re.sub(r"[^a-z0-9\s]", " ", t)
     t = re.sub(r"\b(a|an|the)\b", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    return _normalize_numeric_words(t)
+
+
+def _answer_variants(answer: str) -> list[str]:
+    base = (answer or "").strip()
+    if not base:
+        return []
+    out: list[str] = [base]
+    for sub in re.split(r"[.;]\s*", base):
+        s = sub.strip()
+        if not s:
+            continue
+        if s not in out:
+            out.append(s)
+        lowered = s.lower()
+        if "also acceptable" in lowered:
+            main = re.sub(r"\b(?:is\s+)?also acceptable\b.*$", "", s, flags=re.IGNORECASE).strip()
+            main = main.strip(" ,;:-")
+            if main and main not in out:
+                out.append(main)
+    return out
 
 
 def token_f1(pred: str, gold: str) -> float:
@@ -52,13 +107,33 @@ def token_f1(pred: str, gold: str) -> float:
 
 def best_exact_match(pred: str, answers: list[str]) -> float:
     n_pred = normalize_text(pred)
-    return 1.0 if any(n_pred == normalize_text(a) for a in answers if a.strip()) else 0.0
+    if not n_pred:
+        return 0.0
+    for ans in answers:
+        for variant in _answer_variants(ans):
+            n_var = normalize_text(variant)
+            if not n_var:
+                continue
+            if n_pred == n_var:
+                return 1.0
+            if n_pred in n_var:
+                pred_tokens = n_pred.split()
+                var_tokens = n_var.split()
+                if pred_tokens and len(pred_tokens) / max(1, len(var_tokens)) >= 0.5:
+                    return 1.0
+    return 0.0
 
 
 def best_f1(pred: str, answers: list[str]) -> float:
     if not answers:
         return 0.0
-    return max(token_f1(pred, a) for a in answers if a.strip())
+    candidates: list[str] = []
+    for ans in answers:
+        candidates.extend(_answer_variants(ans))
+    candidates = [c for c in candidates if c.strip()]
+    if not candidates:
+        return 0.0
+    return max(token_f1(pred, cand) for cand in candidates)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -67,7 +142,7 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _clean_query(query: str) -> str:
-    return re.sub(r"\s+", " ", _CASE_TOKEN_RE.sub(" ", query)).strip()
+    return strip_benchmark_case_tokens(query)
 
 
 def _query_tokens(query: str) -> set[str]:

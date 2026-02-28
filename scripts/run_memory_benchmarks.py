@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from c3ae.config import Config
+from c3ae.eval.corpus import build_corpus_docs, load_jsonl
 from c3ae.memory_spine.spine import MemorySpine
 
 
@@ -45,6 +46,19 @@ def _parse_args() -> argparse.Namespace:
         "--embed-local",
         action="store_true",
         help="Use local hash embeddings and vector retrieval (no external API keys).",
+    )
+    p.add_argument(
+        "--embed-provider",
+        default="",
+        choices=["", "venice", "openai", "ollama", "hash", "localhash", "sbert"],
+        help="Override embedding provider.",
+    )
+    p.add_argument("--embed-model", default="", help="Optional embedding model override")
+    p.add_argument("--embed-dims", type=int, default=0, help="Optional embedding dims override")
+    p.add_argument(
+        "--query-expansion",
+        action="store_true",
+        help="Enable keyword query expansion in hybrid retrieval.",
     )
     p.add_argument(
         "--min-publish-rows",
@@ -77,6 +91,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         cfg.retrieval.keyword_weight = 0.85
         cfg.retrieval.vector_weight = 0.15
         mode_notes.append("embed_local: retrieval profile set to keyword-heavy hybrid (0.85/0.15)")
+    if args.embed_provider:
+        cfg.venice.embedding_provider = args.embed_provider
+        mode_notes.append(f"embed_provider override: {args.embed_provider}")
+        if args.embed_provider == "sbert":
+            if not args.embed_model:
+                cfg.venice.embedding_model = "all-MiniLM-L6-v2"
+                mode_notes.append("sbert default model: all-MiniLM-L6-v2")
+            if args.embed_dims <= 0:
+                cfg.venice.embedding_dims = 384
+                mode_notes.append("sbert default dims: 384")
+    if args.embed_model:
+        cfg.venice.embedding_model = args.embed_model
+        mode_notes.append(f"embed_model override: {args.embed_model}")
+    if args.embed_dims > 0:
+        cfg.venice.embedding_dims = int(args.embed_dims)
+        mode_notes.append(f"embed_dims override: {cfg.venice.embedding_dims}")
+    if args.query_expansion:
+        cfg.retrieval.enable_query_expansion = True
+        mode_notes.append("query_expansion=on")
     tmp_dir: str | None = None
     if args.data_dir:
         cfg.data_dir = Path(args.data_dir)
@@ -86,11 +119,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     cfg.ensure_dirs()
     spine = MemorySpine(cfg)
     try:
-        rows = _load_jsonl(Path(args.dataset))
+        rows = load_jsonl(Path(args.dataset))
         if not rows:
             raise ValueError("dataset has no rows")
 
-        corpus_docs = _build_corpus_docs(rows, _load_jsonl(Path(args.corpus)) if args.corpus else [])
+        corpus_docs = build_corpus_docs(rows, load_jsonl(Path(args.corpus)) if args.corpus else [])
         ingested_docs = 0
         ingested_chunks = 0
         use_ingest_sync = bool(args.ingest_sync) and not bool(args.embed_local)
@@ -182,90 +215,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return result
     finally:
         await spine.close()
-
-
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if isinstance(obj, dict):
-                rows.append(obj)
-    return rows
-
-
-def _build_corpus_docs(
-    eval_rows: list[dict[str, Any]],
-    corpus_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    docs: list[dict[str, Any]] = []
-
-    def _append_doc(
-        *,
-        text: str,
-        doc_id: str,
-        source_id: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        t = text.strip()
-        if not t:
-            return
-        meta = dict(metadata or {})
-        meta.setdefault("benchmark_doc_id", doc_id)
-        meta.setdefault("benchmark_source", source_id)
-        docs.append(
-            {
-                "text": t,
-                "doc_id": doc_id,
-                "source_id": source_id,
-                "metadata": meta,
-            }
-        )
-
-    for idx, row in enumerate(corpus_rows):
-        text = str(row.get("text") or row.get("content") or row.get("memory") or "").strip()
-        if not text:
-            continue
-        doc_id = str(row.get("doc_id") or row.get("id") or f"corpus_{idx:04d}")
-        source_id = str(row.get("source_id") or f"benchmark:{doc_id}")
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        _append_doc(text=text, doc_id=doc_id, source_id=source_id, metadata=metadata)
-
-    for idx, row in enumerate(eval_rows):
-        base_doc_id = str(row.get("doc_id") or f"eval_{idx:04d}")
-        source_id = str(row.get("source_id") or f"benchmark:{base_doc_id}")
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-
-        memory = row.get("memory")
-        if isinstance(memory, str) and memory.strip():
-            _append_doc(
-                text=memory,
-                doc_id=base_doc_id,
-                source_id=source_id,
-                metadata=metadata,
-            )
-
-        memories = row.get("memories")
-        if isinstance(memories, list):
-            for j, mem in enumerate(memories):
-                if not isinstance(mem, str) or not mem.strip():
-                    continue
-                _append_doc(
-                    text=mem,
-                    doc_id=f"{base_doc_id}_m{j}",
-                    source_id=f"{source_id}:m{j}",
-                    metadata=metadata,
-                )
-
-    unique: dict[tuple[str, str], dict[str, Any]] = {}
-    for doc in docs:
-        key = (doc["doc_id"], doc["text"])
-        if key not in unique:
-            unique[key] = doc
-    return list(unique.values())
 
 
 def main() -> None:

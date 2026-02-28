@@ -16,6 +16,7 @@ from c3ae.llm import create_chat_backend
 from c3ae.llm.venice_chat import Message
 from c3ae.reasoning_bank.bank import ReasoningBank
 from c3ae.types import ReasoningEntry, SearchResult
+from c3ae.utils import parse_json_object
 
 
 @dataclass
@@ -193,7 +194,7 @@ class MemoryWriteManager:
             max_tokens=int(self.config.llm_max_tokens),
             json_mode=True,
         )
-        data = self._parse_json_object(response.content)
+        data = parse_json_object(response.content)
         return WriteDecision(
             action=str(data.get("action", "ADD")).strip().upper(),
             target_id=str(data.get("target_id", "")).strip(),
@@ -347,25 +348,6 @@ class MemoryWriteManager:
         exps = [math.exp(x - m) for x in logits]
         denom = sum(exps) or 1.0
         return [x / denom for x in exps]
-
-    @staticmethod
-    def _parse_json_object(raw: str) -> dict[str, Any]:
-        text = (raw or "").strip()
-        if not text:
-            return {}
-        if "```json" in text:
-            m = re.search(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-            if m:
-                text = m.group(1).strip()
-        elif text.startswith("```"):
-            m = re.search(r"```\s*(.*?)\s*```", text, flags=re.DOTALL)
-            if m:
-                text = m.group(1).strip()
-        try:
-            data = json.loads(text)
-            return data if isinstance(data, dict) else {}
-        except json.JSONDecodeError:
-            return {}
 
     @staticmethod
     def _trim(value: str, max_chars: int = 200) -> str:

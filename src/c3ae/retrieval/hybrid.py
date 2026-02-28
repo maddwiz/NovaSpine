@@ -11,6 +11,7 @@ import numpy as np
 
 from c3ae.config import RetrievalConfig
 from c3ae.retrieval.keyword import KeywordSearch
+from c3ae.retrieval.query_expansion import maybe_expand_query
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.types import SearchResult
 
@@ -46,8 +47,15 @@ class HybridSearch:
         # Over-fetch aggressively to reduce false negatives before fusion.
         fetch_k = max(top_k * 5, 100)
 
+        kw_query = query
+        if self.config.enable_query_expansion:
+            kw_query = maybe_expand_query(
+                query,
+                max_extra_terms=int(self.config.query_expansion_max_terms),
+            )
+
         # Keyword results
-        kw_results = self.keyword.search_all(query, limit=fetch_k)
+        kw_results = self.keyword.search_all(kw_query, limit=fetch_k)
 
         # Vector results (if we have an embedding)
         vec_results: list[SearchResult] = []
