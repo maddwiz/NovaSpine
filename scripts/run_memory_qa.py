@@ -80,6 +80,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--embed-model", default="", help="Optional embedding model override")
     p.add_argument("--embed-dims", type=int, default=0, help="Optional embedding dims override")
     p.add_argument(
+        "--dmr-openai-large",
+        action="store_true",
+        help="For DMR datasets, default to text-embedding-3-large (3072 dims) when using OpenAI.",
+    )
+    p.add_argument(
         "--tune-preset",
         default="none",
         choices=["none", "keyword_plus", "hybrid_qa"],
@@ -666,6 +671,7 @@ def _diversify_by_session(
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     cfg = Config()
     mode_notes: list[str] = []
+    dataset_name = str(args.dataset).lower()
     if args.embed_local:
         cfg.venice.embedding_provider = "hash"
         cfg.venice.embedding_model = "local-hash-v1"
@@ -692,6 +698,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.embed_dims > 0:
         cfg.venice.embedding_dims = int(args.embed_dims)
         mode_notes.append(f"embed_dims override: {cfg.venice.embedding_dims}")
+    if args.dmr_openai_large and "dmr" in dataset_name and cfg.venice.embedding_provider == "openai":
+        if not args.embed_model:
+            cfg.venice.embedding_model = "text-embedding-3-large"
+            mode_notes.append("dmr_openai_large: embed_model=text-embedding-3-large")
+        if args.embed_dims <= 0:
+            cfg.venice.embedding_dims = 3072
+            mode_notes.append("dmr_openai_large: embed_dims=3072")
     if args.disable_graph:
         cfg.graph.enabled = False
         mode_notes.append("graph disabled")
@@ -724,7 +737,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         mode_notes.append(f"rrf_overlap_boost override: {cfg.retrieval.rrf_overlap_boost}")
     use_recall_variants = bool(args.recall_variants) and not bool(args.no_recall_variants)
     mode_notes.append(f"recall_variants={'on' if use_recall_variants else 'off'}")
-    dataset_name = str(args.dataset).lower()
     auto_session_diversity = (
         bool(args.diversify_sessions)
         or ("locomo" in dataset_name and not bool(args.no_diversify_sessions))

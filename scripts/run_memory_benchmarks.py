@@ -67,6 +67,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--embed-model", default="", help="Optional embedding model override")
     p.add_argument("--embed-dims", type=int, default=0, help="Optional embedding dims override")
     p.add_argument(
+        "--dmr-openai-large",
+        action="store_true",
+        help="For DMR datasets, default to text-embedding-3-large (3072 dims) when using OpenAI.",
+    )
+    p.add_argument(
         "--query-expansion",
         action="store_true",
         help="Enable keyword query expansion in hybrid retrieval.",
@@ -90,6 +95,7 @@ def _parse_args() -> argparse.Namespace:
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     cfg = Config()
     mode_notes: list[str] = []
+    dataset_name = str(args.dataset).lower()
     if args.embed_local:
         cfg.venice.embedding_provider = "hash"
         cfg.venice.embedding_model = "local-hash-v1"
@@ -118,6 +124,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.embed_dims > 0:
         cfg.venice.embedding_dims = int(args.embed_dims)
         mode_notes.append(f"embed_dims override: {cfg.venice.embedding_dims}")
+    if args.dmr_openai_large and "dmr" in dataset_name and cfg.venice.embedding_provider == "openai":
+        if not args.embed_model:
+            cfg.venice.embedding_model = "text-embedding-3-large"
+            mode_notes.append("dmr_openai_large: embed_model=text-embedding-3-large")
+        if args.embed_dims <= 0:
+            cfg.venice.embedding_dims = 3072
+            mode_notes.append("dmr_openai_large: embed_dims=3072")
     if args.query_expansion:
         cfg.retrieval.enable_query_expansion = True
         mode_notes.append("query_expansion=on")
