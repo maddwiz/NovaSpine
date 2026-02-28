@@ -16,6 +16,7 @@ import random
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,12 @@ def _parse_args() -> argparse.Namespace:
         help="Route DATE/NUMBER questions to --answer-model-hard (or derived non-mini model).",
     )
     p.add_argument("--answer-temperature", type=float, default=0.0, help="LLM answer temperature")
+    p.add_argument(
+        "--answer-timeout-seconds",
+        type=float,
+        default=35.0,
+        help="HTTP timeout for answer LLM calls.",
+    )
     p.add_argument("--answer-max-tokens", type=int, default=192, help="LLM answer max tokens")
     p.add_argument(
         "--answer-context-k",
@@ -193,6 +200,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.8,
         help="Base delay for exponential retry backoff.",
+    )
+    p.add_argument(
+        "--answer-min-interval-seconds",
+        type=float,
+        default=0.0,
+        help="Minimum wall-clock delay between LLM answer calls (rate-limit control).",
     )
     p.add_argument(
         "--answer-reasoning",
@@ -565,7 +578,8 @@ async def _answer_with_llm(
             delay = float(retry_base_seconds) * (2**attempt) + random.uniform(0.0, 0.25)
             await asyncio.sleep(delay)
     if last_exc is not None:
-        raise last_exc
+        # Avoid aborting an entire benchmark run on transient provider rate-limits.
+        return ""
     return ""
 
 
@@ -763,6 +777,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             llm_kwargs: dict[str, Any] = {
                 "model": args.answer_model,
                 "temperature": args.answer_temperature,
+                "timeout": args.answer_timeout_seconds,
                 "max_tokens": args.answer_max_tokens,
             }
             if args.answer_provider == "venice":
@@ -841,6 +856,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         f1_sum = 0.0
         skipped = 0
         sample_logs: list[dict[str, Any]] = []
+        last_answer_ts = 0.0
 
         for row in rows:
             query = str(row.get("query", "")).strip()
@@ -904,6 +920,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if args.answer_mode == "oracle_doc" and expected_doc_ids:
                 pred = answers[0] if hit else extractive_answer(query, recalled)
             elif args.answer_mode == "llm":
+                min_interval = max(0.0, float(args.answer_min_interval_seconds))
+                if min_interval > 0.0:
+                    now = time.monotonic()
+                    wait = min_interval - (now - last_answer_ts)
+                    if wait > 0.0:
+                        await asyncio.sleep(wait)
                 pred = await _answer_with_llm(
                     query=query,
                     recalled=recalled,
@@ -921,6 +943,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     llm_backend_hard=llm_backend_hard,
                     answer_route_hard=args.answer_route_hard,
                 )
+                last_answer_ts = time.monotonic()
                 if not pred and not args.no_answer_fallback:
                     pred = extractive_answer(query, recalled)
             else:
