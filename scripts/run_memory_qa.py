@@ -49,6 +49,11 @@ def _parse_args() -> argparse.Namespace:
         help="Batch size for async bulk ingestion (ignored with --ingest-sync).",
     )
     p.add_argument("--skip-chunking", action="store_true", help="Ingest docs as single chunks")
+    p.add_argument(
+        "--reuse-index",
+        action="store_true",
+        help="Reuse existing index in --data-dir when chunks already exist (skip ingestion).",
+    )
     p.add_argument("--embed-local", action="store_true", help="Use local hash embeddings")
     p.add_argument(
         "--embed-provider",
@@ -636,28 +641,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
         ingested_docs = 0
         ingested_chunks = 0
-        if use_ingest_sync:
-            for doc in corpus_docs:
-                cids = spine.ingest_text_sync(
-                    doc["text"],
-                    source_id=doc["source_id"],
-                    metadata=doc["metadata"],
-                    skip_chunking=args.skip_chunking,
-                )
-                ingested_docs += 1
-                ingested_chunks += len(cids)
+        existing_chunks = int(spine.sqlite.count_chunks())
+        if args.reuse_index and existing_chunks > 0:
+            mode_notes.append(f"reuse_index=on (existing_chunks={existing_chunks}, ingestion_skipped)")
         else:
-            batch_size = max(1, int(args.ingest_batch_size))
-            mode_notes.append(f"ingest_batch_size={batch_size}")
-            if batch_size > 1:
-                ingested_docs, ingested_chunks = await spine.ingest_documents(
-                    corpus_docs,
-                    skip_chunking=args.skip_chunking,
-                    batch_size=batch_size,
-                )
-            else:
+            if args.reuse_index:
+                mode_notes.append("reuse_index=on but index empty; ingesting corpus")
+            if use_ingest_sync:
                 for doc in corpus_docs:
-                    cids = await spine.ingest_text(
+                    cids = spine.ingest_text_sync(
                         doc["text"],
                         source_id=doc["source_id"],
                         metadata=doc["metadata"],
@@ -665,6 +657,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     ingested_docs += 1
                     ingested_chunks += len(cids)
+            else:
+                batch_size = max(1, int(args.ingest_batch_size))
+                mode_notes.append(f"ingest_batch_size={batch_size}")
+                if batch_size > 1:
+                    ingested_docs, ingested_chunks = await spine.ingest_documents(
+                        corpus_docs,
+                        skip_chunking=args.skip_chunking,
+                        batch_size=batch_size,
+                    )
+                else:
+                    for doc in corpus_docs:
+                        cids = await spine.ingest_text(
+                            doc["text"],
+                            source_id=doc["source_id"],
+                            metadata=doc["metadata"],
+                            skip_chunking=args.skip_chunking,
+                        )
+                        ingested_docs += 1
+                        ingested_chunks += len(cids)
 
         n = 0
         doc_hits = 0
@@ -782,6 +793,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "data_dir": str(cfg.data_dir),
             "ephemeral_data_dir": bool(tmp_dir),
             "skip_chunking": bool(args.skip_chunking),
+            "reuse_index": bool(args.reuse_index),
             "embed_local": bool(args.embed_local),
             "mode_notes": mode_notes,
             "answer_provider": args.answer_provider if args.answer_mode == "llm" else "",
