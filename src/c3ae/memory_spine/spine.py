@@ -338,9 +338,11 @@ class MemorySpine:
             elif benchmark_source:
                 dedup_key = f"benchmark_source:{benchmark_source}"
             else:
-                dedup_key = f"id:{r.id}" if r.id else hashlib.sha1(
-                    r.content.strip().lower().encode("utf-8", errors="ignore")
-                ).hexdigest()
+                content_norm = r.content.strip().lower()
+                if content_norm:
+                    dedup_key = hashlib.sha1(content_norm.encode("utf-8", errors="ignore")).hexdigest()
+                else:
+                    dedup_key = f"id:{r.id}"
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)

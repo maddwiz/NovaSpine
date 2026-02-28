@@ -116,10 +116,13 @@ def best_exact_match(pred: str, answers: list[str]) -> float:
                 continue
             if n_pred == n_var:
                 return 1.0
-            if n_pred in n_var:
-                pred_tokens = n_pred.split()
-                var_tokens = n_var.split()
-                if pred_tokens and len(pred_tokens) / max(1, len(var_tokens)) >= 0.5:
+            pred_tokens = n_pred.split()
+            var_tokens = n_var.split()
+            if n_pred in n_var and pred_tokens:
+                if len(var_tokens) <= max(3, int(len(pred_tokens) * 2.5)):
+                    return 1.0
+            if n_var in n_pred and var_tokens:
+                if len(pred_tokens) <= max(3, int(len(var_tokens) * 2.5)):
                     return 1.0
     return 0.0
 

@@ -27,10 +27,26 @@ from c3ae.memory_spine.spine import MemorySpine
 from c3ae.utils import extract_benchmark_case_token, parse_json_object, strip_benchmark_case_tokens
 
 _QUERY_STOPWORDS = {
-    "a", "an", "the", "is", "are", "was", "were", "to", "of", "in", "on", "for",
+    "a", "an", "the", "is", "are", "was", "were", "of", "in", "on", "for",
     "and", "or", "with", "what", "when", "who", "where", "which", "did", "do",
-    "does", "at", "by", "from", "as", "it", "be", "this", "that", "how", "many",
-    "much", "kind", "type", "into", "about", "between",
+    "does", "at", "by", "as", "it", "be", "this", "that", "how", "many",
+    "much", "kind", "type", "into", "about",
+}
+_KEYWORD_KEEP = {
+    "to",
+    "from",
+    "before",
+    "after",
+    "between",
+    "during",
+    "until",
+    "till",
+    "since",
+    "times",
+    "time",
+    "days",
+    "months",
+    "years",
 }
 
 
@@ -123,6 +139,17 @@ def _parse_args() -> argparse.Namespace:
         default=os.environ.get("C3AE_QA_LLM_MODEL", "gpt-4.1-mini"),
         help="LLM model for --answer-mode llm.",
     )
+    p.add_argument(
+        "--answer-model-hard",
+        default=os.environ.get("C3AE_QA_LLM_MODEL_HARD", ""),
+        help="Optional stronger model for DATE/NUMBER questions.",
+    )
+    p.add_argument(
+        "--answer-route-hard",
+        default="auto",
+        choices=["off", "auto", "on"],
+        help="Route DATE/NUMBER questions to --answer-model-hard (or derived non-mini model).",
+    )
     p.add_argument("--answer-temperature", type=float, default=0.0, help="LLM answer temperature")
     p.add_argument("--answer-max-tokens", type=int, default=192, help="LLM answer max tokens")
     p.add_argument(
@@ -186,6 +213,22 @@ def _parse_args() -> argparse.Namespace:
         help="Keep top-N after reranking (0 keeps all candidates).",
     )
     p.add_argument(
+        "--diversify-sessions",
+        action="store_true",
+        help="Promote session diversity in top-k recall (helpful for LoCoMo).",
+    )
+    p.add_argument(
+        "--no-diversify-sessions",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--min-session-diversity",
+        type=int,
+        default=3,
+        help="Minimum unique sessions to prioritize when diversity is enabled.",
+    )
+    p.add_argument(
         "--no-answer-fallback",
         action="store_true",
         help="Disable extractive fallback when LLM answer is empty/invalid.",
@@ -214,7 +257,7 @@ def _strip_leading_wh(clean_query: str) -> str:
 
 def _query_keywords(clean_query: str, limit: int = 10) -> str:
     toks = [t.lower() for t in re.findall(r"[a-z0-9_]+", clean_query)]
-    keep = [t for t in toks if len(t) > 1 and t not in _QUERY_STOPWORDS]
+    keep = [t for t in toks if len(t) > 1 and (t in _KEYWORD_KEEP or t not in _QUERY_STOPWORDS)]
     if not keep:
         return ""
     return " ".join(keep[:limit])
@@ -340,7 +383,7 @@ def _detect_answer_type(query: str) -> str:
         return "PLACE"
     if "how many" in q or "how much" in q:
         return "NUMBER"
-    if " or " in q:
+    if _is_binary_choice_question(q):
         return "CHOICE"
     if q.startswith(("is ", "are ", "was ", "were ", "did ", "does ", "do ", "has ", "can ")):
         return "YES_NO"
@@ -356,6 +399,49 @@ _TYPE_HINTS = {
     "YES_NO": "Answer yes or no only.",
     "SHORT_PHRASE": "Answer with the shortest phrase possible (1-6 words).",
 }
+
+
+def _is_binary_choice_question(q: str) -> bool:
+    if " or " not in q:
+        return False
+    if re.search(r"[\"']([^\"']+)[\"']\s+or\s+[\"']([^\"']+)[\"']", q):
+        return True
+    if re.match(r"^(is|are|was|were|did|does|do|has|have|can|could|should|would)\b.*\bor\b", q):
+        return True
+    if re.match(r"^which\b.*\bor\b", q):
+        # Avoid broad non-binary "first or second step" style phrasing.
+        if re.search(r"\b(first|second|third|next|previous|earlier|later)\b", q):
+            return False
+        return True
+    return False
+
+
+def _few_shot_examples() -> str:
+    return (
+        "Examples:\n"
+        "Q: How many days between the workshop on March 5 and the meeting on March 12?\n"
+        "Context: [1] ... workshop on March 5 ... [2] ... team meeting on March 12 ...\n"
+        "A: {\"answer\":\"7 days\"}\n\n"
+        "Q: Which device did I set up first, the thermostat or the router?\n"
+        "Context: [1] ... Monday installed the smart thermostat ... [2] ... Wednesday set up the router ...\n"
+        "A: {\"answer\":\"smart thermostat\"}\n\n"
+        "Q: What color is Sarah's car?\n"
+        "Context: [1] ... Sarah just bought a red Honda Civic ...\n"
+        "A: {\"answer\":\"red\"}"
+    )
+
+
+def _derive_hard_model(base_model: str, explicit_hard_model: str) -> str:
+    if explicit_hard_model.strip():
+        return explicit_hard_model.strip()
+    model = base_model.strip()
+    if not model:
+        return ""
+    if "-mini" in model:
+        return model.replace("-mini", "")
+    if model.endswith("mini"):
+        return model[:-4].rstrip("-_")
+    return ""
 
 
 def _build_answer_context(
@@ -406,6 +492,8 @@ async def _answer_with_llm(
     retries: int,
     retry_base_seconds: float,
     reasoning_mode: str,
+    llm_backend_hard: Any | None = None,
+    answer_route_hard: str = "auto",
 ) -> str:
     clean_q = _clean_question(query)
     context = _build_answer_context(
@@ -422,6 +510,12 @@ async def _answer_with_llm(
     use_reasoning = reasoning_mode == "on" or (
         reasoning_mode == "auto" and answer_type in {"NUMBER", "DATE", "CHOICE"}
     )
+    use_hard_backend = (
+        llm_backend_hard is not None
+        and answer_type in {"NUMBER", "DATE"}
+        and answer_route_hard != "off"
+    )
+    backend = llm_backend_hard if use_hard_backend else llm_backend
     response_schema = "{\"reasoning\":\"...\", \"answer\":\"...\"}" if use_reasoning else "{\"answer\":\"...\"}"
     system = (
         "You are a strict QA answerer. Use only the provided context.\n"
@@ -434,6 +528,7 @@ async def _answer_with_llm(
         "- no explanation, no extra keys, no markdown\n"
         "- if uncertain, return an empty answer"
     )
+    system += "\n\n" + _few_shot_examples()
     if use_reasoning:
         system += "\n- include concise reasoning (<= 40 words) before final answer"
     user = (
@@ -445,7 +540,7 @@ async def _answer_with_llm(
     max_tries = max(1, int(retries))
     for attempt in range(max_tries):
         try:
-            resp = await llm_backend.chat(
+            resp = await backend.chat(
                 [Message(role="system", content=system), Message(role="user", content=user)],
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -540,6 +635,34 @@ def _validate_llm_provider(provider: str, cfg: Config) -> None:
             raise RuntimeError("VENICE_API_KEY is required for --answer-provider venice")
 
 
+def _diversify_by_session(
+    recalled: list[dict[str, Any]],
+    *,
+    top_k: int,
+    min_sessions: int,
+) -> list[dict[str, Any]]:
+    if not recalled or min_sessions <= 1:
+        return recalled[: max(1, top_k)]
+    session_picks: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    seen_sessions: set[str] = set()
+    seen_rows: set[str] = set()
+    for row in recalled:
+        row_key = _result_key(row)
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        meta = row.get("metadata") or {}
+        sid = str(meta.get("session_id", "")).strip()
+        if sid and sid not in seen_sessions and len(seen_sessions) < min_sessions:
+            seen_sessions.add(sid)
+            session_picks.append(row)
+        else:
+            rest.append(row)
+    merged = session_picks + rest
+    return merged[: max(1, top_k)]
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     cfg = Config()
     mode_notes: list[str] = []
@@ -601,6 +724,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         mode_notes.append(f"rrf_overlap_boost override: {cfg.retrieval.rrf_overlap_boost}")
     use_recall_variants = bool(args.recall_variants) and not bool(args.no_recall_variants)
     mode_notes.append(f"recall_variants={'on' if use_recall_variants else 'off'}")
+    dataset_name = str(args.dataset).lower()
+    auto_session_diversity = (
+        bool(args.diversify_sessions)
+        or ("locomo" in dataset_name and not bool(args.no_diversify_sessions))
+    )
+    if auto_session_diversity:
+        mode_notes.append(
+            "session_diversity=on"
+            f" min_sessions={max(1, int(args.min_session_diversity))}"
+        )
 
     tmp_dir: str | None = None
     if args.data_dir:
@@ -611,6 +744,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     cfg.ensure_dirs()
     spine = MemorySpine(cfg)
     llm_backend: Any | None = None
+    llm_backend_hard: Any | None = None
     try:
         if args.answer_mode == "llm":
             _validate_llm_provider(args.answer_provider, cfg)
@@ -625,6 +759,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             mode_notes.append(
                 f"answer_llm: provider={args.answer_provider}, model={args.answer_model}, temp={args.answer_temperature}"
             )
+            hard_model = _derive_hard_model(args.answer_model, args.answer_model_hard)
+            if args.answer_route_hard != "off" and hard_model and hard_model != args.answer_model:
+                hard_kwargs = dict(llm_kwargs)
+                hard_kwargs["model"] = hard_model
+                llm_backend_hard = create_chat_backend(provider=args.answer_provider, **hard_kwargs)
+                mode_notes.append(
+                    "answer_hard_route:on"
+                    f" mode={args.answer_route_hard}"
+                    f" hard_model={hard_model}"
+                )
+            else:
+                mode_notes.append(f"answer_hard_route:{args.answer_route_hard}")
             if args.rerank_with_llm:
                 mode_notes.append(
                     "llm_rerank:on"
@@ -698,6 +844,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if use_recall_variants:
                 fetch_k = max(args.top_k * max(1, int(args.variant_fetch_multiplier)), args.top_k)
                 fetch_k = max(fetch_k, max(1, int(args.rerank_candidates)))
+                if auto_session_diversity:
+                    fetch_k = max(fetch_k, max(1, int(args.top_k)) * 4)
                 variants = _build_recall_variants(query)
                 variant_rows: list[tuple[float, list[dict[str, Any]]]] = []
                 for variant_q, weight in variants:
@@ -710,6 +858,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             else:
                 fetch_k = max(args.top_k, max(1, int(args.rerank_candidates)))
+                if auto_session_diversity:
+                    fetch_k = max(fetch_k, max(1, int(args.top_k)) * 4)
                 recalled = await spine.recall(query, top_k=fetch_k)
             if (
                 args.answer_mode == "llm"
@@ -729,6 +879,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 except Exception:
                     pass
+            if auto_session_diversity:
+                recalled = _diversify_by_session(
+                    recalled,
+                    top_k=max(1, int(args.top_k)),
+                    min_sessions=max(1, int(args.min_session_diversity)),
+                )
             recalled = recalled[: max(1, int(args.top_k))]
             docs = [str((r.get("metadata") or {}).get("benchmark_doc_id", "")) for r in recalled]
             hit = any(d in expected_doc_ids for d in docs) if expected_doc_ids else False
@@ -750,6 +906,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     retries=args.answer_retries,
                     retry_base_seconds=args.answer_retry_base_seconds,
                     reasoning_mode=args.answer_reasoning,
+                    llm_backend_hard=llm_backend_hard,
+                    answer_route_hard=args.answer_route_hard,
                 )
                 if not pred and not args.no_answer_fallback:
                     pred = extractive_answer(query, recalled)
@@ -803,6 +961,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         if llm_backend is not None:
             await llm_backend.close()
+        if llm_backend_hard is not None:
+            await llm_backend_hard.close()
         await spine.close()
 
 
