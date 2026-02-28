@@ -38,6 +38,7 @@ Notes:
 2. LongMemEval answer routing:
 - `gpt-4.1-mini` with reasoning enabled and broader context remained best overall in full-run EM/F1.
 - Hard-route to `gpt-4.1` helped some slices but regressed on larger runs.
+- Direct `gpt-4.1` probe on a 120-row slice also regressed (`EM 0.375`, `F1 0.392`) vs `gpt-4.1-mini` (`EM 0.525`, `F1 0.547`).
 
 3. GPT-5-mini probe in this pipeline:
 - `long_probe_gpt5mini_20260228.json` underperformed (`EM 0.200`, `F1 0.206` on 40-row slice).
