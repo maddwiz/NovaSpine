@@ -15,6 +15,7 @@ import json
 import random
 import os
 import re
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -54,6 +55,14 @@ _KEYWORD_KEEP = {
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run NovaSpine end-to-end QA benchmark.")
     p.add_argument("--dataset", required=True, help="QA eval JSONL path")
+    p.add_argument("--row-offset", type=int, default=0, help="Start evaluating at this row index.")
+    p.add_argument("--row-limit", type=int, default=0, help="Evaluate at most this many rows (0 = all).")
+    p.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="Emit progress to stderr every N scored rows (0 disables).",
+    )
     p.add_argument("--corpus", default="", help="Optional corpus JSONL to ingest before eval")
     p.add_argument("--name", default="qa_custom", help="Benchmark run name")
     p.add_argument("--top-k", type=int, default=10, help="Recall depth")
@@ -807,6 +816,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         rows = load_jsonl(Path(args.dataset))
         if not rows:
             raise ValueError("dataset has no rows")
+        row_offset = max(0, int(args.row_offset))
+        row_limit = max(0, int(args.row_limit))
+        if row_offset > 0 or row_limit > 0:
+            start = row_offset
+            end = row_offset + row_limit if row_limit > 0 else None
+            rows = rows[start:end]
+            mode_notes.append(
+                f"row_slice=offset:{row_offset},limit:{row_limit if row_limit > 0 else 'all'}"
+            )
         corpus_docs = build_corpus_docs(rows, load_jsonl(Path(args.corpus)) if args.corpus else [])
         use_ingest_sync = bool(args.ingest_sync) and not bool(args.embed_local)
         if args.embed_local and args.ingest_sync:
@@ -956,6 +974,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             doc_hits += int(hit)
             em_sum += em
             f1_sum += f1
+            progress_every = max(0, int(args.progress_every))
+            if progress_every > 0 and n % progress_every == 0:
+                print(
+                    (
+                        f"[qa-progress] scored={n} "
+                        f"doc_hit={doc_hits / max(1, n):.4f} "
+                        f"em={em_sum / max(1, n):.4f} "
+                        f"f1={f1_sum / max(1, n):.4f}"
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             if len(sample_logs) < 20:
                 sample_logs.append(
@@ -976,6 +1006,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "rows_total": len(rows),
             "rows_scored": n,
             "rows_skipped": skipped,
+            "row_offset": row_offset,
+            "row_limit": row_limit,
             "top_k": args.top_k,
             "answer_mode": args.answer_mode,
             "doc_hit_rate": doc_hits / denom,
