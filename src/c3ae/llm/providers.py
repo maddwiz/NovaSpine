@@ -48,24 +48,12 @@ class OpenAIBackend:
         json_mode: bool = False,
     ) -> ChatResponse:
         client = await self._get_client()
-        model_name = (self.model or "").strip().lower()
-        is_gpt5_family = model_name.startswith("gpt-5")
-        is_chat_latest = "chat-latest" in model_name
-        temp_value = temperature if temperature is not None else self.temperature
-        token_limit = max_tokens if max_tokens is not None else self.max_tokens
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
-        if is_gpt5_family:
-            # GPT-5 chat-completions expect max_completion_tokens instead of max_tokens.
-            body["max_completion_tokens"] = token_limit
-            # Some GPT-5 chat-latest aliases reject non-default temperature values.
-            if not is_chat_latest or float(temp_value) == 1.0:
-                body["temperature"] = temp_value
-        else:
-            body["temperature"] = temp_value
-            body["max_tokens"] = token_limit
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         resp = await client.post("/chat/completions", json=body)

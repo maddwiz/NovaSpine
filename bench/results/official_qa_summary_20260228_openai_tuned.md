@@ -37,35 +37,6 @@ Notes:
 - LongMemEval remains retrieval-perfect (`doc_hit=1.0`), but answer-generation variance still dominates EM/F1.
 - Experimental strict answer-gating was tested and then reverted in script defaults after regression checks.
 
-## GPT-5.2 Full-Pass Comparison (March 1)
-
-End-to-end full QA was run with `gpt-5.2` as the answer model on the current best retrieval profiles.
-
-| Benchmark | Best profile (gpt-4.1-mini) | GPT-5.2 profile | Delta vs best |
-|---|---|---|---|
-| DMR-500 | `0.950 / 0.628 / 0.632` (`r16_large_legacy`) | `0.946 / 0.578 / 0.584` (`r17_gpt52_fixed`) | `-0.004 / -0.050 / -0.048` |
-| LongMemEval | `1.000 / 0.304 / 0.367` (`r9`) | `1.000 / 0.282 / 0.334` (`r17_gpt52`) | `+0.000 / -0.022 / -0.033` |
-| LoCoMo-MC10 (quality) | `0.860 / 0.455 / 0.484` (`r6_mini`) | `0.860 / 0.378 / 0.403` (`r17_gpt52`) | `+0.000 / -0.077 / -0.081` |
-
-Conclusion:
-- In this pipeline, `gpt-5.2` did not outperform the tuned `gpt-4.1-mini` answer profiles.
-- A backend compatibility fix was required for GPT-5 chat-completions (`max_completion_tokens` for GPT-5 models), now implemented in `src/c3ae/llm/providers.py`.
-
-### GPT-5.2 targeted tuning sweep (DMR)
-
-| Profile | doc_hit | EM | F1 | Verdict |
-|---|---:|---:|---:|---|
-| `r18_probe_typed` | 0.947 | 0.580 | 0.594 | below `r16` |
-| `r18_probe_legacy_lex` | 0.947 | 0.607 | 0.620 | best GPT-5.2 probe |
-| `r18_probe_legacy_temp02` | 0.947 | 0.587 | 0.593 | below lexical probe |
-| `r18_full_legacy_lex` | 0.946 | 0.560 | 0.571 | regressed on full pass |
-| `r20_probe_guard` | 0.947 | 0.600 | 0.613 | improved vs `r17`, still below `r16` |
-
-Notes:
-- Probe gains with GPT-5.2 lexical context reranking did not hold on the full 500-row run.
-- Added a GPT-5 guard in `run_memory_qa.py` to apply type-aware normalization even in legacy mode; this helped some slices but did not surpass the `gpt-4.1-mini` production best.
-- `gpt-5.2-pro` probing on this chat-completions path was not reliable (quality collapse and intermittent 404), so it was not promoted to full runs.
-
 ## Delta vs Prior OpenAI Tuned Summary
 
 | Benchmark | doc_hit delta | EM delta | F1 delta |
@@ -92,11 +63,7 @@ Notes:
 - Hard-route to `gpt-4.1` helped some slices but regressed on larger runs.
 - Direct `gpt-4.1` probe on a 120-row slice also regressed (`EM 0.375`, `F1 0.392`) vs `gpt-4.1-mini` (`EM 0.525`, `F1 0.547`).
 
-3. GPT-5-mini probe in this pipeline:
-- `long_probe_gpt5mini_20260228.json` underperformed (`EM 0.200`, `F1 0.206` on 40-row slice).
-- Current chat-completions QA path remains best with `gpt-4.1-mini` for stable benchmark output.
-
-4. Answer-stage normalization + context selection:
+3. Answer-stage normalization + context selection:
 - Typed answer normalization (`NUMBER/DATE/YES_NO` focused extraction) improved formatting consistency and reduced verbose answer drift.
 - LoCoMo high-recall profile improved with answer-context lexical reranking (`EM 0.420 -> 0.448` at `doc_hit 0.944`).
 - LoCoMo with large embeddings was tested and did not beat the keyword-heavy retrieval profile (`doc_hit 0.930` vs `0.944`).
@@ -146,11 +113,3 @@ Notes:
 - `bench/results/long_probe120_r14_len_gate.json`
 - `bench/results/locomo_probe150_r15_gpt41.json`
 - `bench/results/long_probe120_r14_legacy.json`
-- `bench/results/official_dmr_qa_openai_20260301_r17_gpt52_fixed.json`
-- `bench/results/official_longmemeval_qa_openai_20260301_r17_gpt52.json`
-- `bench/results/official_locomo_qa_openai_20260301_r17_gpt52.json`
-- `bench/results/dmr_probe150_r18_gpt52_typed.json`
-- `bench/results/dmr_probe150_r18_gpt52_legacy_lex.json`
-- `bench/results/dmr_probe150_r18_gpt52_legacy_temp02.json`
-- `bench/results/official_dmr_qa_openai_20260301_r18_gpt52_lex.json`
-- `bench/results/dmr_probe150_r20_gpt52_guard.json`

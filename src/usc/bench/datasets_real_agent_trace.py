@@ -19,7 +19,7 @@ TOOLS = [
 
 HOSTS = ["spark-4c54", "mbp-des", "node-a", "node-b"]
 PATHS = ["/home/maddwiz/usc", "/mnt/data/run", "/tmp/cache", "/var/log/syslog"]
-MODELS = ["gpt-5.2", "gpt-4o", "llama-3-70b", "qwen2.5-32b"]
+MODELS = ["gpt-4o", "llama-3-70b", "qwen2.5-32b"]
 
 
 def _ts():
