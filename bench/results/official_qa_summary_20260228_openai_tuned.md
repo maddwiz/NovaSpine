@@ -7,7 +7,7 @@ Updated from fresh full QA runs using the timeout-safe pipeline and tuned retrie
 - LongMemEval: `official_longmemeval_qa_openai_20260228_r9.json`
 - LoCoMo-MC10 (answer quality profile): `official_locomo_qa_openai_20260228_r6_mini.json`
 - LoCoMo-MC10 (high-recall profile): `official_locomo_qa_openai_20260228_r9_k15_lexctx.json`
-- DMR-500: `official_dmr_qa_openai_20260228_r12_large_k15.json`
+- DMR-500: `official_dmr_qa_openai_20260301_r16_large_legacy.json`
 
 ## Current Results
 
@@ -16,7 +16,7 @@ Updated from fresh full QA runs using the timeout-safe pipeline and tuned retrie
 | LongMemEval | `r9` | 1.000 | 0.304 | 0.367 |
 | LoCoMo-MC10 | `r6_mini` (quality) | 0.860 | 0.455 | 0.484 |
 | LoCoMo-MC10 | `r9_k15_lexctx` (recall) | 0.944 | 0.448 | 0.458 |
-| DMR-500 | `r12_large_k15` | 0.950 | 0.624 | 0.621 |
+| DMR-500 | `r16_large_legacy` | 0.950 | 0.628 | 0.632 |
 
 ## March 1 Continuation (overnight follow-up)
 
@@ -27,11 +27,13 @@ Additional ablations were run with rebuilt indexes and stricter apples-to-apples
 | DMR-500 | `r13_large_typegate` | 0.950 | 0.618 | 0.615 | below `r12` |
 | DMR-500 | `r14_large_hardauto` | 0.950 | 0.610 | 0.596 | below `r12` |
 | DMR-500 | `r15_large_r12exact` | 0.950 | 0.622 | 0.616 | close, still below `r12` |
+| DMR-500 | `r16_large_legacy` | 0.950 | 0.628 | 0.632 | **new DMR best** |
 | LongMemEval | `r14` | 1.000 | 0.286 | 0.347 | below `r9` |
 | LoCoMo-MC10 | `probe150_r15_gpt41` | 0.860 | 0.406 | 0.414 | below `r6_mini` |
 
 Notes:
-- DMR is now stable around `0.62/0.61` with `text-embedding-3-large`; no March 1 run exceeded the existing `r12` full-run peak.
+- DMR improved further with legacy answer normalization in the exact `r12` retrieval profile:
+  - `r16_large_legacy`: `doc_hit 0.950`, `EM 0.628`, `F1 0.632` (new best)
 - LongMemEval remains retrieval-perfect (`doc_hit=1.0`), but answer-generation variance still dominates EM/F1.
 - Experimental strict answer-gating was tested and then reverted in script defaults after regression checks.
 
@@ -106,10 +108,12 @@ Notes:
 - `bench/results/official_dmr_qa_openai_20260228_r13_large_typegate.json`
 - `bench/results/official_dmr_qa_openai_20260228_r14_large_hardauto.json`
 - `bench/results/official_dmr_qa_openai_20260301_r15_large_r12exact.json`
+- `bench/results/official_dmr_qa_openai_20260301_r16_large_legacy.json`
 - `bench/results/official_longmemeval_qa_openai_20260301_r14.json`
 - `bench/results/dmr_probe150_r14_base.json`
 - `bench/results/dmr_probe150_r14_hardauto.json`
 - `bench/results/dmr_probe150_r15_r12exact.json`
+- `bench/results/dmr_probe150_r16_legacy.json`
 - `bench/results/long_probe120_r14_len_gate.json`
 - `bench/results/locomo_probe150_r15_gpt41.json`
 - `bench/results/long_probe120_r14_legacy.json`
