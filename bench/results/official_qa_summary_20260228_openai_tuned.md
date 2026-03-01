@@ -37,6 +37,20 @@ Notes:
 - LongMemEval remains retrieval-perfect (`doc_hit=1.0`), but answer-generation variance still dominates EM/F1.
 - Experimental strict answer-gating was tested and then reverted in script defaults after regression checks.
 
+## GPT-5.2 Full-Pass Comparison (March 1)
+
+End-to-end full QA was run with `gpt-5.2` as the answer model on the current best retrieval profiles.
+
+| Benchmark | Best profile (gpt-4.1-mini) | GPT-5.2 profile | Delta vs best |
+|---|---|---|---|
+| DMR-500 | `0.950 / 0.628 / 0.632` (`r16_large_legacy`) | `0.946 / 0.578 / 0.584` (`r17_gpt52_fixed`) | `-0.004 / -0.050 / -0.048` |
+| LongMemEval | `1.000 / 0.304 / 0.367` (`r9`) | `1.000 / 0.282 / 0.334` (`r17_gpt52`) | `+0.000 / -0.022 / -0.033` |
+| LoCoMo-MC10 (quality) | `0.860 / 0.455 / 0.484` (`r6_mini`) | `0.860 / 0.378 / 0.403` (`r17_gpt52`) | `+0.000 / -0.077 / -0.081` |
+
+Conclusion:
+- In this pipeline, `gpt-5.2` did not outperform the tuned `gpt-4.1-mini` answer profiles.
+- A backend compatibility fix was required for GPT-5 chat-completions (`max_completion_tokens` for GPT-5 models), now implemented in `src/c3ae/llm/providers.py`.
+
 ## Delta vs Prior OpenAI Tuned Summary
 
 | Benchmark | doc_hit delta | EM delta | F1 delta |
@@ -117,3 +131,6 @@ Notes:
 - `bench/results/long_probe120_r14_len_gate.json`
 - `bench/results/locomo_probe150_r15_gpt41.json`
 - `bench/results/long_probe120_r14_legacy.json`
+- `bench/results/official_dmr_qa_openai_20260301_r17_gpt52_fixed.json`
+- `bench/results/official_longmemeval_qa_openai_20260301_r17_gpt52.json`
+- `bench/results/official_locomo_qa_openai_20260301_r17_gpt52.json`
