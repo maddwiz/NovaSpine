@@ -28,6 +28,7 @@ Additional ablations were run with rebuilt indexes and stricter apples-to-apples
 | DMR-500 | `r14_large_hardauto` | 0.950 | 0.610 | 0.596 | below `r12` |
 | DMR-500 | `r15_large_r12exact` | 0.950 | 0.622 | 0.616 | close, still below `r12` |
 | LongMemEval | `r14` | 1.000 | 0.286 | 0.347 | below `r9` |
+| LoCoMo-MC10 | `probe150_r15_gpt41` | 0.860 | 0.406 | 0.414 | below `r6_mini` |
 
 Notes:
 - DMR is now stable around `0.62/0.61` with `text-embedding-3-large`; no March 1 run exceeded the existing `r12` full-run peak.
@@ -110,4 +111,5 @@ Notes:
 - `bench/results/dmr_probe150_r14_hardauto.json`
 - `bench/results/dmr_probe150_r15_r12exact.json`
 - `bench/results/long_probe120_r14_len_gate.json`
+- `bench/results/locomo_probe150_r15_gpt41.json`
 - `bench/results/long_probe120_r14_legacy.json`
