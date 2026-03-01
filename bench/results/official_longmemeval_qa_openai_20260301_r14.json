@@ -1,0 +1,193 @@
+{
+  "benchmark": "official_longmemeval_qa_openai_20260301_r14",
+  "dataset": "bench/official/converted/longmemeval_oracle_qa_eval.jsonl",
+  "rows_total": 500,
+  "rows_scored": 500,
+  "rows_skipped": 0,
+  "row_offset": 0,
+  "row_limit": 0,
+  "top_k": 10,
+  "answer_mode": "llm",
+  "doc_hit_rate": 1.0,
+  "exact_match": 0.286,
+  "token_f1": 0.34729693500707515,
+  "ingested_documents": 948,
+  "ingested_chunks": 948,
+  "data_dir": "/tmp/novaspine-qa-long-r14",
+  "ephemeral_data_dir": false,
+  "skip_chunking": true,
+  "reuse_index": false,
+  "embed_local": false,
+  "mode_notes": [
+    "query_expansion=on",
+    "tune_preset=keyword_plus",
+    "recall_variants=off",
+    "answer_llm: provider=openai, model=gpt-4.1-mini, temp=0.0",
+    "answer_hard_route:off",
+    "ingest_batch_size=64"
+  ],
+  "answer_provider": "openai",
+  "answer_model": "gpt-4.1-mini",
+  "samples": [
+    {
+      "query": "__LME_CASE_0000__ What was the first issue I had with my new car after its first service?",
+      "prediction": "an issue with my car's GPS system on 3/22",
+      "gold": "GPS system not functioning correctly",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.26666666666666666
+    },
+    {
+      "query": "__LME_CASE_0001__ Which event did I attend first, the 'Effective Time Management' workshop or the 'Data Analysis using Python' webinar?",
+      "prediction": "Data Analysis using Python",
+      "gold": "'Data Analysis using Python' webinar",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.888888888888889
+    },
+    {
+      "query": "__LME_CASE_0002__ Which vehicle did I take care of first in February, the bike or the car?",
+      "prediction": "bike",
+      "gold": "bike",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0003__ Which device did I got first, the Samsung Galaxy S22 or the Dell XPS 13?",
+      "prediction": "Samsung Galaxy S22",
+      "gold": "Samsung Galaxy S22",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0004__ How many days before the team meeting I was preparing for did I attend the workshop on 'Effective Communication in the Workplace'?",
+      "prediction": "7 days",
+      "gold": "7 days. 8 days (including the last day) is also acceptable.",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0005__ How many days had passed between the Sunday mass at St. Mary's Church and the Ash Wednesday service at the cathedral?",
+      "prediction": "30 days",
+      "gold": "30 days. 31 days (including the last day) is also acceptable.",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0006__ How many days did it take for me to find a house I loved after starting to work with Rachel?",
+      "prediction": "ve been working with a real estate agent, Rachel, and she",
+      "gold": "14 days. 15 days (including the last day) is also acceptable.",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0007__ Which seeds were started first, the tomatoes or the marigolds?",
+      "prediction": "tomatoes",
+      "gold": "Tomatoes",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0008__ How many days had passed between the Hindu festival of Holi and the Sunday mass at St. Mary's Church?",
+      "prediction": "21 days",
+      "gold": "21 days. 22 days (including the last day) is also acceptable.",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0009__ How many days before the 'Rack Fest' did I participate in the 'Turbocharged Tuesdays' event?",
+      "prediction": "4 days",
+      "gold": "4 days.",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0010__ Which pair of shoes did I clean last month?",
+      "prediction": "By the way, I wore my trusty old Converse Chuck Taylor All Star sneakers to that outdoor music festival last month, and they were super comfortable, but I did notice that the soles are starting to wear down a bit, especially on the heels.",
+      "gold": "white Adidas sneakers",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.046511627906976744
+    },
+    {
+      "query": "__LME_CASE_0011__ Which event happened first, the purchase of the coffee maker or the malfunction of the stand mixer?",
+      "prediction": "stand mixer malfunction",
+      "gold": "The malfunction of the stand mixer",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.8571428571428571
+    },
+    {
+      "query": "__LME_CASE_0012__ How many days had passed between the 'Walk for Hunger' event and the 'Coastal Cleanup' event?",
+      "prediction": "14 days",
+      "gold": "14 days. 8 days (including the last day) is also acceptable.",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0013__ Which item did I purchase first, the dog bed for Max or the training pads for Luna?",
+      "prediction": "training pads",
+      "gold": "Training pads for Luna",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.6666666666666666
+    },
+    {
+      "query": "__LME_CASE_0014__ Which task did I complete first, fixing the fence or trimming the goats' hooves?",
+      "prediction": "fixing the fence",
+      "gold": "Fixing the fence",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0015__ How many charity events did I participate in before the 'Run for the Cure' event?",
+      "prediction": "2",
+      "gold": "4",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0016__ How long have I been working before I started my current job at NovaTech?",
+      "prediction": "Lately, I've been working long hours on a high-priority project and my commute has increased, leaving me with little time for personal life.",
+      "gold": "4 years and 9 months",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.06896551724137931
+    },
+    {
+      "query": "__LME_CASE_0017__ Which book did I finish reading first, 'The Hate U Give' or 'The Nightingale'?",
+      "prediction": "The Hate U Give",
+      "gold": "'The Hate U Give'",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0018__ Which device did I set up first, the smart thermostat or the mesh network system?",
+      "prediction": "smart thermostat",
+      "gold": "Smart thermostat",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0019__ How many months ago did I book the Airbnb in San Francisco?",
+      "prediction": "3 months",
+      "gold": "Five months ago",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.4
+    }
+  ]
+}

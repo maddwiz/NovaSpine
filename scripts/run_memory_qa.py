@@ -479,6 +479,29 @@ def _normalize_answer_by_type(answer: str, answer_type: str) -> str:
     return _clean_answer(clause)
 
 
+def _is_type_valid_answer(answer: str, answer_type: str) -> bool:
+    a = (answer or "").strip().lower()
+    if not a:
+        return False
+    if answer_type == "NUMBER":
+        if re.search(r"\b\d+(?:\.\d+)?\b", a):
+            return True
+        if re.search(
+            r"\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+            r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|once|twice|thrice)\b",
+            a,
+        ):
+            return True
+        return False
+    if answer_type == "DATE":
+        # "When" gold labels in public QA sets often use events/seasons instead of strict dates.
+        # Avoid over-rejecting valid answers and let EM/F1 handle formatting differences.
+        return True
+    if answer_type == "YES_NO":
+        return bool(re.search(r"\b(yes|no)\b", a))
+    return True
+
+
 def _detect_answer_type(query: str) -> str:
     q = _clean_question(query).lower().strip()
     if q.startswith(("who ", "whose ")):
@@ -693,12 +716,19 @@ async def _answer_with_llm(
                     if normalize_mode == "typed"
                     else _clean_answer(raw)
                 )
+                if ans and not _is_type_valid_answer(ans, answer_type):
+                    return ""
                 if ans:
                     return ans
                 return ""
-            if normalize_mode == "typed":
-                return _normalize_answer_by_type(resp.content, answer_type)
-            return _clean_answer(resp.content)
+            ans = (
+                _normalize_answer_by_type(resp.content, answer_type)
+                if normalize_mode == "typed"
+                else _clean_answer(resp.content)
+            )
+            if ans and not _is_type_valid_answer(ans, answer_type):
+                return ""
+            return ans
         except Exception as e:
             last_exc = e
             if attempt >= max_tries - 1:
