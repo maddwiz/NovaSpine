@@ -105,3 +105,65 @@ def test_typed_normalization_shortens_verbose_person_answer():
     )
     assert ans == "Xiu Li Dai"
 
+
+def test_extract_query_entities_prefers_named_subjects():
+    mod = _load_run_memory_qa_module()
+    ents = mod._extract_query_entities("__LOCOMO_CASE_0040__ How many times has Melanie gone to the beach in 2023?")
+    assert "Melanie" in ents
+
+
+def test_sentence_context_mode_prioritizes_named_entity_sentence():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {
+            "id": "r1",
+            "score": 1.0,
+            "content": (
+                "Melanie painted horses last week. "
+                "Caroline painted a sunset this month."
+            ),
+            "metadata": {"benchmark_doc_id": "doc1", "session_id": "s1"},
+        },
+        {
+            "id": "r2",
+            "score": 0.95,
+            "content": "Melanie visited the beach two times in 2023.",
+            "metadata": {"benchmark_doc_id": "doc2", "session_id": "s2"},
+        },
+    ]
+    ctx = mod._build_answer_context(
+        "What did Caroline paint recently?",
+        recalled,
+        k=2,
+        per_chunk_chars=220,
+        total_chars=1000,
+        min_score_ratio=0.0,
+        min_score_abs=0.0,
+        context_rerank="lexical",
+        context_pool_multiplier=3,
+        context_overlap_weight=0.45,
+        context_session_diversity_min=1,
+        context_mode="sentence",
+        context_sentences_per_doc=2,
+        entity_focus=["Caroline"],
+    )
+    assert "Caroline painted a sunset" in ctx
+
+
+def test_should_span_refine_flags_long_non_contextual_answers():
+    mod = _load_run_memory_qa_module()
+    ctx = "[1] doc_id=x score=1.0\nCaroline moved from Sweden four years ago."
+    assert mod._should_span_refine(
+        "Caroline mentioned many unrelated details about various topics",
+        "SHORT_PHRASE",
+        ctx,
+    )
+
+
+def test_fallback_answer_from_context_returns_typed_short_answer():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {"content": "Melanie has 3 children and Caroline has 1 child."},
+    ]
+    pred = mod._fallback_answer_from_context("How many children does Melanie have?", recalled)
+    assert pred == "3"

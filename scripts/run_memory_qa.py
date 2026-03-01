@@ -52,6 +52,36 @@ _KEYWORD_KEEP = {
     "years",
 }
 
+_ENTITY_STOPWORDS = {
+    "What",
+    "When",
+    "Where",
+    "Who",
+    "Which",
+    "How",
+    "Why",
+    "Did",
+    "Does",
+    "Do",
+    "Is",
+    "Are",
+    "Was",
+    "Were",
+    "The",
+    "A",
+    "An",
+    "And",
+    "Or",
+    "In",
+    "On",
+    "At",
+    "For",
+    "To",
+    "From",
+    "By",
+    "Of",
+}
+
 _MONTH_NAME_TO_NUM = {
     "jan": 1,
     "january": 1,
@@ -282,6 +312,18 @@ def _parse_args() -> argparse.Namespace:
         help="Re-rank answer-context candidates before truncation.",
     )
     p.add_argument(
+        "--answer-context-mode",
+        default="chunk",
+        choices=["chunk", "sentence"],
+        help="Answer context granularity: full chunks or sentence-level snippets.",
+    )
+    p.add_argument(
+        "--answer-context-sentences-per-doc",
+        type=int,
+        default=2,
+        help="Maximum sentence candidates contributed per recalled document in sentence mode.",
+    )
+    p.add_argument(
         "--answer-context-pool-multiplier",
         type=int,
         default=3,
@@ -311,6 +353,11 @@ def _parse_args() -> argparse.Namespace:
         default="auto",
         choices=["off", "on", "auto"],
         help="Reasoning mode for answer generation.",
+    )
+    p.add_argument(
+        "--answer-span-refine",
+        action="store_true",
+        help="Run a second LLM pass to extract a short exact answer span from context when initial output is noisy.",
     )
     p.add_argument(
         "--rerank-with-llm",
@@ -361,6 +408,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable extractive fallback when LLM answer is empty/invalid.",
     )
+    p.add_argument(
+        "--answer-fallback-mode",
+        default="legacy",
+        choices=["legacy", "typed"],
+        help="Fallback strategy when LLM answer is empty: legacy extractive vs typed structured fallback.",
+    )
     p.add_argument("--out", default="", help="Optional output JSON path")
     return p.parse_args()
 
@@ -371,6 +424,27 @@ def _clean_question(query: str) -> str:
 
 def _extract_case_token(query: str) -> str:
     return extract_benchmark_case_token(query)
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=[\.\?\!])\s+|\n+", text.strip()) if s and s.strip()]
+
+
+def _extract_query_entities(query: str) -> list[str]:
+    clean = _clean_question(query)
+    raw = re.findall(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?\b", clean)
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        head = item.split()[0]
+        if head in _ENTITY_STOPWORDS:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out[:4]
 
 
 def _strip_leading_wh(clean_query: str) -> str:
@@ -912,6 +986,9 @@ def _build_answer_context(
     context_pool_multiplier: int = 3,
     context_overlap_weight: float = 0.35,
     context_session_diversity_min: int = 1,
+    context_mode: str = "chunk",
+    context_sentences_per_doc: int = 2,
+    entity_focus: list[str] | None = None,
 ) -> str:
     chunks: list[str] = []
     used = 0
@@ -920,6 +997,7 @@ def _build_answer_context(
     pool = max(1, int(context_pool_multiplier))
     pool_rows = recalled[: max(1, k * pool)]
     rows = pool_rows[: max(1, k)]
+    ef = [e.lower() for e in (entity_focus or []) if e.strip()]
     if context_rerank == "lexical":
         q_toks = set(re.findall(r"[a-z0-9_]+", _clean_question(query).lower()))
         q_toks = {t for t in q_toks if len(t) > 1 and t not in _QUERY_STOPWORDS}
@@ -933,7 +1011,14 @@ def _build_answer_context(
                 s_toks = set(re.findall(r"[a-z0-9_]+", content))
                 overlap = (len(q_toks & s_toks) / max(1, len(q_toks))) if s_toks else 0.0
                 base = float(row.get("score", 0.0)) / top_raw
-                fused = (1.0 - w) * base + w * overlap
+                entity_bonus = 0.0
+                if ef:
+                    hits = 0
+                    for ent in ef:
+                        if ent in content:
+                            hits += 1
+                    entity_bonus = hits / max(1, len(ef))
+                fused = (1.0 - w) * base + w * overlap + (0.10 * entity_bonus)
                 scored_rows.append((fused, -idx, row))
             scored_rows.sort(reverse=True)
             rows = [row for _, _, row in scored_rows]
@@ -948,25 +1033,169 @@ def _build_answer_context(
     else:
         rows = rows[: max(1, k)]
 
-    top_score = max(float(r.get("score", 0.0)) for r in rows) if rows else 0.0
-    min_score = max(float(min_score_abs), top_score * max(0.0, float(min_score_ratio)))
-    for i, row in enumerate(rows):
-        score = float(row.get("score", 0.0))
-        if i > 0 and score < min_score:
-            continue
-        content = str(row.get("content", "")).strip()
-        if not content:
-            continue
-        if len(content) > per_chunk_chars:
-            content = content[:per_chunk_chars].rstrip() + " ..."
-        md = row.get("metadata") or {}
-        doc_id = str(md.get("benchmark_doc_id", "")).strip() or str(row.get("id", ""))
-        block = f"[{i+1}] doc_id={doc_id} score={score:.4f}\n{content}"
-        if used + len(block) > total_chars:
-            break
-        chunks.append(block)
-        used += len(block)
+    if context_mode == "sentence":
+        q_toks = set(re.findall(r"[a-z0-9_]+", _clean_question(query).lower()))
+        q_toks = {t for t in q_toks if len(t) > 1 and t not in _QUERY_STOPWORDS}
+        top_raw = max((float(r.get("score", 0.0)) for r in rows), default=1.0)
+        top_raw = top_raw if top_raw > 0.0 else 1.0
+        sent_pool: list[tuple[float, str, str, float]] = []
+        per_doc_cap = max(1, int(context_sentences_per_doc))
+        for row in rows:
+            content = str(row.get("content", "")).strip()
+            if not content:
+                continue
+            md = row.get("metadata") or {}
+            doc_id = str(md.get("benchmark_doc_id", "")).strip() or str(row.get("id", ""))
+            base = float(row.get("score", 0.0)) / top_raw
+            candidates: list[tuple[float, str]] = []
+            for sent in _split_sentences(content):
+                stoks = set(re.findall(r"[a-z0-9_]+", sent.lower()))
+                overlap = (len(q_toks & stoks) / max(1, len(q_toks))) if q_toks and stoks else 0.0
+                entity_bonus = 0.0
+                if ef:
+                    hits = 0
+                    s_lower = sent.lower()
+                    for ent in ef:
+                        if ent in s_lower:
+                            hits += 1
+                    entity_bonus = hits / max(1, len(ef))
+                # Sentence-level fused score favors lexical/entity relevance with retrieval prior.
+                fused = (0.35 * base) + (0.45 * overlap) + (0.20 * entity_bonus)
+                if fused <= 0.0:
+                    continue
+                candidates.append((fused, sent))
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for fused, sent in candidates[:per_doc_cap]:
+                sent_pool.append((fused, doc_id, sent, base))
+        sent_pool.sort(key=lambda x: x[0], reverse=True)
+        top_sent = sent_pool[0][0] if sent_pool else 0.0
+        min_sent = max(float(min_score_abs), top_sent * max(0.0, float(min_score_ratio)))
+        kept = 0
+        for fused, doc_id, sent, base in sent_pool:
+            if kept > 0 and fused < min_sent:
+                continue
+            content = sent
+            if len(content) > per_chunk_chars:
+                content = content[:per_chunk_chars].rstrip() + " ..."
+            block = f"[{kept+1}] doc_id={doc_id} score={fused:.4f}\n{content}"
+            if used + len(block) > total_chars:
+                break
+            chunks.append(block)
+            used += len(block)
+            kept += 1
+            if kept >= max(1, k):
+                break
+    else:
+        top_score = max(float(r.get("score", 0.0)) for r in rows) if rows else 0.0
+        min_score = max(float(min_score_abs), top_score * max(0.0, float(min_score_ratio)))
+        for i, row in enumerate(rows):
+            score = float(row.get("score", 0.0))
+            if i > 0 and score < min_score:
+                continue
+            content = str(row.get("content", "")).strip()
+            if not content:
+                continue
+            if len(content) > per_chunk_chars:
+                content = content[:per_chunk_chars].rstrip() + " ..."
+            md = row.get("metadata") or {}
+            doc_id = str(md.get("benchmark_doc_id", "")).strip() or str(row.get("id", ""))
+            block = f"[{i+1}] doc_id={doc_id} score={score:.4f}\n{content}"
+            if used + len(block) > total_chars:
+                break
+            chunks.append(block)
+            used += len(block)
     return "\n\n".join(chunks)
+
+
+def _answer_word_count(text: str) -> int:
+    return len(re.findall(r"\S+", (text or "").strip()))
+
+
+def _answer_in_context(answer: str, context: str) -> bool:
+    a = (answer or "").strip().lower()
+    c = (context or "").strip().lower()
+    if not a or not c:
+        return False
+    if a in c:
+        return True
+    a_toks = re.findall(r"[a-z0-9_]+", a)
+    c_toks = set(re.findall(r"[a-z0-9_]+", c))
+    if not a_toks:
+        return False
+    overlap = sum(1 for t in a_toks if t in c_toks)
+    return overlap >= max(1, int(len(a_toks) * 0.7))
+
+
+def _should_span_refine(answer: str, answer_type: str, context: str) -> bool:
+    wc = _answer_word_count(answer)
+    if wc <= 0:
+        return False
+    if answer_type in {"NUMBER", "DATE", "YES_NO", "CHOICE"}:
+        return not _answer_in_context(answer, context) or wc > 5
+    if answer_type == "PERSON_NAME":
+        return wc > 4 or not _answer_in_context(answer, context)
+    if answer_type in {"PLACE", "SHORT_PHRASE"}:
+        return wc > 8 or not _answer_in_context(answer, context)
+    return wc > 10
+
+
+async def _refine_answer_span(
+    *,
+    query: str,
+    answer_type: str,
+    initial_answer: str,
+    context: str,
+    llm_backend: Any,
+    temperature: float,
+    max_tokens: int,
+    normalize_mode: str,
+) -> str:
+    system = (
+        "Extract the shortest exact answer span from the provided context.\n"
+        "Return strict JSON only: {\"answer\":\"...\"}\n"
+        "Rules:\n"
+        "- copy answer text from context when possible\n"
+        "- no explanation, no extra keys\n"
+        f"- expected answer type: {answer_type} ({_TYPE_HINTS[answer_type]})\n"
+        "- if no answer is present in context, return an empty answer"
+    )
+    user = (
+        f"Question:\n{_clean_question(query)}\n\n"
+        f"Initial answer:\n{initial_answer}\n\n"
+        f"Context:\n{context}\n\n"
+        "Return JSON now."
+    )
+    try:
+        resp = await llm_backend.chat(
+            [Message(role="system", content=system), Message(role="user", content=user)],
+            temperature=temperature,
+            max_tokens=max(64, min(160, int(max_tokens))),
+            json_mode=True,
+        )
+        obj = parse_json_object(resp.content)
+        if obj:
+            raw = str(obj.get("answer", ""))
+        else:
+            raw = resp.content
+        refined = (
+            _normalize_answer_by_type(raw, answer_type)
+            if normalize_mode == "typed"
+            else _clean_answer(raw)
+        )
+        if refined and _is_type_valid_answer(refined, answer_type):
+            return refined
+    except Exception:
+        return ""
+    return ""
+
+
+def _fallback_answer_from_context(query: str, recalled: list[dict[str, Any]]) -> str:
+    at = _detect_answer_type(query)
+    det = _deterministic_structured_answer(query, recalled, at)
+    if det:
+        return det
+    base = extractive_answer(query, recalled)
+    return _normalize_answer_by_type(base, at)
 
 
 async def _answer_with_llm(
@@ -983,7 +1212,10 @@ async def _answer_with_llm(
     context_pool_multiplier: int,
     context_overlap_weight: float,
     context_session_diversity_min: int,
+    context_mode: str,
+    context_sentences_per_doc: int,
     deterministic_temporal: bool,
+    span_refine: bool,
     normalize_mode: str,
     temperature: float,
     max_tokens: int,
@@ -994,6 +1226,7 @@ async def _answer_with_llm(
     answer_route_hard: str = "auto",
 ) -> str:
     clean_q = _clean_question(query)
+    query_entities = _extract_query_entities(query)
     answer_type = _detect_answer_type(clean_q)
     if deterministic_temporal:
         deterministic = _deterministic_structured_answer(clean_q, recalled, answer_type)
@@ -1011,6 +1244,9 @@ async def _answer_with_llm(
         context_pool_multiplier=context_pool_multiplier,
         context_overlap_weight=context_overlap_weight,
         context_session_diversity_min=context_session_diversity_min,
+        context_mode=context_mode,
+        context_sentences_per_doc=context_sentences_per_doc,
+        entity_focus=query_entities,
     )
     if not context:
         return ""
@@ -1035,6 +1271,12 @@ async def _answer_with_llm(
         "- no explanation, no extra keys, no markdown\n"
         "- if uncertain, return an empty answer"
     )
+    if query_entities:
+        system += (
+            "\n"
+            f"- answer about these subject(s) only: {', '.join(query_entities)}\n"
+            "- ignore facts about other people/entities unless the question explicitly asks for them"
+        )
     system += "\n\n" + _few_shot_examples()
     if use_reasoning:
         system += "\n- include concise reasoning (<= 40 words) before final answer"
@@ -1062,7 +1304,20 @@ async def _answer_with_llm(
                     else _clean_answer(raw)
                 )
                 if ans and not _is_type_valid_answer(ans, answer_type):
-                    return ""
+                    ans = ""
+                if ans and span_refine and _should_span_refine(ans, answer_type, context):
+                    refined = await _refine_answer_span(
+                        query=clean_q,
+                        answer_type=answer_type,
+                        initial_answer=ans,
+                        context=context,
+                        llm_backend=backend,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        normalize_mode=normalize_mode,
+                    )
+                    if refined:
+                        ans = refined
                 if ans:
                     return ans
                 return ""
@@ -1072,7 +1327,20 @@ async def _answer_with_llm(
                 else _clean_answer(resp.content)
             )
             if ans and not _is_type_valid_answer(ans, answer_type):
-                return ""
+                ans = ""
+            if ans and span_refine and _should_span_refine(ans, answer_type, context):
+                refined = await _refine_answer_span(
+                    query=clean_q,
+                    answer_type=answer_type,
+                    initial_answer=ans,
+                    context=context,
+                    llm_backend=backend,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    normalize_mode=normalize_mode,
+                )
+                if refined:
+                    ans = refined
             return ans
         except Exception as e:
             last_exc = e
@@ -1265,8 +1533,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
     context_session_diversity_min = max(1, int(args.answer_context_session_diversity))
     mode_notes.append(f"answer_context_session_diversity={context_session_diversity_min}")
+    mode_notes.append(
+        "answer_context_mode="
+        f"{args.answer_context_mode}"
+        f" sentences_per_doc={max(1, int(args.answer_context_sentences_per_doc))}"
+    )
     if args.answer_deterministic_temporal:
         mode_notes.append("answer_deterministic_temporal=on")
+    if args.answer_span_refine:
+        mode_notes.append("answer_span_refine=on")
+    mode_notes.append(f"answer_fallback_mode={args.answer_fallback_mode}")
 
     tmp_dir: str | None = None
     if args.data_dir:
@@ -1455,7 +1731,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     context_pool_multiplier=args.answer_context_pool_multiplier,
                     context_overlap_weight=args.answer_context_overlap_weight,
                     context_session_diversity_min=context_session_diversity_min,
+                    context_mode=args.answer_context_mode,
+                    context_sentences_per_doc=max(1, int(args.answer_context_sentences_per_doc)),
                     deterministic_temporal=bool(args.answer_deterministic_temporal),
+                    span_refine=bool(args.answer_span_refine),
                     normalize_mode=args.answer_normalize_mode,
                     temperature=args.answer_temperature,
                     max_tokens=args.answer_max_tokens,
@@ -1467,7 +1746,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 last_answer_ts = time.monotonic()
                 if not pred and not args.no_answer_fallback:
-                    pred = extractive_answer(query, recalled)
+                    if args.answer_fallback_mode == "typed":
+                        pred = _fallback_answer_from_context(query, recalled)
+                    else:
+                        pred = extractive_answer(query, recalled)
             else:
                 pred = extractive_answer(query, recalled)
 

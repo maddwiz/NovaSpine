@@ -131,3 +131,31 @@ What changed from this pass:
 - Added deterministic temporal day-difference solver (`--answer-deterministic-temporal`) as **opt-in** after regressions when always-on.
 - Added explicit answer-context session diversity control (`--answer-context-session-diversity`, default `1`) so baseline profiles are not perturbed.
 - Kept prior leaderboard bests unchanged (`r9` LongMemEval, `r6_mini`/`r9_k15_lexctx` LoCoMo, `r16_large_legacy` DMR).
+
+## March 1 (late-night) — R20-R24 Answer-Stage Experiments
+
+Additional full QA runs focused on answer-stage quality (LLM rerank, sentence-level context, span-refine, and baseline stability checks):
+
+| Benchmark | Profile | doc_hit | EM | F1 | Result |
+|---|---|---:|---:|---:|---|
+| LoCoMo-MC10 | `r20_rerank` | 0.937 | 0.427 | 0.438 | below `r9_k15_lexctx` |
+| LoCoMo-MC10 | `r21_sentence_entity` | 0.944 | 0.280 | 0.320 | regressive |
+| LongMemEval | `r22_spanrefine` | 1.000 | 0.272 | 0.325 | below `r9` |
+| DMR-500 | `r23_large_legacy_spanrefine` | 0.952 | 0.626 | 0.620 | below `r16_large_legacy` |
+| DMR-500 | `r24_baselinecheck` | 0.952 | 0.618 | 0.616 | below `r16_large_legacy` |
+
+What was added in code from this pass:
+- New optional answer-stage controls in `scripts/run_memory_qa.py`:
+  - `--answer-span-refine` (second-pass short span extraction)
+  - `--answer-context-mode {chunk|sentence}`
+  - `--answer-context-sentences-per-doc`
+  - `--answer-fallback-mode {legacy|typed}` (default remains `legacy` for leaderboard stability)
+  - `--answer-deterministic-temporal` remains opt-in
+- Subject-aware context scoring and prompt constraints (entity-focus) for sentence-mode experiments.
+
+Conclusion from this round:
+- The new mechanisms are useful as **experimental knobs**, but none of the R20-R24 configurations beat existing leaderboard bests.
+- Stable best set remains unchanged:
+  - LongMemEval: `r9` (`1.000 / 0.304 / 0.367`)
+  - LoCoMo-MC10: `r6_mini` quality or `r9_k15_lexctx` recall
+  - DMR-500: `r16_large_legacy` (`0.950 / 0.628 / 0.632`)
