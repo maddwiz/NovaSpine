@@ -113,3 +113,21 @@ Notes:
 - `bench/results/long_probe120_r14_len_gate.json`
 - `bench/results/locomo_probe150_r15_gpt41.json`
 - `bench/results/long_probe120_r14_legacy.json`
+
+## March 1 (late) — R18/R19 QA Tuning Pass
+
+Full-run QA regressions/probes after adding deterministic temporal answering and context-diversity controls:
+
+| Benchmark | Profile | doc_hit | EM | F1 | Result |
+|---|---|---:|---:|---:|---|
+| LongMemEval | `r18_temporal` | 1.000 | 0.274 | 0.343 | below `r9` |
+| LongMemEval | `r18b_temporal_guarded` | 1.000 | 0.282 | 0.351 | below `r9` |
+| LoCoMo-MC10 | `r18_diverse` | 0.944 | 0.420 | 0.425 | below `r9_k15_lexctx` |
+| LoCoMo-MC10 | `r18_quality` | 0.860 | 0.427 | 0.427 | below `r6_mini` |
+| LoCoMo-MC10 | `r19_quality_paced` | 0.860 | 0.441 | 0.440 | below `r6_mini` |
+| DMR-500 | `r18_large_legacy` | 0.950 | 0.624 | 0.622 | below `r16_large_legacy` |
+
+What changed from this pass:
+- Added deterministic temporal day-difference solver (`--answer-deterministic-temporal`) as **opt-in** after regressions when always-on.
+- Added explicit answer-context session diversity control (`--answer-context-session-diversity`, default `1`) so baseline profiles are not perturbed.
+- Kept prior leaderboard bests unchanged (`r9` LongMemEval, `r6_mini`/`r9_k15_lexctx` LoCoMo, `r16_large_legacy` DMR).

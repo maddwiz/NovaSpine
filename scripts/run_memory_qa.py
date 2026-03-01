@@ -18,6 +18,7 @@ import re
 import sys
 import tempfile
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,71 @@ _KEYWORD_KEEP = {
     "months",
     "years",
 }
+
+_MONTH_NAME_TO_NUM = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+_NUM_WORD_TO_INT = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+_MONTH_PATTERN = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_MONTH_DATE_RE = re.compile(
+    rf"\b(?P<month>{_MONTH_PATTERN})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:,\s*(?P<year>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+_NUMERIC_DATE_RE = re.compile(
+    r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})(?:/(?P<year>\d{2,4}))?\b",
+    re.IGNORECASE,
+)
+_ISO_DATE_RE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})\b")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -280,6 +346,17 @@ def _parse_args() -> argparse.Namespace:
         help="Minimum unique sessions to prioritize when diversity is enabled.",
     )
     p.add_argument(
+        "--answer-context-session-diversity",
+        type=int,
+        default=1,
+        help="Minimum unique sessions to include in answer context.",
+    )
+    p.add_argument(
+        "--answer-deterministic-temporal",
+        action="store_true",
+        help="Enable deterministic day-difference solving for high-confidence temporal count questions.",
+    )
+    p.add_argument(
         "--no-answer-fallback",
         action="store_true",
         help="Disable extractive fallback when LLM answer is empty/invalid.",
@@ -401,11 +478,254 @@ def _merge_variant_recall(
     return merged[: max(1, top_k)]
 
 
+def _word_or_digit_to_int(token: str) -> int | None:
+    t = token.strip().lower()
+    if not t:
+        return None
+    if t.isdigit():
+        return int(t)
+    return _NUM_WORD_TO_INT.get(t)
+
+
+def _sentence_overlap_score(query: str, sentence: str) -> float:
+    q_toks = set(re.findall(r"[a-z0-9_]+", _clean_question(query).lower()))
+    q_toks = {t for t in q_toks if len(t) > 1 and t not in _QUERY_STOPWORDS}
+    if not q_toks:
+        return 0.0
+    s_toks = set(re.findall(r"[a-z0-9_]+", sentence.lower()))
+    if not s_toks:
+        return 0.0
+    return len(q_toks & s_toks) / max(1, len(q_toks))
+
+
+def _extract_dates_from_text(text: str, default_year: int | None = None) -> list[date]:
+    candidates: list[tuple[int, int, int]] = []
+    explicit_years: list[int] = []
+
+    for m in _MONTH_DATE_RE.finditer(text):
+        month_raw = m.group("month").lower()
+        month = _MONTH_NAME_TO_NUM.get(month_raw)
+        if month is None:
+            month = _MONTH_NAME_TO_NUM.get(month_raw[:3], 0)
+        if month <= 0:
+            continue
+        day = int(m.group("day"))
+        year_str = m.group("year")
+        if year_str:
+            year = int(year_str)
+            explicit_years.append(year)
+        else:
+            year = -1
+        candidates.append((year, month, day))
+
+    for m in _NUMERIC_DATE_RE.finditer(text):
+        month = int(m.group("month"))
+        day = int(m.group("day"))
+        year_str = m.group("year")
+        if year_str:
+            year = int(year_str)
+            if year < 100:
+                year += 2000 if year < 70 else 1900
+            explicit_years.append(year)
+        else:
+            year = -1
+        candidates.append((year, month, day))
+
+    for m in _ISO_DATE_RE.finditer(text):
+        year = int(m.group("year"))
+        month = int(m.group("month"))
+        day = int(m.group("day"))
+        explicit_years.append(year)
+        candidates.append((year, month, day))
+
+    inferred_year = default_year
+    if inferred_year is None and explicit_years:
+        inferred_year = max(set(explicit_years), key=explicit_years.count)
+
+    out: list[date] = []
+    seen: set[date] = set()
+    for year, month, day in candidates:
+        yy = year if year > 0 else (inferred_year if inferred_year is not None else 2000)
+        try:
+            d = date(yy, month, day)
+        except ValueError:
+            continue
+        if d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    return out
+
+
+def _normalize_count_phrase(num: int, unit: str) -> str:
+    unit_l = unit.lower()
+    if unit_l in {"time", "times"}:
+        return str(num)
+    if num == 1 and unit_l.endswith("s"):
+        unit_l = unit_l[:-1]
+    return f"{num} {unit_l}"
+
+
+def _extract_direct_count_from_sentence(query: str, sentence: str) -> str:
+    q = _clean_question(query).lower()
+    desired_unit: str | None = None
+    for token, unit in (
+        ("how many day", "day"),
+        ("how many week", "week"),
+        ("how many month", "month"),
+        ("how many year", "year"),
+        ("how many time", "time"),
+        ("how many episode", "episode"),
+        ("how many hour", "hour"),
+        ("how many minute", "minute"),
+    ):
+        if token in q:
+            desired_unit = unit
+            break
+
+    pat = (
+        r"\b(?P<num>\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+        r"nineteen|twenty)\s+(?P<unit>days?|weeks?|months?|years?|times?|episodes?|hours?|minutes?)\b"
+    )
+    for m in re.finditer(pat, sentence, re.IGNORECASE):
+        num = _word_or_digit_to_int(m.group("num"))
+        if num is None:
+            continue
+        unit = m.group("unit").lower()
+        stem = unit[:-1] if unit.endswith("s") else unit
+        if desired_unit and stem != desired_unit:
+            continue
+        return _normalize_count_phrase(num, unit)
+    return ""
+
+
+def _deterministic_structured_answer(query: str, recalled: list[dict[str, Any]], answer_type: str) -> str:
+    if answer_type != "NUMBER":
+        return ""
+    q = _clean_question(query).lower()
+    if "how many" not in q:
+        return ""
+    # High-confidence guard: only solve explicit day-difference style queries.
+    if not ("how many day" in q and any(k in q for k in ("between", "before", "after", "passed"))):
+        return ""
+    if not recalled:
+        return ""
+
+    scored_sentences: list[tuple[float, str]] = []
+    for row in recalled[:8]:
+        content = str(row.get("content", "")).strip()
+        if not content:
+            continue
+        for sent in re.split(r"(?<=[\.\?\!])\s+|\n+", content):
+            s = sent.strip()
+            if not s:
+                continue
+            sc = _sentence_overlap_score(q, s)
+            if sc <= 0.0:
+                continue
+            scored_sentences.append((sc, s))
+    scored_sentences.sort(key=lambda x: x[0], reverse=True)
+
+    # High-precision path: explicit day count phrase in the most relevant sentence(s).
+    for _, sent in scored_sentences[:6]:
+        direct = _extract_direct_count_from_sentence(q, sent)
+        if direct and "day" in direct:
+            return direct
+
+    # Temporal arithmetic path for day-difference questions.
+    if "how many day" in q and any(k in q for k in ("between", "before", "after", "passed")):
+        query_year_match = re.search(r"\b(19|20)\d{2}\b", q)
+        query_year = int(query_year_match.group(0)) if query_year_match else None
+        dates: list[date] = []
+        for _, sent in scored_sentences[:6]:
+            dates.extend(_extract_dates_from_text(sent, default_year=query_year))
+        if len(dates) < 2:
+            merged = " ".join(str(r.get("content", "")) for r in recalled[:5])
+            dates = _extract_dates_from_text(merged, default_year=query_year)
+        uniq_dates: list[date] = []
+        seen_dates: set[date] = set()
+        for d in dates:
+            if d in seen_dates:
+                continue
+            seen_dates.add(d)
+            uniq_dates.append(d)
+        if len(uniq_dates) >= 2:
+            deltas = [
+                abs((uniq_dates[i + 1] - uniq_dates[i]).days)
+                for i in range(len(uniq_dates) - 1)
+                if abs((uniq_dates[i + 1] - uniq_dates[i]).days) > 0
+            ]
+            if deltas:
+                # Pick the shortest non-zero span; this best matches "between X and Y" phrasing.
+                diff = min(deltas)
+                if 0 < diff <= 3650:
+                    return f"{diff} days"
+    return ""
+
+
+def _context_session_key(row: dict[str, Any]) -> str:
+    md = row.get("metadata") or {}
+    for key in ("session_id", "source_id", "benchmark_doc_id"):
+        val = str(md.get(key, "")).strip()
+        if val:
+            return val
+    rid = str(row.get("id", "")).strip()
+    return rid or _result_key(row)
+
+
+def _context_diversify_rows(
+    rows: list[dict[str, Any]],
+    *,
+    k: int,
+    min_sessions: int,
+) -> list[dict[str, Any]]:
+    if min_sessions <= 1 or len(rows) <= 1:
+        return rows[: max(1, k)]
+    picks: list[dict[str, Any]] = []
+    tail: list[dict[str, Any]] = []
+    seen_sessions: set[str] = set()
+    seen_rows: set[str] = set()
+    for row in rows:
+        row_key = _result_key(row)
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        sid = _context_session_key(row)
+        if sid and sid not in seen_sessions and len(seen_sessions) < min_sessions:
+            seen_sessions.add(sid)
+            picks.append(row)
+        else:
+            tail.append(row)
+    return (picks + tail)[: max(1, k)]
+
+
+def _tighten_short_answer_text(text: str, max_tokens: int = 6) -> str:
+    if not text:
+        return ""
+    s = re.sub(r"\([^)]*\)", " ", text)
+    s = re.sub(
+        r"^\s*(?:the answer is|answer is|it is|it was|there is|there are|there was|there were|"
+        r"according to (?:the )?context[,:\s]*)",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.split(r"\b(?:because|since|as)\b", s, maxsplit=1, flags=re.IGNORECASE)[0]
+    s = re.split(r"[\n\r;.!?]", s, maxsplit=1)[0]
+    s = s.strip(" \"' ,:-")
+    toks = s.split()
+    if len(toks) > max_tokens:
+        s = " ".join(toks[:max_tokens])
+    return s
+
+
 def _clean_answer(ans: str) -> str:
     a = re.sub(r"\s+", " ", ans.strip())
     a = a.strip(" \"'")
     if a.lower().startswith("answer:"):
         a = a.split(":", 1)[1].strip()
+    a = _tighten_short_answer_text(a, max_tokens=8)
     # Prefer canonical terse forms for benchmark scoring.
     lower = a.lower()
     if lower in {"once", "twice", "thrice"}:
@@ -430,6 +750,7 @@ def _normalize_answer_by_type(answer: str, answer_type: str) -> str:
         return ""
     # Normalize obvious wrappers before type-specific extraction.
     a = re.sub(r"^\s*(?:answer|final answer)\s*:\s*", "", a, flags=re.IGNORECASE).strip()
+    a = _tighten_short_answer_text(a, max_tokens=10)
 
     if answer_type == "YES_NO":
         m = re.search(r"\b(yes|no)\b", a, re.IGNORECASE)
@@ -453,6 +774,11 @@ def _normalize_answer_by_type(answer: str, answer_type: str) -> str:
             return _clean_answer(word_num.group(0))
         return _clean_answer(a)
 
+    if answer_type == "PERSON_NAME":
+        clause = _tighten_short_answer_text(a, max_tokens=5)
+        clause = clause.split(",", 1)[0].strip()
+        return _clean_answer(clause)
+
     if answer_type == "DATE":
         month = (
             r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
@@ -470,12 +796,13 @@ def _normalize_answer_by_type(answer: str, answer_type: str) -> str:
         return _clean_answer(a)
 
     # Most benchmark answers are short phrases. Keep first clause and cap length.
-    clause = re.split(r"[\n\r;.!?]", a, maxsplit=1)[0].strip(" \"'")
+    clause = _tighten_short_answer_text(a, max_tokens=8)
     toks = clause.split()
-    if len(toks) > 8:
-        clause = " ".join(toks[:8])
+    if len(toks) > 6:
+        clause = " ".join(toks[:6])
     if answer_type == "PLACE":
         clause = re.sub(r"^\s*(?:in|at|on|from)\s+", "", clause, flags=re.IGNORECASE)
+        clause = re.sub(r"^\s*(?:the)\s+", "", clause, flags=re.IGNORECASE)
     return _clean_answer(clause)
 
 
@@ -584,15 +911,16 @@ def _build_answer_context(
     context_rerank: str = "none",
     context_pool_multiplier: int = 3,
     context_overlap_weight: float = 0.35,
+    context_session_diversity_min: int = 1,
 ) -> str:
     chunks: list[str] = []
     used = 0
     if not recalled:
         return ""
-    rows = recalled[: max(1, k)]
+    pool = max(1, int(context_pool_multiplier))
+    pool_rows = recalled[: max(1, k * pool)]
+    rows = pool_rows[: max(1, k)]
     if context_rerank == "lexical":
-        pool = max(1, int(context_pool_multiplier))
-        pool_rows = recalled[: max(1, k * pool)]
         q_toks = set(re.findall(r"[a-z0-9_]+", _clean_question(query).lower()))
         q_toks = {t for t in q_toks if len(t) > 1 and t not in _QUERY_STOPWORDS}
         if q_toks and pool_rows:
@@ -608,7 +936,17 @@ def _build_answer_context(
                 fused = (1.0 - w) * base + w * overlap
                 scored_rows.append((fused, -idx, row))
             scored_rows.sort(reverse=True)
-            rows = [row for _, _, row in scored_rows[: max(1, k)]]
+            rows = [row for _, _, row in scored_rows]
+
+    if context_session_diversity_min > 1:
+        diversify_source = rows if context_rerank == "lexical" else pool_rows
+        rows = _context_diversify_rows(
+            diversify_source,
+            k=max(1, k),
+            min_sessions=max(1, int(context_session_diversity_min)),
+        )
+    else:
+        rows = rows[: max(1, k)]
 
     top_score = max(float(r.get("score", 0.0)) for r in rows) if rows else 0.0
     min_score = max(float(min_score_abs), top_score * max(0.0, float(min_score_ratio)))
@@ -644,6 +982,8 @@ async def _answer_with_llm(
     context_rerank: str,
     context_pool_multiplier: int,
     context_overlap_weight: float,
+    context_session_diversity_min: int,
+    deterministic_temporal: bool,
     normalize_mode: str,
     temperature: float,
     max_tokens: int,
@@ -654,6 +994,11 @@ async def _answer_with_llm(
     answer_route_hard: str = "auto",
 ) -> str:
     clean_q = _clean_question(query)
+    answer_type = _detect_answer_type(clean_q)
+    if deterministic_temporal:
+        deterministic = _deterministic_structured_answer(clean_q, recalled, answer_type)
+        if deterministic:
+            return deterministic
     context = _build_answer_context(
         clean_q,
         recalled,
@@ -665,10 +1010,10 @@ async def _answer_with_llm(
         context_rerank=context_rerank,
         context_pool_multiplier=context_pool_multiplier,
         context_overlap_weight=context_overlap_weight,
+        context_session_diversity_min=context_session_diversity_min,
     )
     if not context:
         return ""
-    answer_type = _detect_answer_type(clean_q)
     use_reasoning = reasoning_mode == "on" or (
         reasoning_mode == "auto" and answer_type in {"NUMBER", "DATE", "CHOICE"}
     )
@@ -918,6 +1263,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "session_diversity=on"
             f" min_sessions={max(1, int(args.min_session_diversity))}"
         )
+    context_session_diversity_min = max(1, int(args.answer_context_session_diversity))
+    mode_notes.append(f"answer_context_session_diversity={context_session_diversity_min}")
+    if args.answer_deterministic_temporal:
+        mode_notes.append("answer_deterministic_temporal=on")
 
     tmp_dir: str | None = None
     if args.data_dir:
@@ -1105,6 +1454,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     context_rerank=args.answer_context_rerank,
                     context_pool_multiplier=args.answer_context_pool_multiplier,
                     context_overlap_weight=args.answer_context_overlap_weight,
+                    context_session_diversity_min=context_session_diversity_min,
+                    deterministic_temporal=bool(args.answer_deterministic_temporal),
                     normalize_mode=args.answer_normalize_mode,
                     temperature=args.answer_temperature,
                     max_tokens=args.answer_max_tokens,
