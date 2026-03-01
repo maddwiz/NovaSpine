@@ -159,3 +159,22 @@ Conclusion from this round:
   - LongMemEval: `r9` (`1.000 / 0.304 / 0.367`)
   - LoCoMo-MC10: `r6_mini` quality or `r9_k15_lexctx` recall
   - DMR-500: `r16_large_legacy` (`0.950 / 0.628 / 0.632`)
+
+## March 1 (routing-only probe matrix) — R25-R27
+
+Best-preserving strategy run: fixed-row probes only (no leaderboard promotion unless probe beats baseline all-around).
+
+| Benchmark | Probe | doc_hit | EM | F1 | Delta vs probe baseline |
+|---|---|---:|---:|---:|---|
+| LongMemEval (150 rows) | `r25_base` | 1.000 | 0.420 | 0.456 | baseline |
+| LongMemEval (150 rows) | `r26_hardauto` (`mini` + DATE/NUMBER route to `gpt-4.1`) | 1.000 | 0.407 | 0.448 | worse |
+| LongMemEval (150 rows) | `r27_full41` | 1.000 | 0.433 | 0.454 | mixed (EM up, F1 down) |
+| DMR-500 (150 rows) | `r25_base` | 0.953 | 0.620 | 0.627 | baseline |
+| DMR-500 (150 rows) | `r26_hardauto` | 0.953 | 0.607 | 0.614 | worse |
+| DMR-500 (150 rows) | `r27_full41` | 0.953 | 0.593 | 0.611 | worse |
+| LoCoMo-MC10 (143 rows) | `r25_base` | 0.860 | 0.434 | 0.447 | baseline |
+| LoCoMo-MC10 (143 rows) | `r26_full41` | 0.860 | 0.399 | 0.407 | worse |
+
+Decision:
+- No routing variant qualified for promotion to full official runs.
+- Current official winners remain unchanged (`r9`, `r6_mini`/`r9_k15_lexctx`, `r16_large_legacy`).
