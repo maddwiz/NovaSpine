@@ -59,9 +59,11 @@ Conclusion:
 | `r18_probe_legacy_lex` | 0.947 | 0.607 | 0.620 | best GPT-5.2 probe |
 | `r18_probe_legacy_temp02` | 0.947 | 0.587 | 0.593 | below lexical probe |
 | `r18_full_legacy_lex` | 0.946 | 0.560 | 0.571 | regressed on full pass |
+| `r20_probe_guard` | 0.947 | 0.600 | 0.613 | improved vs `r17`, still below `r16` |
 
 Notes:
 - Probe gains with GPT-5.2 lexical context reranking did not hold on the full 500-row run.
+- Added a GPT-5 guard in `run_memory_qa.py` to apply type-aware normalization even in legacy mode; this helped some slices but did not surpass the `gpt-4.1-mini` production best.
 - `gpt-5.2-pro` probing on this chat-completions path was not reliable (quality collapse and intermittent 404), so it was not promoted to full runs.
 
 ## Delta vs Prior OpenAI Tuned Summary
@@ -151,3 +153,4 @@ Notes:
 - `bench/results/dmr_probe150_r18_gpt52_legacy_lex.json`
 - `bench/results/dmr_probe150_r18_gpt52_legacy_temp02.json`
 - `bench/results/official_dmr_qa_openai_20260301_r18_gpt52_lex.json`
+- `bench/results/dmr_probe150_r20_gpt52_guard.json`

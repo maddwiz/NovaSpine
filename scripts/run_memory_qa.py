@@ -652,6 +652,7 @@ async def _answer_with_llm(
     reasoning_mode: str,
     llm_backend_hard: Any | None = None,
     answer_route_hard: str = "auto",
+    answer_model_name: str = "",
 ) -> str:
     clean_q = _clean_question(query)
     context = _build_answer_context(
@@ -669,6 +670,8 @@ async def _answer_with_llm(
     if not context:
         return ""
     answer_type = _detect_answer_type(clean_q)
+    model_name = (answer_model_name or "").strip().lower()
+    gpt5_guard = model_name.startswith("gpt-5")
     use_reasoning = reasoning_mode == "on" or (
         reasoning_mode == "auto" and answer_type in {"NUMBER", "DATE", "CHOICE"}
     )
@@ -716,6 +719,8 @@ async def _answer_with_llm(
                     if normalize_mode == "typed"
                     else _clean_answer(raw)
                 )
+                if gpt5_guard and normalize_mode == "legacy":
+                    ans = _normalize_answer_by_type(ans, answer_type)
                 if ans and not _is_type_valid_answer(ans, answer_type):
                     return ""
                 if ans:
@@ -726,6 +731,8 @@ async def _answer_with_llm(
                 if normalize_mode == "typed"
                 else _clean_answer(resp.content)
             )
+            if gpt5_guard and normalize_mode == "legacy":
+                ans = _normalize_answer_by_type(ans, answer_type)
             if ans and not _is_type_valid_answer(ans, answer_type):
                 return ""
             return ans
@@ -1113,6 +1120,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reasoning_mode=args.answer_reasoning,
                     llm_backend_hard=llm_backend_hard,
                     answer_route_hard=args.answer_route_hard,
+                    answer_model_name=args.answer_model,
                 )
                 last_answer_ts = time.monotonic()
                 if not pred and not args.no_answer_fallback:
