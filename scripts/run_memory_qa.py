@@ -26,8 +26,10 @@ from typing import Any
 from c3ae.config import Config
 from c3ae.eval.corpus import build_corpus_docs, load_jsonl
 from c3ae.eval import best_exact_match, best_f1, extractive_answer
+from c3ae.eval.temporal import enrich_context_with_temporal_facts
 from c3ae.llm import Message, create_chat_backend
 from c3ae.memory_spine.spine import MemorySpine
+from c3ae.retrieval.verify import verify_answer_with_llm
 from c3ae.utils import extract_benchmark_case_token, parse_json_object, strip_benchmark_case_tokens
 
 _QUERY_STOPWORDS = {
@@ -431,9 +433,37 @@ def _parse_args() -> argparse.Namespace:
         help="Enable deterministic day-difference solving for high-confidence temporal count questions.",
     )
     p.add_argument(
+        "--answer-temporal-enrich",
+        action="store_true",
+        help="Append computed temporal facts (date deltas) to answer context before LLM answering.",
+    )
+    p.add_argument(
+        "--answer-temporal-max-pairs",
+        type=int,
+        default=24,
+        help="Maximum pairwise temporal facts to append when --answer-temporal-enrich is enabled.",
+    )
+    p.add_argument(
         "--answer-benchmark-reader",
         action="store_true",
         help="Enable benchmark-aware heuristic reader before/after LLM answering.",
+    )
+    p.add_argument(
+        "--answer-verify",
+        action="store_true",
+        help="Run a verification pass that checks whether the proposed answer is directly supported by context.",
+    )
+    p.add_argument(
+        "--answer-verify-max-tokens",
+        type=int,
+        default=160,
+        help="Max tokens for the answer-verification pass.",
+    )
+    p.add_argument(
+        "--answer-verify-temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for the answer-verification pass.",
     )
     p.add_argument(
         "--answer-strict-post-validate",
@@ -1517,6 +1547,57 @@ def _fallback_answer_from_context(
     return _normalize_answer_by_type(base, at)
 
 
+async def _verify_answer_candidate(
+    *,
+    query: str,
+    answer_type: str,
+    candidate_answer: str,
+    context: str,
+    llm_backend: Any,
+    normalize_mode: str,
+    strict_post_validate: bool,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    if not candidate_answer.strip():
+        return ""
+    try:
+        verdict = await verify_answer_with_llm(
+            llm_backend=llm_backend,
+            query=query,
+            proposed_answer=candidate_answer,
+            context=context,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except Exception:
+        # Verification is optional and must not abort QA.
+        return candidate_answer
+    selected = ""
+    if verdict.verified:
+        selected = verdict.answer or candidate_answer
+    elif verdict.answer:
+        selected = verdict.answer
+    if not selected:
+        return ""
+    normalized = (
+        _normalize_answer_by_type(selected, answer_type)
+        if normalize_mode == "typed"
+        else _clean_answer(selected)
+    )
+    if not normalized:
+        return ""
+    if _should_reject_answer(
+        query,
+        normalized,
+        answer_type,
+        context,
+        strict_post_validate=strict_post_validate,
+    ):
+        return ""
+    return normalized
+
+
 async def _answer_with_llm(
     *,
     query: str,
@@ -1534,7 +1615,12 @@ async def _answer_with_llm(
     context_mode: str,
     context_sentences_per_doc: int,
     deterministic_temporal: bool,
+    temporal_enrich: bool,
+    temporal_max_pairs: int,
     span_refine: bool,
+    verify_answer: bool,
+    verify_max_tokens: int,
+    verify_temperature: float,
     benchmark_reader: bool,
     strict_post_validate: bool,
     normalize_mode: str,
@@ -1572,6 +1658,12 @@ async def _answer_with_llm(
     )
     if not context:
         return ""
+    if temporal_enrich:
+        context = enrich_context_with_temporal_facts(
+            query=clean_q,
+            context=context,
+            max_pairs=max(1, int(temporal_max_pairs)),
+        )
     use_reasoning = reasoning_mode == "on" or (
         reasoning_mode == "auto" and answer_type in {"NUMBER", "DATE", "CHOICE"}
     )
@@ -1665,6 +1757,18 @@ async def _answer_with_llm(
                         strict_post_validate=False,
                     ):
                         ans = seeded
+                if ans and verify_answer:
+                    ans = await _verify_answer_candidate(
+                        query=clean_q,
+                        answer_type=answer_type,
+                        candidate_answer=ans,
+                        context=context,
+                        llm_backend=backend,
+                        normalize_mode=normalize_mode,
+                        strict_post_validate=strict_post_validate,
+                        temperature=verify_temperature,
+                        max_tokens=verify_max_tokens,
+                    )
                 if ans:
                     return ans
                 return ""
@@ -1704,6 +1808,18 @@ async def _answer_with_llm(
                     strict_post_validate=False,
                 ):
                     ans = seeded
+            if ans and verify_answer:
+                ans = await _verify_answer_candidate(
+                    query=clean_q,
+                    answer_type=answer_type,
+                    candidate_answer=ans,
+                    context=context,
+                    llm_backend=backend,
+                    normalize_mode=normalize_mode,
+                    strict_post_validate=strict_post_validate,
+                    temperature=verify_temperature,
+                    max_tokens=verify_max_tokens,
+                )
             return ans
         except Exception as e:
             last_exc = e
@@ -1904,10 +2020,21 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.answer_deterministic_temporal:
         mode_notes.append("answer_deterministic_temporal=on")
+    if args.answer_temporal_enrich:
+        mode_notes.append(
+            "answer_temporal_enrich=on"
+            f" max_pairs={max(1, int(args.answer_temporal_max_pairs))}"
+        )
     if args.answer_span_refine:
         mode_notes.append("answer_span_refine=on")
     if args.answer_benchmark_reader:
         mode_notes.append("answer_benchmark_reader=on")
+    if args.answer_verify:
+        mode_notes.append(
+            "answer_verify=on"
+            f" max_tokens={max(1, int(args.answer_verify_max_tokens))}"
+            f" temp={float(args.answer_verify_temperature):.2f}"
+        )
     if args.answer_strict_post_validate:
         mode_notes.append("answer_strict_post_validate=on")
     mode_notes.append(f"answer_fallback_mode={args.answer_fallback_mode}")
@@ -2139,7 +2266,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         context_mode=args.answer_context_mode,
                         context_sentences_per_doc=max(1, int(args.answer_context_sentences_per_doc)),
                         deterministic_temporal=bool(args.answer_deterministic_temporal),
+                        temporal_enrich=bool(args.answer_temporal_enrich),
+                        temporal_max_pairs=max(1, int(args.answer_temporal_max_pairs)),
                         span_refine=bool(args.answer_span_refine),
+                        verify_answer=bool(args.answer_verify),
+                        verify_max_tokens=max(1, int(args.answer_verify_max_tokens)),
+                        verify_temperature=float(args.answer_verify_temperature),
                         benchmark_reader=bool(args.answer_benchmark_reader),
                         strict_post_validate=bool(args.answer_strict_post_validate),
                         normalize_mode=args.answer_normalize_mode,

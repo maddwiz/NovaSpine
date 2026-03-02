@@ -391,3 +391,61 @@ def test_run_llm_fallback_policy_survives_healthcheck_failure(tmp_path, monkeypa
     assert result["llm_errors"] >= 1
     assert "llm_disabled_healthcheck_failed" in result["mode_notes"]
     assert backends and backends[0].calls >= 1
+
+
+def test_verify_answer_candidate_accepts_corrected_answer(monkeypatch):
+    mod = _load_run_memory_qa_module()
+
+    class _Verdict:
+        def __init__(self, verified: bool, answer: str) -> None:
+            self.verified = verified
+            self.answer = answer
+            self.reason = "stub"
+
+    async def _fake_verify_answer_with_llm(**kwargs):
+        return _Verdict(False, "sunset")
+
+    monkeypatch.setattr(mod, "verify_answer_with_llm", _fake_verify_answer_with_llm)
+    out = asyncio.run(
+        mod._verify_answer_candidate(
+            query="What did Melanie paint recently?",
+            answer_type="SHORT_PHRASE",
+            candidate_answer="horse",
+            context="[1] doc_id=x score=1.0\nMelanie painted a sunset in July.",
+            llm_backend=object(),
+            normalize_mode="typed",
+            strict_post_validate=False,
+            temperature=0.0,
+            max_tokens=128,
+        )
+    )
+    assert out == "sunset"
+
+
+def test_verify_answer_candidate_rejects_unverified_without_alternative(monkeypatch):
+    mod = _load_run_memory_qa_module()
+
+    class _Verdict:
+        def __init__(self, verified: bool, answer: str) -> None:
+            self.verified = verified
+            self.answer = answer
+            self.reason = "stub"
+
+    async def _fake_verify_answer_with_llm(**kwargs):
+        return _Verdict(False, "")
+
+    monkeypatch.setattr(mod, "verify_answer_with_llm", _fake_verify_answer_with_llm)
+    out = asyncio.run(
+        mod._verify_answer_candidate(
+            query="What did Melanie paint recently?",
+            answer_type="SHORT_PHRASE",
+            candidate_answer="horse",
+            context="[1] doc_id=x score=1.0\nMelanie painted a sunset in July.",
+            llm_backend=object(),
+            normalize_mode="typed",
+            strict_post_validate=False,
+            temperature=0.0,
+            max_tokens=128,
+        )
+    )
+    assert out == ""
