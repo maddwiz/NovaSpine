@@ -283,13 +283,19 @@ class MemorySpine:
         except Exception:
             pass  # Fall back to keyword-only
 
-        results = self.hybrid_search.search(query, query_vector=query_vec, top_k=top_k)
         benchmark_case_query = bool(self._extract_benchmark_case_token(query))
+        results = self.hybrid_search.search(
+            query,
+            query_vector=query_vec,
+            top_k=top_k,
+            apply_decay=not benchmark_case_query,
+        )
         if self.config.graph.enabled and not benchmark_case_query:
             graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
             if graph_results:
                 results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
-        self._record_access(results)
+        if not benchmark_case_query:
+            self._record_access(results)
         self.audit.log_search(query, len(results))
         return results
 

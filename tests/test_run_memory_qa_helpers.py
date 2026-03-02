@@ -167,3 +167,74 @@ def test_fallback_answer_from_context_returns_typed_short_answer():
     ]
     pred = mod._fallback_answer_from_context("How many children does Melanie have?", recalled)
     assert pred == "3"
+
+
+def test_benchmark_reader_choice_resolves_before_relation():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {
+            "content": (
+                "I attended the Data Analysis using Python webinar before the "
+                "Effective Time Management workshop."
+            ),
+            "score": 1.0,
+            "metadata": {"session_id": "s1"},
+        }
+    ]
+    ans = mod._benchmark_reader_choice(
+        "Which event did I attend first, the 'Effective Time Management' workshop or the 'Data Analysis using Python' webinar?",
+        recalled,
+    )
+    assert ans == "Data Analysis using Python"
+
+
+def test_benchmark_reader_numeric_extracts_duration():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {
+            "content": "I had been working for 4 years and 9 months before starting at NovaTech.",
+            "score": 1.0,
+            "metadata": {"session_id": "s1"},
+        }
+    ]
+    ans = mod._benchmark_reader_numeric(
+        "How long have I been working before I started my current job at NovaTech?",
+        recalled,
+    )
+    assert ans == "4 years and 9 months"
+
+
+def test_fallback_answer_from_context_benchmark_mode_uses_reader():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {
+            "content": (
+                "I attended the Data Analysis using Python webinar before the "
+                "Effective Time Management workshop."
+            ),
+            "score": 1.0,
+            "metadata": {"session_id": "s1"},
+        }
+    ]
+    pred = mod._fallback_answer_from_context(
+        "Which event did I attend first, the 'Effective Time Management' workshop or the 'Data Analysis using Python' webinar?",
+        recalled,
+        mode="benchmark",
+    )
+    assert pred == "Data Analysis using Python"
+
+
+def test_strict_post_validate_rejects_answer_not_tied_to_entity():
+    mod = _load_run_memory_qa_module()
+    ctx = (
+        "[1] doc_id=a score=1.0\nMelanie has 3 children.\n\n"
+        "[2] doc_id=b score=0.9\nCaroline has 1 child."
+    )
+    reject = mod._should_reject_answer(
+        "How many children does Melanie have?",
+        "1",
+        "NUMBER",
+        ctx,
+        strict_post_validate=True,
+    )
+    assert reject is True

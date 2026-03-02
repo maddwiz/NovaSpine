@@ -126,6 +126,30 @@ def test_hybrid_decay_and_access_boost_are_applied():
     assert [r.id for r in results_b] == ["old", "fresh"]
 
 
+def test_hybrid_apply_decay_flag_disables_decay_reranking():
+    cfg = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=True,
+        decay_half_life_hours=1.0,
+        decay_min_factor=0.5,
+        access_boost_per_hit=0.5,
+        access_boost_cap=2.0,
+    )
+    old = _mk_result("old", score=1.0, hours_old=24.0)
+    fresh = _mk_result("fresh", score=0.8, hours_old=0.0)
+    kw = _KeywordStub([old, fresh])
+    vec = _VectorStub([])
+    hybrid = HybridSearch(kw, vec, config=cfg, access_counts_getter=lambda ids: {})
+
+    without_decay = hybrid.search("any query", query_vector=None, top_k=2, apply_decay=False)
+    with_decay = hybrid.search("any query", query_vector=None, top_k=2, apply_decay=True)
+
+    assert [r.id for r in without_decay] == ["old", "fresh"]
+    assert [r.id for r in with_decay] == ["fresh", "old"]
+
+
 def test_hybrid_rrf_overlap_bonus_promotes_dual_source_hit():
     def _r(rid: str) -> SearchResult:
         return _mk_result(rid, score=0.1, hours_old=0.1)
@@ -308,6 +332,62 @@ def test_case_token_query_skips_graph_lookup(tmp_path):
             rows = await spine.recall("__DMR_CASE_00007__ alpha memory", top_k=3)
             assert rows
             assert called["graph"] is False
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_case_token_query_does_not_increment_access_counts(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+        spine = MemorySpine(cfg)
+        try:
+            ids = spine.ingest_text_sync(
+                "__DMR_CASE_00088__ Alpha benchmark memory for access tracking.",
+                source_id="bench:case",
+            )
+            target_id = ids[0]
+            before = spine.sqlite.get_memory_access_count(target_id)
+            assert before == 0
+
+            rows = await spine.recall("__DMR_CASE_00088__ alpha benchmark memory", top_k=3)
+            assert rows
+
+            after = spine.sqlite.get_memory_access_count(target_id)
+            assert after == 0
+
+            rows_non_bench = await spine.recall("alpha benchmark memory", top_k=3)
+            assert rows_non_bench
+            after_non_bench = spine.sqlite.get_memory_access_count(target_id)
+            assert after_non_bench >= 1
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_case_token_query_falls_back_when_tail_terms_miss(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+        spine = MemorySpine(cfg)
+        try:
+            spine.ingest_text_sync(
+                "__DMR_CASE_00123__ This passage intentionally uses rare wording.",
+                source_id="bench:case",
+                skip_chunking=True,
+            )
+            # The tail terms are absent from content; fallback should still return case-scoped chunk.
+            rows = await spine.recall(
+                "__DMR_CASE_00123__ who owns reading football club",
+                top_k=3,
+            )
+            assert rows
+            assert rows[0]["metadata"].get("benchmark_case_token") == "__DMR_CASE_00123__"
         finally:
             await spine.close()
 

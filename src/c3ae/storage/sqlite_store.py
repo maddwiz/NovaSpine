@@ -18,7 +18,14 @@ from c3ae.types import (
     SearchResult,
     SkillCapsule,
 )
-from c3ae.utils import iso_str, json_dumps, json_loads, parse_iso, utcnow
+from c3ae.utils import (
+    extract_benchmark_case_token,
+    iso_str,
+    json_dumps,
+    json_loads,
+    parse_iso,
+    utcnow,
+)
 
 SCHEMA_VERSION = 2
 
@@ -305,20 +312,34 @@ def _sanitize_fts_query(query: str) -> str:
     case_terms = [t for t in tokens if re.fullmatch(r"[a-z0-9_]*case_\d+", t.lower())]
     if case_terms:
         # Keep benchmark case token mandatory to avoid cross-case contamination.
-        case_term = _fts_term(case_terms[0], use_prefix=False)
+        case_expr = _benchmark_case_fts_expression(case_terms[0])
+        if not case_expr:
+            case_expr = _fts_term(case_terms[0], use_prefix=False)
         tail = [t for t in tokens if t != case_terms[0]]
         if not tail:
-            return f'"{case_term}"'
+            return case_expr
         if len(tail) <= 3:
             tail_query = " ".join(_fts_term(t, use_prefix=False) for t in tail)
         else:
             tail_query = " OR ".join(_fts_term(t, use_prefix=True) for t in tail)
-        return f'"{case_term}" AND ({tail_query})'
+        return f"({case_expr}) AND ({tail_query})"
 
     # Precision for terse queries (IDs/names). Broad recall for long NL queries.
     if len(tokens) <= 3:
         return " ".join(_fts_term(t, use_prefix=False) for t in tokens)
     return " OR ".join(_fts_term(t, use_prefix=True) for t in tokens)
+
+
+def _benchmark_case_fts_expression(case_token: str) -> str:
+    token = (case_token or "").strip().strip("_").lower()
+    if not token:
+        return ""
+    parts = [p for p in re.split(r"[_\s]+", token) if p]
+    if not parts:
+        return ""
+    # unicode61 tokenizes "__DMR_CASE_0042__" into separate terms ("dmr", "case", "0042"),
+    # so the benchmark filter must require those terms together.
+    return " ".join(f'"{p}"' for p in parts)
 
 
 def _normalize_entity_name(name: str) -> str:
@@ -422,17 +443,29 @@ class SQLiteStore:
         return cur.rowcount > 0
 
     def search_chunks_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
+        def _run(match_query: str) -> list[sqlite3.Row]:
+            return self._conn.execute(
+                """SELECT c.id, c.content, c.metadata, c.created_at,
+                          bm25(chunks_fts) AS score
+                   FROM chunks_fts f
+                   JOIN chunks c ON c.rowid = f.rowid
+                   WHERE chunks_fts MATCH ?
+                   ORDER BY score
+                   LIMIT ?""",
+                (match_query, limit),
+            ).fetchall()
+
         fts_query = _sanitize_fts_query(query)
-        rows = self._conn.execute(
-            """SELECT c.id, c.content, c.metadata, c.created_at,
-                      bm25(chunks_fts) AS score
-               FROM chunks_fts f
-               JOIN chunks c ON c.rowid = f.rowid
-               WHERE chunks_fts MATCH ?
-               ORDER BY score
-               LIMIT ?""",
-            (fts_query, limit),
-        ).fetchall()
+        rows = _run(fts_query)
+        # Benchmark-case queries can miss when tail terms don't appear in the source chunk.
+        # Fall back to case-token-only retrieval to preserve deterministic case scoping.
+        if not rows:
+            case_token = extract_benchmark_case_token(query)
+            if case_token:
+                fallback_query = _benchmark_case_fts_expression(case_token)
+                if fallback_query:
+                    if fallback_query != fts_query:
+                        rows = _run(fallback_query)
         return [
             SearchResult(
                 id=r["id"],

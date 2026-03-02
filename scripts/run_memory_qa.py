@@ -349,6 +349,23 @@ def _parse_args() -> argparse.Namespace:
         help="Minimum wall-clock delay between LLM answer calls (rate-limit control).",
     )
     p.add_argument(
+        "--llm-healthcheck",
+        action="store_true",
+        default=True,
+        help="Run a startup LLM connectivity check in --answer-mode llm.",
+    )
+    p.add_argument(
+        "--no-llm-healthcheck",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--llm-max-errors",
+        type=int,
+        default=8,
+        help="Abort run after this many unrecoverable LLM call failures.",
+    )
+    p.add_argument(
         "--answer-reasoning",
         default="auto",
         choices=["off", "on", "auto"],
@@ -404,6 +421,16 @@ def _parse_args() -> argparse.Namespace:
         help="Enable deterministic day-difference solving for high-confidence temporal count questions.",
     )
     p.add_argument(
+        "--answer-benchmark-reader",
+        action="store_true",
+        help="Enable benchmark-aware heuristic reader before/after LLM answering.",
+    )
+    p.add_argument(
+        "--answer-strict-post-validate",
+        action="store_true",
+        help="When benchmark reader is enabled, reject noisy LLM answers using type/entity guards.",
+    )
+    p.add_argument(
         "--no-answer-fallback",
         action="store_true",
         help="Disable extractive fallback when LLM answer is empty/invalid.",
@@ -411,8 +438,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--answer-fallback-mode",
         default="legacy",
-        choices=["legacy", "typed"],
-        help="Fallback strategy when LLM answer is empty: legacy extractive vs typed structured fallback.",
+        choices=["legacy", "typed", "benchmark"],
+        help="Fallback strategy when LLM answer is empty: legacy extractive, typed structured, or benchmark-aware reader.",
     )
     p.add_argument("--out", default="", help="Optional output JSON path")
     return p.parse_args()
@@ -735,6 +762,219 @@ def _deterministic_structured_answer(query: str, recalled: list[dict[str, Any]],
                 diff = min(deltas)
                 if 0 < diff <= 3650:
                     return f"{diff} days"
+    return ""
+
+
+def _normalize_phrase_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
+
+
+def _extract_choice_options(query: str) -> tuple[str, str] | None:
+    clean = _clean_question(query)
+    # Prefer quoted options when present.
+    quoted = [q.strip() for g in re.findall(r"'([^']+)'|\"([^\"]+)\"", clean) for q in g if q.strip()]
+    if len(quoted) >= 2:
+        return quoted[0], quoted[1]
+    if " or " not in clean.lower():
+        return None
+    # Fallback: parse nearest phrases around "or".
+    parts = re.split(r"\bor\b", clean, flags=re.IGNORECASE, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    left = re.sub(r"^.*?\b(?:first|between|whether|is|are|was|were|did|does|do)\b", "", parts[0], flags=re.IGNORECASE).strip(" ,.?")
+    right = parts[1].strip(" ,.?")
+    if not left or not right:
+        return None
+    left = re.sub(r"^(?:the|a|an)\s+", "", left, flags=re.IGNORECASE).strip()
+    right = re.sub(r"^(?:the|a|an)\s+", "", right, flags=re.IGNORECASE).strip()
+    left = left.split(",")[-1].strip()
+    right = right.split(",")[0].strip()
+    if left and right:
+        return left, right
+    return None
+
+
+def _question_prefers_first(query: str) -> bool:
+    q = _clean_question(query).lower()
+    return any(k in q for k in (" first", " earlier", " before "))
+
+
+def _question_prefers_last(query: str) -> bool:
+    q = _clean_question(query).lower()
+    return any(k in q for k in (" last", " later", " after "))
+
+
+def _sentence_score_with_entity(query: str, sentence: str, entities: list[str]) -> float:
+    base = _sentence_overlap_score(query, sentence)
+    if not entities:
+        return base
+    s = sentence.lower()
+    hits = 0
+    for e in entities:
+        if e.lower() in s:
+            hits += 1
+    return base + (0.25 * (hits / max(1, len(entities))))
+
+
+def _extract_duration_from_sentence(sentence: str) -> str:
+    patterns = (
+        r"\b\d+\s+years?\s+and\s+\d+\s+months?\b",
+        r"\b\d+\s+years?\b",
+        r"\b\d+\s+months?\b",
+        r"\b\d+\s+weeks?\b",
+        r"\b\d+\s+days?\b",
+    )
+    for pat in patterns:
+        m = re.search(pat, sentence, re.IGNORECASE)
+        if m:
+            return _clean_answer(m.group(0))
+    return ""
+
+
+def _benchmark_reader_choice(query: str, recalled: list[dict[str, Any]]) -> str:
+    opts = _extract_choice_options(query)
+    if not opts:
+        return ""
+    opt_a, opt_b = opts
+    a_norm = _normalize_phrase_for_match(opt_a)
+    b_norm = _normalize_phrase_for_match(opt_b)
+    if not a_norm or not b_norm:
+        return ""
+    prefer_first = _question_prefers_first(query)
+    prefer_last = _question_prefers_last(query)
+    if not (prefer_first or prefer_last):
+        prefer_first = True
+
+    first_positions: dict[str, tuple[int, int]] = {}
+    last_positions: dict[str, tuple[int, int]] = {}
+    for ri, row in enumerate(recalled[:10]):
+        content = str(row.get("content", "")).strip()
+        if not content:
+            continue
+        for si, sent in enumerate(_split_sentences(content)):
+            s_norm = _normalize_phrase_for_match(sent)
+            if not s_norm:
+                continue
+            ia = s_norm.find(a_norm)
+            ib = s_norm.find(b_norm)
+            # Strong pairwise ordering cue in the same sentence.
+            if ia >= 0 and ib >= 0:
+                if " before " in s_norm:
+                    if ia < ib:
+                        return _clean_answer(opt_a if prefer_first else opt_b)
+                    return _clean_answer(opt_b if prefer_first else opt_a)
+                if " after " in s_norm:
+                    if ia < ib:
+                        return _clean_answer(opt_b if prefer_first else opt_a)
+                    return _clean_answer(opt_a if prefer_first else opt_b)
+            for key, idx in (("a", ia), ("b", ib)):
+                if idx < 0:
+                    continue
+                pos = (ri, si)
+                if key not in first_positions or pos < first_positions[key]:
+                    first_positions[key] = pos
+                if key not in last_positions or pos > last_positions[key]:
+                    last_positions[key] = pos
+    if prefer_first and "a" in first_positions and "b" in first_positions:
+        return _clean_answer(opt_a if first_positions["a"] <= first_positions["b"] else opt_b)
+    if prefer_last and "a" in last_positions and "b" in last_positions:
+        return _clean_answer(opt_a if last_positions["a"] >= last_positions["b"] else opt_b)
+    return ""
+
+
+def _benchmark_reader_numeric(query: str, recalled: list[dict[str, Any]]) -> str:
+    q = _clean_question(query).lower()
+    if "how many" not in q and "how long" not in q:
+        return ""
+    entities = _extract_query_entities(query)
+    scored_sents: list[tuple[float, str]] = []
+    for row in recalled[:10]:
+        content = str(row.get("content", "")).strip()
+        if not content:
+            continue
+        for sent in _split_sentences(content):
+            sc = _sentence_score_with_entity(query, sent, entities)
+            if sc > 0:
+                scored_sents.append((sc, sent))
+    scored_sents.sort(key=lambda x: x[0], reverse=True)
+    desired_unit = ""
+    for u in ("days", "day", "weeks", "week", "months", "month", "years", "year",
+              "times", "time", "episodes", "episode", "children", "kids",
+              "hours", "hour", "minutes", "minute"):
+        if u in q:
+            desired_unit = u[:-1] if u.endswith("s") else u
+            break
+
+    for _, sent in scored_sents[:8]:
+        if "how long" in q:
+            dur = _extract_duration_from_sentence(sent)
+            if dur:
+                return _clean_answer(dur)
+        direct = _extract_direct_count_from_sentence(query, sent)
+        if direct:
+            dlow = direct.lower()
+            if desired_unit:
+                if desired_unit not in dlow and not (desired_unit == "time" and re.fullmatch(r"\d+", dlow)):
+                    continue
+            return _clean_answer(direct)
+        dur = _extract_duration_from_sentence(sent)
+        if dur and ("how long" in q or any(u in q for u in ("month", "year", "week", "day"))):
+            return _clean_answer(dur)
+        # Number-only fallback.
+        # Use raw number only when query does not imply a specific unit and is not "before" relational counting.
+        if "before" in q and not desired_unit:
+            continue
+        m = re.search(r"\b\d+\b", sent)
+        if m and ("how many" in q or "how long" in q):
+            return _clean_answer(m.group(0))
+    return ""
+
+
+def _benchmark_reader_date(query: str, recalled: list[dict[str, Any]]) -> str:
+    q = _clean_question(query).lower()
+    if not (q.startswith("when ") or "what date" in q or "what year" in q):
+        return ""
+    entities = _extract_query_entities(query)
+    scored_sents: list[tuple[float, str]] = []
+    for row in recalled[:10]:
+        content = str(row.get("content", "")).strip()
+        if not content:
+            continue
+        for sent in _split_sentences(content):
+            sc = _sentence_score_with_entity(query, sent, entities)
+            if sc > 0:
+                scored_sents.append((sc, sent))
+    scored_sents.sort(key=lambda x: x[0], reverse=True)
+
+    month = (
+        r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    )
+    pats = (
+        rf"\b{month}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*\d{{4}})?\b",
+        r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        r"\b\d{4}\b",
+    )
+    for _, sent in scored_sents[:8]:
+        for pat in pats:
+            m = re.search(pat, sent, re.IGNORECASE)
+            if m:
+                return _clean_answer(m.group(0))
+    return ""
+
+
+def _benchmark_reader_answer(query: str, recalled: list[dict[str, Any]], answer_type: str) -> str:
+    # Specialized handling for common benchmark question classes.
+    # Keep this reader narrow to avoid regressions on choice/entity questions.
+    if answer_type == "NUMBER":
+        out = _benchmark_reader_numeric(query, recalled)
+        if out:
+            return out
+    if answer_type == "DATE":
+        out = _benchmark_reader_date(query, recalled)
+        if out:
+            return out
     return ""
 
 
@@ -1139,6 +1379,48 @@ def _should_span_refine(answer: str, answer_type: str, context: str) -> bool:
     return wc > 10
 
 
+def _answer_entity_guard_ok(query: str, answer: str, context: str) -> bool:
+    ents = _extract_query_entities(query)
+    if not ents:
+        return True
+    # If the query names a specific subject, prefer answers sourced from lines mentioning it.
+    lines = [ln.strip() for ln in (context or "").splitlines() if ln.strip()]
+    ent_lines = []
+    for ln in lines:
+        low = ln.lower()
+        if any(e.lower() in low for e in ents):
+            ent_lines.append(low)
+    if not ent_lines:
+        return True
+    a = (answer or "").strip().lower()
+    if not a:
+        return False
+    joined = " ".join(ent_lines)
+    return a in joined
+
+
+def _should_reject_answer(
+    query: str,
+    answer: str,
+    answer_type: str,
+    context: str,
+    *,
+    strict_post_validate: bool,
+) -> bool:
+    if not answer:
+        return True
+    if not _is_type_valid_answer(answer, answer_type):
+        return True
+    if _answer_word_count(answer) > 16:
+        return True
+    if strict_post_validate and not _answer_in_context(answer, context):
+        return True
+    if strict_post_validate and answer_type in {"NUMBER", "SHORT_PHRASE", "PERSON_NAME", "PLACE"}:
+        if not _answer_entity_guard_ok(query, answer, context):
+            return True
+    return False
+
+
 async def _refine_answer_span(
     *,
     query: str,
@@ -1189,8 +1471,17 @@ async def _refine_answer_span(
     return ""
 
 
-def _fallback_answer_from_context(query: str, recalled: list[dict[str, Any]]) -> str:
+def _fallback_answer_from_context(
+    query: str,
+    recalled: list[dict[str, Any]],
+    *,
+    mode: str = "typed",
+) -> str:
     at = _detect_answer_type(query)
+    if mode == "benchmark":
+        out = _benchmark_reader_answer(query, recalled, at)
+        if out:
+            return out
     det = _deterministic_structured_answer(query, recalled, at)
     if det:
         return det
@@ -1216,6 +1507,8 @@ async def _answer_with_llm(
     context_sentences_per_doc: int,
     deterministic_temporal: bool,
     span_refine: bool,
+    benchmark_reader: bool,
+    strict_post_validate: bool,
     normalize_mode: str,
     temperature: float,
     max_tokens: int,
@@ -1224,6 +1517,7 @@ async def _answer_with_llm(
     reasoning_mode: str,
     llm_backend_hard: Any | None = None,
     answer_route_hard: str = "auto",
+    llm_error_stats: dict[str, int] | None = None,
 ) -> str:
     clean_q = _clean_question(query)
     query_entities = _extract_query_entities(query)
@@ -1303,7 +1597,13 @@ async def _answer_with_llm(
                     if normalize_mode == "typed"
                     else _clean_answer(raw)
                 )
-                if ans and not _is_type_valid_answer(ans, answer_type):
+                if _should_reject_answer(
+                    clean_q,
+                    ans,
+                    answer_type,
+                    context,
+                    strict_post_validate=strict_post_validate,
+                ):
                     ans = ""
                 if ans and span_refine and _should_span_refine(ans, answer_type, context):
                     refined = await _refine_answer_span(
@@ -1318,6 +1618,16 @@ async def _answer_with_llm(
                     )
                     if refined:
                         ans = refined
+                if not ans and benchmark_reader and answer_type in {"NUMBER", "DATE"}:
+                    seeded = _benchmark_reader_answer(clean_q, recalled, answer_type)
+                    if seeded and not _should_reject_answer(
+                        clean_q,
+                        seeded,
+                        answer_type,
+                        context,
+                        strict_post_validate=False,
+                    ):
+                        ans = seeded
                 if ans:
                     return ans
                 return ""
@@ -1326,7 +1636,13 @@ async def _answer_with_llm(
                 if normalize_mode == "typed"
                 else _clean_answer(resp.content)
             )
-            if ans and not _is_type_valid_answer(ans, answer_type):
+            if _should_reject_answer(
+                clean_q,
+                ans,
+                answer_type,
+                context,
+                strict_post_validate=strict_post_validate,
+            ):
                 ans = ""
             if ans and span_refine and _should_span_refine(ans, answer_type, context):
                 refined = await _refine_answer_span(
@@ -1341,6 +1657,16 @@ async def _answer_with_llm(
                 )
                 if refined:
                     ans = refined
+            if not ans and benchmark_reader and answer_type in {"NUMBER", "DATE"}:
+                seeded = _benchmark_reader_answer(clean_q, recalled, answer_type)
+                if seeded and not _should_reject_answer(
+                    clean_q,
+                    seeded,
+                    answer_type,
+                    context,
+                    strict_post_validate=False,
+                ):
+                    ans = seeded
             return ans
         except Exception as e:
             last_exc = e
@@ -1350,6 +1676,8 @@ async def _answer_with_llm(
             await asyncio.sleep(delay)
     if last_exc is not None:
         # Avoid aborting an entire benchmark run on transient provider rate-limits.
+        if llm_error_stats is not None:
+            llm_error_stats["errors"] = int(llm_error_stats.get("errors", 0)) + 1
         return ""
     return ""
 
@@ -1542,6 +1870,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         mode_notes.append("answer_deterministic_temporal=on")
     if args.answer_span_refine:
         mode_notes.append("answer_span_refine=on")
+    if args.answer_benchmark_reader:
+        mode_notes.append("answer_benchmark_reader=on")
+    if args.answer_strict_post_validate:
+        mode_notes.append("answer_strict_post_validate=on")
     mode_notes.append(f"answer_fallback_mode={args.answer_fallback_mode}")
 
     tmp_dir: str | None = None
@@ -1554,6 +1886,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     spine = MemorySpine(cfg)
     llm_backend: Any | None = None
     llm_backend_hard: Any | None = None
+    llm_error_stats: dict[str, int] = {"errors": 0}
     try:
         if args.answer_mode == "llm":
             _validate_llm_provider(args.answer_provider, cfg)
@@ -1587,6 +1920,31 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     f" candidates={max(1, int(args.rerank_candidates))}"
                     f" keep_top_n={max(0, int(args.rerank_top_n))}"
                 )
+            if not bool(args.no_llm_healthcheck):
+                try:
+                    probe = await llm_backend.chat(
+                        [
+                            Message(
+                                role="system",
+                                content="Return strict JSON only: {\"answer\":\"ok\"}",
+                            ),
+                            Message(
+                                role="user",
+                                content="answer now",
+                            ),
+                        ],
+                        temperature=0.0,
+                        max_tokens=24,
+                        json_mode=True,
+                    )
+                    obj = parse_json_object(probe.content)
+                    if not obj:
+                        raise RuntimeError("healthcheck returned non-JSON")
+                except Exception as e:
+                    raise RuntimeError(
+                        "LLM healthcheck failed. Verify provider key/credits/rate limits "
+                        "or run with --no-llm-healthcheck to continue."
+                    ) from e
         rows = load_jsonl(Path(args.dataset))
         if not rows:
             raise ValueError("dataset has no rows")
@@ -1735,6 +2093,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     context_sentences_per_doc=max(1, int(args.answer_context_sentences_per_doc)),
                     deterministic_temporal=bool(args.answer_deterministic_temporal),
                     span_refine=bool(args.answer_span_refine),
+                    benchmark_reader=bool(args.answer_benchmark_reader),
+                    strict_post_validate=bool(args.answer_strict_post_validate),
                     normalize_mode=args.answer_normalize_mode,
                     temperature=args.answer_temperature,
                     max_tokens=args.answer_max_tokens,
@@ -1743,13 +2103,23 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reasoning_mode=args.answer_reasoning,
                     llm_backend_hard=llm_backend_hard,
                     answer_route_hard=args.answer_route_hard,
+                    llm_error_stats=llm_error_stats,
                 )
                 last_answer_ts = time.monotonic()
+                if llm_error_stats.get("errors", 0) >= max(1, int(args.llm_max_errors)):
+                    raise RuntimeError(
+                        "Aborting QA run due to repeated unrecoverable LLM errors. "
+                        "Check provider rate limits/credits."
+                    )
                 if not pred and not args.no_answer_fallback:
-                    if args.answer_fallback_mode == "typed":
-                        pred = _fallback_answer_from_context(query, recalled)
-                    else:
+                    if args.answer_fallback_mode == "legacy":
                         pred = extractive_answer(query, recalled)
+                    else:
+                        pred = _fallback_answer_from_context(
+                            query,
+                            recalled,
+                            mode=args.answer_fallback_mode,
+                        )
             else:
                 pred = extractive_answer(query, recalled)
 
@@ -1809,6 +2179,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "mode_notes": mode_notes,
             "answer_provider": args.answer_provider if args.answer_mode == "llm" else "",
             "answer_model": args.answer_model if args.answer_mode == "llm" else "",
+            "llm_errors": int(llm_error_stats.get("errors", 0)) if args.answer_mode == "llm" else 0,
             "samples": sample_logs,
         }
     finally:

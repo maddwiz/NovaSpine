@@ -34,5 +34,5 @@ def test_sanitize_fts_dedupes_and_caps_tokens():
 def test_sanitize_fts_case_token_is_mandatory_filter():
     q = _sanitize_fts_query("__DMR_CASE_0042__ who got first nobel prize in physics")
     # Case token must be mandatory, with lexical terms scoped inside parens.
-    assert '"dmr_case_0042" AND (' in q
+    assert '("dmr" "case" "0042") AND (' in q
     assert " OR " in q

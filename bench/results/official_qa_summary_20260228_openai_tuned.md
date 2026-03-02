@@ -178,3 +178,37 @@ Best-preserving strategy run: fixed-row probes only (no leaderboard promotion un
 Decision:
 - No routing variant qualified for promotion to full official runs.
 - Current official winners remain unchanged (`r9`, `r6_mini`/`r9_k15_lexctx`, `r16_large_legacy`).
+
+## March 2 (overnight) — R29 Stability + Retrieval Sweep
+
+This pass focused on benchmark stability under provider rate limits and full retrieval baselines that do not depend on remote LLM calls.
+
+### Reliability upgrades shipped
+
+- Added benchmark-case deterministic retrieval behavior:
+  - skip decay reranking for benchmark-case queries
+  - skip access-count writes for benchmark-case queries
+- Fixed benchmark case-token FTS handling for `unicode61` tokenization:
+  - `__DMR_CASE_0042__` now maps to mandatory terms `"dmr" "case" "0042"`
+  - fallback path added for case-token-only retrieval when tail terms miss
+- Added LLM QA fail-fast controls in `run_memory_qa.py`:
+  - startup healthcheck (`--llm-healthcheck`, on by default)
+  - run abort threshold for unrecoverable LLM failures (`--llm-max-errors`)
+- Installed local semantic embedding dependency (`sentence-transformers`) for no-API retrieval runs.
+
+### Full QA (test suite)
+
+- `456 passed, 6 skipped` (full `pytest -q`)
+
+### Official retrieval baselines (no OpenAI dependency)
+
+| Benchmark | Profile | doc_hit | EM | F1 |
+|---|---|---:|---:|---:|
+| LongMemEval | `official_longmemeval_retrieval_hash_keywordplus_20260302_r29` | **1.000** | 1.000 | 1.000 |
+| LoCoMo-MC10 | `official_locomo_retrieval_hash_keywordplus_k15_20260302_r29` | **0.937** | 0.937 | 0.940 |
+| DMR-500 | `official_dmr_retrieval_sbert_variants_20260302_r29` | **0.848** | 0.846 | 0.851 |
+
+### Operational note
+
+OpenAI chat/embedding calls were intermittently returning HTTP 429 during this window.  
+To avoid misleadingly low QA numbers from fallback-only answer paths, official LLM-QA promotion was blocked unless healthcheck passed.

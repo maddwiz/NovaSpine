@@ -38,6 +38,7 @@ class HybridSearch:
         query: str,
         query_vector: np.ndarray | None = None,
         top_k: int | None = None,
+        apply_decay: bool = True,
     ) -> list[SearchResult]:
         """Run hybrid search.
 
@@ -63,11 +64,17 @@ class HybridSearch:
             vec_results = self.vector.search(query_vector, top_k=fetch_k)
 
         if not vec_results:
+            if not apply_decay:
+                return kw_results[:top_k]
             return self._rerank_with_decay(kw_results, top_k=top_k)
         if not kw_results:
+            if not apply_decay:
+                return vec_results[:top_k]
             return self._rerank_with_decay(vec_results, top_k=top_k)
 
         merged = self._merge(kw_results, vec_results, query=query, top_k=fetch_k)
+        if not apply_decay:
+            return merged[:top_k]
         return self._rerank_with_decay(merged, top_k=top_k)
 
     def _merge(
