@@ -299,3 +299,35 @@ Artifacts produced:
 - `bench/results/dmr_tail200_r32_reader.json`
 - `bench/results/official_dmr_qa_sbert_20260302_r32_base.json`
 - `bench/results/official_dmr_qa_sbert_20260302_r32_reader.json`
+
+## March 2 (afternoon) — R33 probe-only sweep (no promotion)
+
+Goal: continue improving QA without overfitting by requiring probe gains before spending holdout/full-run budget.
+
+DMR probe baseline (`r32_reader`, 150 rows):
+- `doc_hit 0.833`, `EM 0.500`, `F1 0.495`
+
+| Candidate | doc_hit | EM | F1 | Result |
+|---|---:|---:|---:|---|
+| `r33_reader_typed` (`benchmark_reader` + `fallback=typed`) | 0.833 | 0.487 | 0.480 | reject |
+| `r33_reader_lexctx` (+ lexical context rerank) | 0.833 | 0.433 | 0.446 | reject |
+| `r33_reader_strict` (`strict_post_validate` + `fallback=benchmark`) | 0.833 | 0.487 | 0.477 | reject |
+
+LongMemEval probe baseline (`r32_base`, 150 rows):
+- `doc_hit 1.000`, `EM 0.447`, `F1 0.474`
+
+| Candidate | doc_hit | EM | F1 | Result |
+|---|---:|---:|---:|---|
+| `r33_readerseed` (`benchmark_reader` + `fallback=legacy`) | 1.000 | 0.387 | 0.426 | reject |
+| `r33_reader_strict_legacy` (`benchmark_reader` + `strict_post_validate` + `fallback=legacy`) | 1.000 | 0.280 | 0.324 | reject |
+
+Decision:
+- No R33 candidate met the probe gate; no holdout/full promotions were run from this sweep.
+- Keep current winners unchanged (`DMR r32_reader`, LongMemEval `r32_base` in the SBERT setting).
+
+Artifacts produced:
+- `bench/results/dmr_probe150_r33_reader_typed.json`
+- `bench/results/dmr_probe150_r33_reader_lexctx.json`
+- `bench/results/dmr_probe150_r33_reader_strict.json`
+- `bench/results/long_probe150_r33_readerseed.json`
+- `bench/results/long_probe150_r33_reader_strict_legacy.json`
