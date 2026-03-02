@@ -212,3 +212,43 @@ This pass focused on benchmark stability under provider rate limits and full ret
 
 OpenAI chat/embedding calls were intermittently returning HTTP 429 during this window.  
 To avoid misleadingly low QA numbers from fallback-only answer paths, official LLM-QA promotion was blocked unless healthcheck passed.
+
+## March 2 (morning) — R32 LongMemEval probe/holdout pass
+
+Goal: improve QA without overfitting by requiring gains on both a probe slice and a disjoint holdout slice.
+
+Evaluation protocol:
+- Dataset: `bench/official/converted/longmemeval_oracle_qa_eval.jsonl`
+- Retrieval profile: SBERT (`all-MiniLM-L6-v2`, 384 dims), `keyword_plus`, `top_k=10`, query expansion on
+- Answer model: `gpt-4.1-mini`
+- Probe slice: rows `0-149`
+- Holdout slice: rows `150-299`
+- Shared index: `bench/.runs/r32_long_probe` (`--reuse-index`)
+
+| Profile | Probe EM | Probe F1 | Holdout EM | Holdout F1 | Decision |
+|---|---:|---:|---:|---:|---|
+| `r32_base` (reasoning on, legacy fallback) | 0.447 | 0.474 | **0.207** | **0.253** | baseline |
+| `r32_guarded` (`benchmark_reader+strict_post_validate+benchmark_fallback`) | 0.347 | 0.368 | n/a | n/a | reject (probe regression) |
+| `r32_reader` (`benchmark_reader+benchmark_fallback`) | 0.487 | 0.500 | 0.200 | 0.238 | reject (holdout regression) |
+| `r32_hardauto` (`DATE/NUMBER` route to `gpt-4.1`) | 0.493 | 0.521 | 0.200 | 0.244 | reject (holdout regression) |
+| `r32_typedfallback` (`answer_fallback_mode=typed`) | 0.473 | 0.498 | 0.200 | 0.238 | reject (holdout regression) |
+| `r32_reasonoff` | 0.347 | 0.385 | n/a | n/a | reject (probe regression) |
+| `r32_reasonauto` | 0.393 | 0.420 | n/a | n/a | reject (probe regression) |
+
+Decision:
+- No R32 candidate met the non-overfit promotion rule.
+- Keep `r32_base` as current LongMemEval working baseline in this SBERT retrieval setting.
+
+Artifacts produced:
+- `bench/results/smoke_long_r32.json`
+- `bench/results/long_probe150_r32_base.json`
+- `bench/results/long_holdout150_r32_base.json`
+- `bench/results/long_probe150_r32_guarded.json`
+- `bench/results/long_probe150_r32_reader.json`
+- `bench/results/long_holdout150_r32_reader.json`
+- `bench/results/long_probe150_r32_reasonoff.json`
+- `bench/results/long_probe150_r32_hardauto.json`
+- `bench/results/long_holdout150_r32_hardauto.json`
+- `bench/results/long_probe150_r32_reasonauto.json`
+- `bench/results/long_probe150_r32_typedfallback.json`
+- `bench/results/long_holdout150_r32_typedfallback.json`

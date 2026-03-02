@@ -1,0 +1,203 @@
+{
+  "benchmark": "long_holdout150_r32_reader",
+  "dataset": "bench/official/converted/longmemeval_oracle_qa_eval.jsonl",
+  "rows_total": 150,
+  "rows_scored": 150,
+  "rows_skipped": 0,
+  "row_offset": 150,
+  "row_limit": 150,
+  "top_k": 10,
+  "answer_mode": "llm",
+  "doc_hit_rate": 1.0,
+  "exact_match": 0.2,
+  "token_f1": 0.2382259780682782,
+  "ingested_documents": 0,
+  "ingested_chunks": 0,
+  "data_dir": "bench/.runs/r32_long_probe",
+  "ephemeral_data_dir": false,
+  "skip_chunking": false,
+  "reuse_index": true,
+  "embed_local": false,
+  "mode_notes": [
+    "embed_provider override: sbert",
+    "embed_model override: all-MiniLM-L6-v2",
+    "embed_dims override: 384",
+    "query_expansion=on",
+    "tune_preset=keyword_plus",
+    "recall_variants=off",
+    "answer_context_session_diversity=1",
+    "answer_context_mode=chunk sentences_per_doc=2",
+    "answer_benchmark_reader=on",
+    "answer_fallback_mode=benchmark",
+    "answer_llm: provider=openai, model=gpt-4.1-mini, temp=0.0",
+    "llm_error_policy=abort",
+    "answer_hard_route:off",
+    "row_slice=offset:150,limit:150",
+    "reuse_index=on (existing_chunks=9058, ingestion_skipped)"
+  ],
+  "answer_provider": "openai",
+  "answer_model": "gpt-4.1-mini",
+  "llm_errors": 0,
+  "samples": [
+    {
+      "query": "__LME_CASE_0150__ How many new postcards have I added to my collection since I started collecting again?",
+      "prediction": "8",
+      "gold": "25",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0151__ How many videos of Corey Schafer's Python programming series have I completed so far?",
+      "prediction": "20",
+      "gold": "30",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0152__ How long have I been living in my current apartment in Harajuku?",
+      "prediction": "ve been living in Harajuku for",
+      "gold": "3 months",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0153__ What brand of BBQ sauce am I currently obsessed with?",
+      "prediction": "Kansas City Masterpiece BBQ sauce",
+      "gold": "Kansas City Masterpiece",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.7499999999999999
+    },
+    {
+      "query": "__LME_CASE_0154__ How long have my parents been staying with me in the US?",
+      "prediction": "9 months",
+      "gold": "nine months",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0155__ How long have I been sticking to my daily tidying routine?",
+      "prediction": "4 weeks",
+      "gold": "4 weeks",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0156__ How long have I had my cat, Luna?",
+      "prediction": "Do you have any tips on",
+      "gold": "9 months",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0157__ How many Instagram followers do I currently have?",
+      "prediction": "600",
+      "gold": "600",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0158__ How many dozen eggs do we currently have stocked up in our refrigerator?",
+      "prediction": "7 days",
+      "gold": "20",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0159__ How many issues of National Geographic have I finished reading?",
+      "prediction": "3",
+      "gold": "Five",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0160__ Did I finish reading 'The Nightingale' by Kristin Hannah?",
+      "prediction": "yes",
+      "gold": "Yes",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0161__ Where did I get my guitar serviced?",
+      "prediction": "ve been meaning to get my",
+      "gold": "The music shop on Main St.",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0162__ What is my current highest score in Ticket to Ride?",
+      "prediction": "wondering if you could suggest some",
+      "gold": "132 points",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0163__ How many tops have I bought from H&M so far?",
+      "prediction": "5",
+      "gold": "five",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0164__ How much did I earn at the Downtown Farmers Market on my most recent visit?",
+      "prediction": "350",
+      "gold": "$420",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0165__ How many times have I tried making a Negroni at home since my friend Emma showed me how to make it?",
+      "prediction": "10 times",
+      "gold": "10",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.6666666666666666
+    },
+    {
+      "query": "__LME_CASE_0166__ What time do I usually go to the gym?",
+      "prediction": "I usually go to the gym",
+      "gold": "6:00 pm",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0167__ How many Crash Course videos have I watched in the past few weeks?",
+      "prediction": "15",
+      "gold": "15",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__LME_CASE_0168__ Where am I planning to stay for my birthday trip to Hawaii?",
+      "prediction": "Kauai",
+      "gold": "Oahu",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__LME_CASE_0169__ How many different species of birds have I seen in my local park?",
+      "prediction": "12",
+      "gold": "32",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    }
+  ]
+}
