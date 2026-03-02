@@ -1,0 +1,24 @@
+{
+  "benchmark": "official_locomo_retrieval_sbert_20260302_r31",
+  "dataset": "bench/official/converted/locomo_mc10_eval.jsonl",
+  "rows": 143,
+  "top_k": 10,
+  "recall_at_k": 0.32867132867132864,
+  "mrr": 0.25123210123210127,
+  "ingested_documents": 12039,
+  "ingested_chunks": 12039,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-wlonrqar",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "reuse_index": false,
+  "embed_local": false,
+  "publishable": true,
+  "quality_warnings": [],
+  "mode_notes": [
+    "embed_provider override: sbert",
+    "embed_model override: all-MiniLM-L6-v2",
+    "embed_dims override: 384",
+    "query_expansion=on",
+    "ingest_batch_size=64"
+  ]
+}

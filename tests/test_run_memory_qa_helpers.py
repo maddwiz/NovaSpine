@@ -238,3 +238,59 @@ def test_strict_post_validate_rejects_answer_not_tied_to_entity():
         strict_post_validate=True,
     )
     assert reject is True
+
+
+def test_result_key_prefers_benchmark_source_then_content_hash():
+    mod = _load_run_memory_qa_module()
+    row = {
+        "id": "chunk-1",
+        "content": "Caroline enjoys hiking on weekends.",
+        "metadata": {"benchmark_source": "locomo:case:12"},
+    }
+    key = mod._result_key(row)
+    assert key == "source:locomo:case:12"
+
+    row_no_source = {
+        "id": "chunk-2",
+        "content": "Caroline enjoys hiking on weekends.",
+        "metadata": {},
+    }
+    key2 = mod._result_key(row_no_source)
+    assert key2.startswith("content:")
+    assert len(key2) > len("content:")
+
+
+def test_diversify_by_session_uses_benchmark_source_when_session_missing():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {
+            "id": "a",
+            "content": "From source A",
+            "score": 1.0,
+            "metadata": {"benchmark_source": "srcA"},
+        },
+        {
+            "id": "b",
+            "content": "Another from source A",
+            "score": 0.9,
+            "metadata": {"benchmark_source": "srcA"},
+        },
+        {
+            "id": "c",
+            "content": "From source B",
+            "score": 0.85,
+            "metadata": {"benchmark_source": "srcB"},
+        },
+    ]
+    out = mod._diversify_by_session(recalled, top_k=2, min_sessions=2)
+    assert len(out) == 2
+    sources = [str((r.get("metadata") or {}).get("benchmark_source", "")) for r in out]
+    assert "srcA" in sources and "srcB" in sources
+
+
+def test_build_recall_variants_adds_case_plus_entity_variant():
+    mod = _load_run_memory_qa_module()
+    q = "__LOCOMO_CASE_0042__ How many times did Melanie visit the beach?"
+    variants = mod._build_recall_variants(q)
+    texts = [v[0] for v in variants]
+    assert "__LOCOMO_CASE_0042__ Melanie" in texts

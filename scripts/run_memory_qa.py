@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import random
 import os
@@ -495,6 +496,7 @@ def _query_keywords(clean_query: str, limit: int = 10) -> str:
 def _build_recall_variants(query: str) -> list[tuple[str, float]]:
     clean = _clean_question(query)
     case = _extract_case_token(query)
+    entities = _extract_query_entities(clean)
     variants: list[tuple[str, float]] = []
 
     def _add(q: str, w: float) -> None:
@@ -511,25 +513,38 @@ def _build_recall_variants(query: str) -> list[tuple[str, float]]:
     kws = _query_keywords(clean)
     if kws:
         _add(kws, 0.60)
+    if entities:
+        ent_text = " ".join(entities)
+        _add(ent_text, 0.62)
+        if kws:
+            _add(f"{ent_text} {kws}", 0.66)
     if case:
         _add(case, 0.50)
         if kws:
             _add(f"{case} {kws}", 0.85)
         elif clean:
             _add(f"{case} {clean}", 0.85)
+        if entities:
+            _add(f"{case} {' '.join(entities)}", 0.90)
     return variants
 
 
 def _result_key(row: dict[str, Any]) -> str:
-    rid = str(row.get("id", "")).strip()
-    if rid:
-        return rid
     md = row.get("metadata") or {}
     doc = str(md.get("benchmark_doc_id", "")).strip()
     if doc:
         return f"doc:{doc}"
-    content = str(row.get("content", "")).strip().lower()
-    return f"content:{content[:120]}"
+    src = str(md.get("benchmark_source", "")).strip()
+    if src:
+        return f"source:{src}"
+    content = re.sub(r"\s+", " ", str(row.get("content", "")).strip().lower())
+    if content:
+        digest = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
+        return f"content:{digest}"
+    rid = str(row.get("id", "")).strip()
+    if rid:
+        return f"id:{rid}"
+    return "empty"
 
 
 def _dedupe_by_doc_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -980,7 +995,7 @@ def _benchmark_reader_answer(query: str, recalled: list[dict[str, Any]], answer_
 
 def _context_session_key(row: dict[str, Any]) -> str:
     md = row.get("metadata") or {}
-    for key in ("session_id", "source_id", "benchmark_doc_id"):
+    for key in ("session_id", "benchmark_source", "source_id", "benchmark_doc_id"):
         val = str(md.get(key, "")).strip()
         if val:
             return val
@@ -1770,8 +1785,7 @@ def _diversify_by_session(
         if row_key in seen_rows:
             continue
         seen_rows.add(row_key)
-        meta = row.get("metadata") or {}
-        sid = str(meta.get("session_id", "")).strip()
+        sid = _context_session_key(row)
         if sid and sid not in seen_sessions and len(seen_sessions) < min_sessions:
             seen_sessions.add(sid)
             session_picks.append(row)

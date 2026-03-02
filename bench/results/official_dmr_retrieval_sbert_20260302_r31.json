@@ -1,0 +1,24 @@
+{
+  "benchmark": "official_dmr_retrieval_sbert_20260302_r31",
+  "dataset": "bench/official/converted/dmr_memgpt_eval_500.jsonl",
+  "rows": 500,
+  "top_k": 10,
+  "recall_at_k": 0.734,
+  "mrr": 0.3920198412698409,
+  "ingested_documents": 15000,
+  "ingested_chunks": 15000,
+  "data_dir": "/var/folders/cr/_248dmcx12b6ykhhf3_8rxlh0000gn/T/novaspine-bench-q8twgagp",
+  "ephemeral_data_dir": true,
+  "skip_chunking": true,
+  "reuse_index": false,
+  "embed_local": false,
+  "publishable": true,
+  "quality_warnings": [],
+  "mode_notes": [
+    "embed_provider override: sbert",
+    "embed_model override: all-MiniLM-L6-v2",
+    "embed_dims override: 384",
+    "query_expansion=on",
+    "ingest_batch_size=64"
+  ]
+}
