@@ -991,6 +991,10 @@ def _benchmark_reader_date(query: str, recalled: list[dict[str, Any]]) -> str:
 def _benchmark_reader_answer(query: str, recalled: list[dict[str, Any]], answer_type: str) -> str:
     # Specialized handling for common benchmark question classes.
     # Keep this reader narrow to avoid regressions on choice/entity questions.
+    if answer_type in {"CHOICE", "SHORT_PHRASE"}:
+        out = _benchmark_reader_choice(query, recalled)
+        if out:
+            return out
     if answer_type == "NUMBER":
         out = _benchmark_reader_numeric(query, recalled)
         if out:
@@ -1975,10 +1979,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     if not obj:
                         raise RuntimeError("healthcheck returned non-JSON")
                 except Exception as e:
-                    raise RuntimeError(
-                        "LLM healthcheck failed. Verify provider key/credits/rate limits "
-                        "or run with --no-llm-healthcheck to continue."
-                    ) from e
+                    if args.llm_error_policy == "fallback":
+                        llm_disabled = True
+                        llm_error_stats["errors"] = max(1, int(llm_error_stats.get("errors", 0)))
+                        mode_notes.append("llm_disabled_healthcheck_failed")
+                    else:
+                        raise RuntimeError(
+                            "LLM healthcheck failed. Verify provider key/credits/rate limits "
+                            "or run with --no-llm-healthcheck to continue."
+                        ) from e
         rows = load_jsonl(Path(args.dataset))
         if not rows:
             raise ValueError("dataset has no rows")
@@ -2077,6 +2086,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 args.answer_mode == "llm"
                 and bool(args.rerank_with_llm)
                 and llm_backend is not None
+                and not llm_disabled
                 and recalled
             ):
                 try:

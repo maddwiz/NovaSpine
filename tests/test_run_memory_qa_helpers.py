@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -294,3 +296,98 @@ def test_build_recall_variants_adds_case_plus_entity_variant():
     variants = mod._build_recall_variants(q)
     texts = [v[0] for v in variants]
     assert "__LOCOMO_CASE_0042__ Melanie" in texts
+
+
+def test_benchmark_reader_answer_routes_choice_questions():
+    mod = _load_run_memory_qa_module()
+    recalled = [
+        {
+            "content": (
+                "I attended the Data Analysis using Python webinar before the "
+                "Effective Time Management workshop."
+            ),
+            "score": 1.0,
+            "metadata": {"session_id": "s1"},
+        }
+    ]
+    ans = mod._benchmark_reader_answer(
+        "Which event did I attend first, the 'Effective Time Management' workshop or the 'Data Analysis using Python' webinar?",
+        recalled,
+        "SHORT_PHRASE",
+    )
+    assert ans == "Data Analysis using Python"
+
+
+def test_run_llm_fallback_policy_survives_healthcheck_failure(tmp_path, monkeypatch):
+    mod = _load_run_memory_qa_module()
+    dataset = tmp_path / "qa_eval.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "query": "How many children does Melanie have?",
+                "expected_answers": ["3"],
+                "expected_doc_ids": ["doc1"],
+                "doc_id": "doc1",
+                "source_id": "bench:doc1",
+                "memory": "Melanie has 3 children.",
+                "metadata": {"session_id": "s1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _FailingHealthcheckBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("forced healthcheck failure")
+
+        async def close(self) -> None:
+            return None
+
+    backends: list[_FailingHealthcheckBackend] = []
+
+    def _fake_create_chat_backend(provider: str = "venice", **kwargs):
+        backend = _FailingHealthcheckBackend()
+        backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(mod, "create_chat_backend", _fake_create_chat_backend)
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        [
+            "run_memory_qa.py",
+            "--dataset",
+            str(dataset),
+            "--name",
+            "qa_healthcheck_fallback",
+            "--row-limit",
+            "1",
+            "--progress-every",
+            "0",
+            "--embed-local",
+            "--answer-mode",
+            "llm",
+            "--answer-provider",
+            "openai",
+            "--answer-model",
+            "gpt-4.1-mini",
+            "--answer-route-hard",
+            "off",
+            "--llm-error-policy",
+            "fallback",
+        ],
+    )
+    args = mod._parse_args()
+    result = asyncio.run(mod._run(args))
+
+    assert result["rows_scored"] == 1
+    assert result["llm_errors"] >= 1
+    assert "llm_disabled_healthcheck_failed" in result["mode_notes"]
+    assert backends and backends[0].calls >= 1
