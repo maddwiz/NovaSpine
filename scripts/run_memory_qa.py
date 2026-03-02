@@ -367,6 +367,15 @@ def _parse_args() -> argparse.Namespace:
         help="Abort run after this many unrecoverable LLM call failures.",
     )
     p.add_argument(
+        "--llm-error-policy",
+        default="abort",
+        choices=["abort", "fallback"],
+        help=(
+            "Behavior when --llm-max-errors is reached: "
+            "'abort' stops the run, 'fallback' continues with non-LLM fallback answers."
+        ),
+    )
+    p.add_argument(
         "--answer-reasoning",
         default="auto",
         choices=["off", "on", "auto"],
@@ -1604,8 +1613,17 @@ async def _answer_with_llm(
                 max_tokens=max_tokens,
                 json_mode=True,
             )
-            obj = parse_json_object(resp.content)
+            raw_content = str(getattr(resp, "content", "") or "")
+            if not raw_content.strip():
+                raise RuntimeError("empty_llm_response")
+            lowered = raw_content.lower()
+            if "insufficient_quota" in lowered or "rate limit" in lowered:
+                raise RuntimeError("llm_rate_or_quota_error")
+            obj = parse_json_object(raw_content)
             if obj:
+                # Some providers return API errors as JSON payloads instead of raising.
+                if "error" in obj and not obj.get("answer"):
+                    raise RuntimeError(f"llm_error_response: {obj.get('error')}")
                 raw = str(obj.get("answer", ""))
                 ans = (
                     _normalize_answer_by_type(raw, answer_type)
@@ -1647,9 +1665,9 @@ async def _answer_with_llm(
                     return ans
                 return ""
             ans = (
-                _normalize_answer_by_type(resp.content, answer_type)
+                _normalize_answer_by_type(raw_content, answer_type)
                 if normalize_mode == "typed"
-                else _clean_answer(resp.content)
+                else _clean_answer(raw_content)
             )
             if _should_reject_answer(
                 clean_q,
@@ -1901,6 +1919,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     llm_backend: Any | None = None
     llm_backend_hard: Any | None = None
     llm_error_stats: dict[str, int] = {"errors": 0}
+    llm_disabled = False
     try:
         if args.answer_mode == "llm":
             _validate_llm_provider(args.answer_provider, cfg)
@@ -1916,6 +1935,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             mode_notes.append(
                 f"answer_llm: provider={args.answer_provider}, model={args.answer_model}, temp={args.answer_temperature}"
             )
+            mode_notes.append(f"llm_error_policy={args.llm_error_policy}")
             hard_model = _derive_hard_model(args.answer_model, args.answer_model_hard)
             if args.answer_route_hard != "off" and hard_model and hard_model != args.answer_model:
                 hard_kwargs = dict(llm_kwargs)
@@ -2090,41 +2110,51 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     wait = min_interval - (now - last_answer_ts)
                     if wait > 0.0:
                         await asyncio.sleep(wait)
-                pred = await _answer_with_llm(
-                    query=query,
-                    recalled=recalled,
-                    llm_backend=llm_backend,
-                    context_k=args.answer_context_k,
-                    per_chunk_chars=args.answer_chunk_chars,
-                    total_chars=args.answer_max_context_chars,
-                    min_score_ratio=args.answer_min_score_ratio,
-                    min_score_abs=args.answer_min_score_abs,
-                    context_rerank=args.answer_context_rerank,
-                    context_pool_multiplier=args.answer_context_pool_multiplier,
-                    context_overlap_weight=args.answer_context_overlap_weight,
-                    context_session_diversity_min=context_session_diversity_min,
-                    context_mode=args.answer_context_mode,
-                    context_sentences_per_doc=max(1, int(args.answer_context_sentences_per_doc)),
-                    deterministic_temporal=bool(args.answer_deterministic_temporal),
-                    span_refine=bool(args.answer_span_refine),
-                    benchmark_reader=bool(args.answer_benchmark_reader),
-                    strict_post_validate=bool(args.answer_strict_post_validate),
-                    normalize_mode=args.answer_normalize_mode,
-                    temperature=args.answer_temperature,
-                    max_tokens=args.answer_max_tokens,
-                    retries=args.answer_retries,
-                    retry_base_seconds=args.answer_retry_base_seconds,
-                    reasoning_mode=args.answer_reasoning,
-                    llm_backend_hard=llm_backend_hard,
-                    answer_route_hard=args.answer_route_hard,
-                    llm_error_stats=llm_error_stats,
-                )
+                if llm_disabled:
+                    pred = ""
+                else:
+                    pred = await _answer_with_llm(
+                        query=query,
+                        recalled=recalled,
+                        llm_backend=llm_backend,
+                        context_k=args.answer_context_k,
+                        per_chunk_chars=args.answer_chunk_chars,
+                        total_chars=args.answer_max_context_chars,
+                        min_score_ratio=args.answer_min_score_ratio,
+                        min_score_abs=args.answer_min_score_abs,
+                        context_rerank=args.answer_context_rerank,
+                        context_pool_multiplier=args.answer_context_pool_multiplier,
+                        context_overlap_weight=args.answer_context_overlap_weight,
+                        context_session_diversity_min=context_session_diversity_min,
+                        context_mode=args.answer_context_mode,
+                        context_sentences_per_doc=max(1, int(args.answer_context_sentences_per_doc)),
+                        deterministic_temporal=bool(args.answer_deterministic_temporal),
+                        span_refine=bool(args.answer_span_refine),
+                        benchmark_reader=bool(args.answer_benchmark_reader),
+                        strict_post_validate=bool(args.answer_strict_post_validate),
+                        normalize_mode=args.answer_normalize_mode,
+                        temperature=args.answer_temperature,
+                        max_tokens=args.answer_max_tokens,
+                        retries=args.answer_retries,
+                        retry_base_seconds=args.answer_retry_base_seconds,
+                        reasoning_mode=args.answer_reasoning,
+                        llm_backend_hard=llm_backend_hard,
+                        answer_route_hard=args.answer_route_hard,
+                        llm_error_stats=llm_error_stats,
+                    )
                 last_answer_ts = time.monotonic()
                 if llm_error_stats.get("errors", 0) >= max(1, int(args.llm_max_errors)):
-                    raise RuntimeError(
-                        "Aborting QA run due to repeated unrecoverable LLM errors. "
-                        "Check provider rate limits/credits."
-                    )
+                    if args.llm_error_policy == "abort":
+                        raise RuntimeError(
+                            "Aborting QA run due to repeated unrecoverable LLM errors. "
+                            "Check provider rate limits/credits."
+                        )
+                    if not llm_disabled:
+                        llm_disabled = True
+                        mode_notes.append(
+                            "llm_disabled_after_errors="
+                            f"{int(llm_error_stats.get('errors', 0))}"
+                        )
                 if not pred and not args.no_answer_fallback:
                     if args.answer_fallback_mode == "legacy":
                         pred = extractive_answer(query, recalled)

@@ -29,6 +29,31 @@ class OpenAIBackend:
         self._client: httpx.AsyncClient | None = None
         self._stats = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
 
+    @staticmethod
+    def _use_responses_api(model: str) -> bool:
+        m = (model or "").strip().lower()
+        return m.startswith("gpt-5")
+
+    @staticmethod
+    def _responses_output_text(data: dict[str, Any]) -> str:
+        pieces: list[str] = []
+        for item in data.get("output", []):
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            for content in item.get("content", []):
+                if not isinstance(content, dict):
+                    continue
+                ctype = str(content.get("type", ""))
+                if ctype in {"output_text", "text"}:
+                    txt = str(content.get("text", ""))
+                    if txt:
+                        pieces.append(txt)
+        if pieces:
+            return "".join(pieces)
+        # Compatibility fallback for SDK-shaped payloads.
+        txt = data.get("output_text")
+        return str(txt) if txt is not None else ""
+
     async def _get_client(self) -> httpx.AsyncClient:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is required")
@@ -48,6 +73,30 @@ class OpenAIBackend:
         json_mode: bool = False,
     ) -> ChatResponse:
         client = await self._get_client()
+        if self._use_responses_api(self.model):
+            body: dict[str, Any] = {
+                "model": self.model,
+                "input": [{"role": m.role, "content": m.content} for m in messages],
+                "max_output_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+                "reasoning": {"effort": "minimal"},
+            }
+            if json_mode:
+                body["text"] = {"format": {"type": "json_object"}}
+            resp = await client.post("/responses", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            usage = data.get("usage", {}) or {}
+            self._stats["calls"] += 1
+            self._stats["input_tokens"] += int(usage.get("input_tokens", 0))
+            self._stats["output_tokens"] += int(usage.get("output_tokens", 0))
+            return ChatResponse(
+                content=self._responses_output_text(data),
+                model=str(data.get("model", self.model)),
+                usage=usage,
+                finish_reason=str(data.get("status", "")),
+                raw=data,
+            )
+
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
