@@ -252,3 +252,50 @@ Artifacts produced:
 - `bench/results/long_probe150_r32_reasonauto.json`
 - `bench/results/long_probe150_r32_typedfallback.json`
 - `bench/results/long_holdout150_r32_typedfallback.json`
+
+## March 2 (midday) — R32 DMR anti-overfit pass + full-run confirmation
+
+Goal: improve DMR QA without overfitting by requiring wins on multiple disjoint slices before promoting to the full 500-row run.
+
+Evaluation protocol:
+- Dataset: `bench/official/converted/dmr_memgpt_qa_eval.jsonl`
+- Retrieval profile: SBERT (`all-MiniLM-L6-v2`, 384 dims), `keyword_plus`, `top_k=15`, query expansion on
+- Answer model: `gpt-4.1-mini`
+- Shared index: `bench/.runs/r32_dmr_probe` (`--reuse-index`)
+- Slices:
+  - Probe: rows `0-149`
+  - Holdout: rows `150-299`
+  - Tail: rows `300-499`
+
+Slice results:
+
+| Profile | Probe EM | Probe F1 | Holdout EM | Holdout F1 | Tail EM | Tail F1 | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `r32_base` (legacy fallback) | 0.493 | 0.487 | 0.553 | 0.529 | 0.550 | 0.552 | baseline |
+| `r32_typedfallback` | 0.493 | 0.489 | 0.553 | 0.525 | n/a | n/a | reject (no holdout gain) |
+| `r32_hardauto` (`DATE/NUMBER` route to `gpt-4.1`) | 0.487 | 0.481 | n/a | n/a | n/a | n/a | reject (probe regression) |
+| `r32_reader` (`benchmark_reader` + `benchmark_fallback`) | **0.500** | **0.495** | **0.560** | **0.533** | **0.560** | **0.555** | promote to full run |
+
+Full 500-row confirmation:
+
+| Profile | doc_hit | EM | F1 |
+|---|---:|---:|---:|
+| `official_dmr_qa_sbert_20260302_r32_base` | 0.836 | 0.534 | 0.5262 |
+| `official_dmr_qa_sbert_20260302_r32_reader` | 0.836 | **0.536** | **0.5267** |
+
+Decision:
+- Promote `r32_reader` as the current DMR best in this SBERT retrieval setting.
+- Gains are small but consistent across probe/holdout/tail and preserved on the full official run.
+
+Artifacts produced:
+- `bench/results/dmr_probe150_r32_base.json`
+- `bench/results/dmr_holdout150_r32_base.json`
+- `bench/results/dmr_tail200_r32_base.json`
+- `bench/results/dmr_probe150_r32_typedfallback.json`
+- `bench/results/dmr_holdout150_r32_typedfallback.json`
+- `bench/results/dmr_probe150_r32_hardauto.json`
+- `bench/results/dmr_probe150_r32_reader.json`
+- `bench/results/dmr_holdout150_r32_reader.json`
+- `bench/results/dmr_tail200_r32_reader.json`
+- `bench/results/official_dmr_qa_sbert_20260302_r32_base.json`
+- `bench/results/official_dmr_qa_sbert_20260302_r32_reader.json`

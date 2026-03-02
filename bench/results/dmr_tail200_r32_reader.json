@@ -1,0 +1,202 @@
+{
+  "benchmark": "dmr_tail200_r32_reader",
+  "dataset": "bench/official/converted/dmr_memgpt_qa_eval.jsonl",
+  "rows_total": 200,
+  "rows_scored": 200,
+  "rows_skipped": 0,
+  "row_offset": 300,
+  "row_limit": 200,
+  "top_k": 15,
+  "answer_mode": "llm",
+  "doc_hit_rate": 0.87,
+  "exact_match": 0.56,
+  "token_f1": 0.5550595238095238,
+  "ingested_documents": 0,
+  "ingested_chunks": 0,
+  "data_dir": "bench/.runs/r32_dmr_probe",
+  "ephemeral_data_dir": false,
+  "skip_chunking": false,
+  "reuse_index": true,
+  "embed_local": false,
+  "mode_notes": [
+    "embed_provider override: sbert",
+    "embed_model override: all-MiniLM-L6-v2",
+    "embed_dims override: 384",
+    "query_expansion=on",
+    "recall_variants=off",
+    "answer_context_session_diversity=1",
+    "answer_context_mode=chunk sentences_per_doc=2",
+    "answer_benchmark_reader=on",
+    "answer_fallback_mode=benchmark",
+    "answer_llm: provider=openai, model=gpt-4.1-mini, temp=0.0",
+    "llm_error_policy=abort",
+    "answer_hard_route:off",
+    "row_slice=offset:300,limit:200",
+    "reuse_index=on (existing_chunks=15000, ingestion_skipped)"
+  ],
+  "answer_provider": "openai",
+  "answer_model": "gpt-4.1-mini",
+  "llm_errors": 0,
+  "samples": [
+    {
+      "query": "__DMR_CASE_00300__ who is the original singer of just when i needed you most",
+      "prediction": "Randy VanWarmer",
+      "gold": "Randy VanWarmer",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00301__ where is the highest level of fluoride stored in the teeth",
+      "prediction": "Tooth enamel",
+      "gold": "surface of the enamel",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.4
+    },
+    {
+      "query": "__DMR_CASE_00302__ ganglion axons forming the optic nerve run to the",
+      "prediction": "diencephalon",
+      "gold": "pretectal nucleus",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00303__ when does i'm a celebrity get me out of here start in the uk",
+      "prediction": "2002",
+      "gold": "2018",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00304__ where do peaches come from in the us",
+      "prediction": "Export of fresh white-fleshed melting peach",
+      "gold": "other states",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00305__ when did they stop putting lead in paint",
+      "prediction": "1978",
+      "gold": "1992",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00306__ when did the battles of lexington and concord happen",
+      "prediction": "April 19, 1775",
+      "gold": "April 19, 1775",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00307__ who won the 1st battle of bull run",
+      "prediction": "Confederates",
+      "gold": "Confederate victory",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00308__ what is the name of the under butler in downton abbey",
+      "prediction": "Barrow",
+      "gold": "Charles Carson",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00309__ in the early 1800s california society was dominated by which group",
+      "prediction": "railroads banks wealthy land-owners",
+      "gold": "Spanish",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00310__ who was appointed to manage the national recovery administration",
+      "prediction": "Donald Richberg",
+      "gold": "Hugh S. Johnson",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00311__ how oxygenated blood returns to the heart from the lungs",
+      "prediction": "pulmonary vein",
+      "gold": "pulmonary circulation",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.5
+    },
+    {
+      "query": "__DMR_CASE_00312__ in another world with my smartphone japanese title",
+      "prediction": "\u7570\u4e16\u754c\u306f\u30b9\u30de\u30fc\u30c8\u30d5\u30a9\u30f3\u3068\u3068\u3082\u306b",
+      "gold": "\u7570\u4e16\u754c\u306f\u30b9\u30de\u30fc\u30c8\u30d5\u30a9\u30f3\u3068\u3068\u3082\u306b",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00313__ where was the statue of liberty originally built",
+      "prediction": "France",
+      "gold": "Paris",
+      "doc_hit": false,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00314__ what language is the olympic anthem sang in",
+      "prediction": "Greek",
+      "gold": "Greek",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00315__ where did the battle of bonhomme richard take place",
+      "prediction": "Flamborough Head",
+      "gold": "near Flamborough Head",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.8
+    },
+    {
+      "query": "__DMR_CASE_00316__ who was the actor that played ben stone on law and order",
+      "prediction": "Michael Moriarty",
+      "gold": "Michael Moriarty",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00317__ where do the phaeacians live in the odyssey",
+      "prediction": "Scheria",
+      "gold": "Scheria",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00318__ who invented the glasses that give sight to the blind",
+      "prediction": "Samuel Genensky",
+      "gold": "2006",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00319__ when do we find out luke and leia are siblings",
+      "prediction": "Return of the Jedi",
+      "gold": "Return of the Jedi",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    }
+  ]
+}
