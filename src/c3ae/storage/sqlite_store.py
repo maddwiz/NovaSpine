@@ -199,6 +199,28 @@ CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_memories_fts USING fts5(
     tokenize='porter unicode61'
 );
 
+CREATE TABLE IF NOT EXISTS structured_facts (
+    id TEXT PRIMARY KEY,
+    source_chunk_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    value TEXT NOT NULL,
+    fact_date TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0.0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_structured_facts_chunk ON structured_facts(source_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_structured_facts_entity ON structured_facts(entity);
+CREATE INDEX IF NOT EXISTS idx_structured_facts_relation ON structured_facts(relation);
+CREATE INDEX IF NOT EXISTS idx_structured_facts_date ON structured_facts(fact_date);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS structured_facts_fts USING fts5(
+    entity, relation, value,
+    content=structured_facts, content_rowid=rowid,
+    tokenize='porter unicode61'
+);
+
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -270,6 +292,21 @@ CREATE TRIGGER IF NOT EXISTS consolidated_memories_au AFTER UPDATE ON consolidat
     VALUES ('delete', old.rowid, old.summary, old.facts);
     INSERT INTO consolidated_memories_fts(rowid, summary, facts)
     VALUES (new.rowid, new.summary, new.facts);
+END;
+
+CREATE TRIGGER IF NOT EXISTS structured_facts_ai AFTER INSERT ON structured_facts BEGIN
+    INSERT INTO structured_facts_fts(rowid, entity, relation, value)
+    VALUES (new.rowid, new.entity, new.relation, new.value);
+END;
+CREATE TRIGGER IF NOT EXISTS structured_facts_ad AFTER DELETE ON structured_facts BEGIN
+    INSERT INTO structured_facts_fts(structured_facts_fts, rowid, entity, relation, value)
+    VALUES ('delete', old.rowid, old.entity, old.relation, old.value);
+END;
+CREATE TRIGGER IF NOT EXISTS structured_facts_au AFTER UPDATE ON structured_facts BEGIN
+    INSERT INTO structured_facts_fts(structured_facts_fts, rowid, entity, relation, value)
+    VALUES ('delete', old.rowid, old.entity, old.relation, old.value);
+    INSERT INTO structured_facts_fts(rowid, entity, relation, value)
+    VALUES (new.rowid, new.entity, new.relation, new.value);
 END;
 """
 
@@ -542,6 +579,151 @@ class SQLiteStore:
             }
             for r in rows
         ]
+
+    # --- Structured Facts ---
+
+    def insert_structured_fact(
+        self,
+        *,
+        source_chunk_id: str,
+        entity: str,
+        relation: str,
+        value: str,
+        fact_date: str = "",
+        confidence: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        entity_clean = re.sub(r"\s+", " ", (entity or "").strip())
+        relation_clean = re.sub(r"\s+", "_", (relation or "").strip().lower())
+        value_clean = re.sub(r"\s+", " ", (value or "").strip())
+        if not source_chunk_id or not entity_clean or not relation_clean or not value_clean:
+            raise ValueError("structured fact requires source_chunk_id/entity/relation/value")
+        now = iso_str(utcnow())
+
+        # Upsert-by-content for idempotent re-ingestion.
+        row = self._conn.execute(
+            """SELECT id FROM structured_facts
+               WHERE source_chunk_id=? AND entity=? AND relation=? AND value=? AND fact_date=?""",
+            (source_chunk_id, entity_clean, relation_clean, value_clean, fact_date.strip()),
+        ).fetchone()
+        if row:
+            fact_id = str(row["id"])
+            self._conn.execute(
+                """UPDATE structured_facts
+                   SET confidence=?, metadata=?, created_at=?
+                   WHERE id=?""",
+                (
+                    float(confidence),
+                    json_dumps(metadata or {}),
+                    now,
+                    fact_id,
+                ),
+            )
+            self._commit()
+            return fact_id
+
+        fact_id = uuid4().hex
+        self._conn.execute(
+            """INSERT INTO structured_facts(
+                id, source_chunk_id, entity, relation, value, fact_date, confidence, metadata, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                fact_id,
+                source_chunk_id,
+                entity_clean,
+                relation_clean,
+                value_clean,
+                fact_date.strip(),
+                float(confidence),
+                json_dumps(metadata or {}),
+                now,
+            ),
+        )
+        self._commit()
+        return fact_id
+
+    def list_structured_facts(
+        self,
+        *,
+        entity: str = "",
+        relation: str = "",
+        source_chunk_id: str = "",
+        order_by_date_desc: bool = True,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if entity.strip():
+            where.append("entity = ?")
+            params.append(re.sub(r"\s+", " ", entity.strip()))
+        if relation.strip():
+            where.append("relation = ?")
+            params.append(re.sub(r"\s+", "_", relation.strip().lower()))
+        if source_chunk_id.strip():
+            where.append("source_chunk_id = ?")
+            params.append(source_chunk_id.strip())
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        order_sql = "ORDER BY fact_date DESC, created_at DESC" if order_by_date_desc else "ORDER BY created_at DESC"
+        rows = self._conn.execute(
+            f"""SELECT id, source_chunk_id, entity, relation, value, fact_date, confidence, metadata, created_at
+                FROM structured_facts
+                {where_sql}
+                {order_sql}
+                LIMIT ?""",
+            (*params, max(1, int(limit))),
+        ).fetchall()
+        return [
+            {
+                "id": str(r["id"]),
+                "source_chunk_id": str(r["source_chunk_id"]),
+                "entity": str(r["entity"]),
+                "relation": str(r["relation"]),
+                "value": str(r["value"]),
+                "date": str(r["fact_date"]),
+                "confidence": float(r["confidence"]),
+                "metadata": json_loads(r["metadata"]),
+                "created_at": str(r["created_at"]),
+            }
+            for r in rows
+        ]
+
+    def search_structured_facts_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
+        fts_query = _sanitize_fts_query(query)
+        rows = self._conn.execute(
+            """SELECT sf.id, sf.source_chunk_id, sf.entity, sf.relation, sf.value,
+                      sf.fact_date, sf.confidence, sf.metadata, sf.created_at,
+                      bm25(structured_facts_fts) AS score
+               FROM structured_facts_fts f
+               JOIN structured_facts sf ON sf.rowid = f.rowid
+               WHERE structured_facts_fts MATCH ?
+               ORDER BY score
+               LIMIT ?""",
+            (fts_query, limit),
+        ).fetchall()
+        return [
+            SearchResult(
+                id=str(r["id"]),
+                content=f"{r['entity']} {r['relation']} {r['value']}",
+                score=-float(r["score"]),
+                source="structured_fact",
+                metadata={
+                    **json_loads(r["metadata"]),
+                    "source_chunk_id": str(r["source_chunk_id"]),
+                    "entity": str(r["entity"]),
+                    "relation": str(r["relation"]),
+                    "value": str(r["value"]),
+                    "fact_date": str(r["fact_date"]),
+                    "fact_confidence": float(r["confidence"]),
+                    "_created_at": str(r["created_at"]),
+                    "_source_kind": "structured_fact",
+                },
+            )
+            for r in rows
+        ]
+
+    def count_structured_facts(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM structured_facts").fetchone()
+        return int(row["n"]) if row else 0
 
     # --- Reasoning Bank ---
 

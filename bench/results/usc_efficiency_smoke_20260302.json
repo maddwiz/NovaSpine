@@ -1,0 +1,55 @@
+{
+  "sessions": 2,
+  "total_raw_bytes": 16384,
+  "total_compressed_bytes": 230,
+  "overall_ratio": 71.23478260869565,
+  "total_encode_seconds": 0.007629541913047433,
+  "total_decode_seconds": 0.00032350094988942146,
+  "encode_throughput_mb_s": 2.047960438264239,
+  "roundtrip_verified": 2,
+  "cogstore": {
+    "unique_chunks": 1,
+    "total_bytes": 8192,
+    "total_references": 1,
+    "dedup_ratio": 1.0,
+    "tiers": {
+      "hot": 0,
+      "warm": 1,
+      "cold": 0
+    },
+    "hot_cache_size": 0,
+    "lsh_index_size": 1,
+    "cooccurrence_pairs": 0,
+    "cooccurrence_total": 0
+  },
+  "results": [
+    {
+      "session_id": "synthetic-0000",
+      "raw_bytes": 8192,
+      "compressed_bytes": 222,
+      "ratio": 36.9009009009009,
+      "encode_seconds": 0.006674250005744398,
+      "decode_seconds": 0.00029329198878258467,
+      "stats": {
+        "ref": 0,
+        "delta": 0,
+        "full": 1,
+        "temporal_motifs": 16
+      }
+    },
+    {
+      "session_id": "synthetic-0001",
+      "raw_bytes": 8192,
+      "compressed_bytes": 8,
+      "ratio": 1024.0,
+      "encode_seconds": 0.0009552919073030353,
+      "decode_seconds": 3.0208961106836796e-05,
+      "stats": {
+        "ref": 1,
+        "delta": 0,
+        "full": 0,
+        "temporal_motifs": 16
+      }
+    }
+  ]
+}

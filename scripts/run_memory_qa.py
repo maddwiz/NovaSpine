@@ -29,6 +29,8 @@ from c3ae.eval import best_exact_match, best_f1, extractive_answer
 from c3ae.eval.temporal import enrich_context_with_temporal_facts
 from c3ae.llm import Message, create_chat_backend
 from c3ae.memory_spine.spine import MemorySpine
+from c3ae.retrieval.chained import chained_recall
+from c3ae.retrieval.cross_encoder import CrossEncoderReranker
 from c3ae.retrieval.verify import verify_answer_with_llm
 from c3ae.utils import extract_benchmark_case_token, parse_json_object, strip_benchmark_case_tokens
 
@@ -179,6 +181,29 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reuse existing index in --data-dir when chunks already exist (skip ingestion).",
     )
+    p.add_argument(
+        "--ingest-fact-extraction",
+        action="store_true",
+        help="Enable structured fact extraction during ingestion.",
+    )
+    p.add_argument(
+        "--fact-extraction-mode",
+        default="heuristic",
+        choices=["heuristic", "llm"],
+        help="Structured fact extraction mode used when --ingest-fact-extraction is enabled.",
+    )
+    p.add_argument(
+        "--fact-max-per-chunk",
+        type=int,
+        default=10,
+        help="Maximum structured facts extracted per chunk.",
+    )
+    p.add_argument(
+        "--fact-min-confidence",
+        type=float,
+        default=0.55,
+        help="Minimum fact confidence retained during ingestion.",
+    )
     p.add_argument("--embed-local", action="store_true", help="Use local hash embeddings")
     p.add_argument(
         "--embed-provider",
@@ -235,6 +260,45 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="RRF k constant for variant merge.",
+    )
+    p.add_argument(
+        "--chained-recall",
+        action="store_true",
+        help="Enable multi-hop chained retrieval (retrieve, expand entities, retrieve again).",
+    )
+    p.add_argument(
+        "--chained-hops",
+        type=int,
+        default=2,
+        help="Maximum retrieval hops when --chained-recall is enabled.",
+    )
+    p.add_argument(
+        "--chained-entity-limit",
+        type=int,
+        default=5,
+        help="Maximum discovered entities appended to hop-2 query expansion.",
+    )
+    p.add_argument(
+        "--cross-encoder-rerank",
+        action="store_true",
+        help="Use sentence-transformers cross-encoder reranking before answer generation.",
+    )
+    p.add_argument(
+        "--cross-encoder-model",
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        help="Cross-encoder model name used when --cross-encoder-rerank is enabled.",
+    )
+    p.add_argument(
+        "--cross-encoder-max-content-chars",
+        type=int,
+        default=512,
+        help="Per-candidate content truncation for cross-encoder reranking.",
+    )
+    p.add_argument(
+        "--cross-encoder-top-n",
+        type=int,
+        default=0,
+        help="Candidates kept after cross-encoder reranking (0 = keep current fetch size).",
     )
     p.add_argument(
         "--answer-mode",
@@ -1973,6 +2037,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.disable_graph:
         cfg.graph.enabled = False
         mode_notes.append("graph disabled")
+    if args.ingest_fact_extraction:
+        cfg.ingestion.enable_fact_extraction = True
+    cfg.ingestion.fact_extraction_mode = args.fact_extraction_mode
+    cfg.ingestion.fact_max_per_chunk = max(1, int(args.fact_max_per_chunk))
+    cfg.ingestion.fact_min_confidence = max(0.0, float(args.fact_min_confidence))
+    mode_notes.append(
+        "fact_extraction="
+        f"{'on' if cfg.ingestion.enable_fact_extraction else 'off'}"
+        f" mode={cfg.ingestion.fact_extraction_mode}"
+        f" max_per_chunk={cfg.ingestion.fact_max_per_chunk}"
+        f" min_conf={cfg.ingestion.fact_min_confidence:.2f}"
+    )
     if args.query_expansion:
         cfg.retrieval.enable_query_expansion = True
         mode_notes.append("query_expansion=on")
@@ -2001,7 +2077,22 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         cfg.retrieval.rrf_overlap_boost = float(args.rrf_overlap_boost)
         mode_notes.append(f"rrf_overlap_boost override: {cfg.retrieval.rrf_overlap_boost}")
     use_recall_variants = bool(args.recall_variants) and not bool(args.no_recall_variants)
+    if bool(args.chained_recall) and use_recall_variants:
+        use_recall_variants = False
+        mode_notes.append("recall_variants=off (disabled by chained_recall)")
     mode_notes.append(f"recall_variants={'on' if use_recall_variants else 'off'}")
+    if args.chained_recall:
+        mode_notes.append(
+            "chained_recall=on"
+            f" hops={max(1, int(args.chained_hops))}"
+            f" entity_limit={max(1, int(args.chained_entity_limit))}"
+        )
+    if args.cross_encoder_rerank:
+        mode_notes.append(
+            "cross_encoder_rerank=on"
+            f" model={args.cross_encoder_model}"
+            f" top_n={max(0, int(args.cross_encoder_top_n))}"
+        )
     auto_session_diversity = (
         bool(args.diversify_sessions)
         or ("locomo" in dataset_name and not bool(args.no_diversify_sessions))
@@ -2049,6 +2140,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     spine = MemorySpine(cfg)
     llm_backend: Any | None = None
     llm_backend_hard: Any | None = None
+    cross_encoder_reranker: CrossEncoderReranker | None = None
     llm_error_stats: dict[str, int] = {"errors": 0}
     llm_disabled = False
     try:
@@ -2115,6 +2207,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             "LLM healthcheck failed. Verify provider key/credits/rate limits "
                             "or run with --no-llm-healthcheck to continue."
                         ) from e
+        if args.cross_encoder_rerank:
+            cross_encoder_reranker = CrossEncoderReranker(
+                model_name=args.cross_encoder_model,
+                max_content_chars=max(64, int(args.cross_encoder_max_content_chars)),
+            )
         rows = load_jsonl(Path(args.dataset))
         if not rows:
             raise ValueError("dataset has no rows")
@@ -2177,6 +2274,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         skipped = 0
         sample_logs: list[dict[str, Any]] = []
         last_answer_ts = 0.0
+        cross_encoder_disabled = False
 
         for row in rows:
             query = str(row.get("query", "")).strip()
@@ -2189,11 +2287,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 continue
 
             expected_doc_ids = {str(x) for x in row.get("expected_doc_ids", []) if str(x)}
+            fetch_k = max(args.top_k, max(1, int(args.rerank_candidates)))
             if use_recall_variants:
-                fetch_k = max(args.top_k * max(1, int(args.variant_fetch_multiplier)), args.top_k)
-                fetch_k = max(fetch_k, max(1, int(args.rerank_candidates)))
-                if auto_session_diversity:
-                    fetch_k = max(fetch_k, max(1, int(args.top_k)) * 4)
+                fetch_k = max(fetch_k, args.top_k * max(1, int(args.variant_fetch_multiplier)))
+            if auto_session_diversity:
+                fetch_k = max(fetch_k, max(1, int(args.top_k)) * 4)
+            if args.cross_encoder_top_n > 0:
+                fetch_k = max(fetch_k, max(1, int(args.cross_encoder_top_n)))
+
+            if args.chained_recall:
+                recalled = await chained_recall(
+                    spine=spine,
+                    query=query,
+                    top_k=fetch_k,
+                    max_hops=max(1, int(args.chained_hops)),
+                    entity_limit=max(1, int(args.chained_entity_limit)),
+                    fetch_k=fetch_k,
+                )
+            elif use_recall_variants:
                 variants = _build_recall_variants(query)
                 variant_rows: list[tuple[float, list[dict[str, Any]]]] = []
                 for variant_q, weight in variants:
@@ -2201,14 +2312,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     variant_rows.append((weight, vr))
                 recalled = _merge_variant_recall(
                     variant_rows,
-                    top_k=args.top_k,
+                    top_k=fetch_k,
                     rrf_k=max(1, int(args.variant_rrf_k)),
                 )
             else:
-                fetch_k = max(args.top_k, max(1, int(args.rerank_candidates)))
-                if auto_session_diversity:
-                    fetch_k = max(fetch_k, max(1, int(args.top_k)) * 4)
                 recalled = await spine.recall(query, top_k=fetch_k)
+
+            if (
+                args.cross_encoder_rerank
+                and cross_encoder_reranker is not None
+                and not cross_encoder_disabled
+                and recalled
+            ):
+                keep_n = max(1, int(args.cross_encoder_top_n)) if int(args.cross_encoder_top_n) > 0 else len(recalled)
+                try:
+                    recalled = cross_encoder_reranker.rerank_rows(query, recalled, top_n=keep_n)
+                except Exception as e:
+                    cross_encoder_disabled = True
+                    mode_notes.append(f"cross_encoder_disabled_error={type(e).__name__}")
             if (
                 args.answer_mode == "llm"
                 and bool(args.rerank_with_llm)

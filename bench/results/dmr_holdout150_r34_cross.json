@@ -1,0 +1,204 @@
+{
+  "benchmark": "dmr_holdout150_r34_cross",
+  "dataset": "bench/official/converted/dmr_memgpt_qa_eval.jsonl",
+  "rows_total": 150,
+  "rows_scored": 150,
+  "rows_skipped": 0,
+  "row_offset": 150,
+  "row_limit": 150,
+  "top_k": 15,
+  "answer_mode": "llm",
+  "doc_hit_rate": 0.8933333333333333,
+  "exact_match": 0.6333333333333333,
+  "token_f1": 0.5983492063492063,
+  "ingested_documents": 0,
+  "ingested_chunks": 0,
+  "data_dir": "bench/.runs/r32_dmr_probe",
+  "ephemeral_data_dir": false,
+  "skip_chunking": false,
+  "reuse_index": true,
+  "embed_local": false,
+  "mode_notes": [
+    "embed_provider override: sbert",
+    "embed_model override: all-MiniLM-L6-v2",
+    "embed_dims override: 384",
+    "fact_extraction=off mode=heuristic max_per_chunk=10 min_conf=0.55",
+    "query_expansion=on",
+    "recall_variants=off",
+    "cross_encoder_rerank=on model=cross-encoder/ms-marco-MiniLM-L-6-v2 top_n=15",
+    "answer_context_session_diversity=1",
+    "answer_context_mode=chunk sentences_per_doc=2",
+    "answer_benchmark_reader=on",
+    "answer_fallback_mode=benchmark",
+    "answer_llm: provider=openai, model=gpt-4.1-mini, temp=0.0",
+    "llm_error_policy=abort",
+    "answer_hard_route:off",
+    "row_slice=offset:150,limit:150",
+    "reuse_index=on (existing_chunks=15000, ingestion_skipped)"
+  ],
+  "answer_provider": "openai",
+  "answer_model": "gpt-4.1-mini",
+  "llm_errors": 0,
+  "samples": [
+    {
+      "query": "__DMR_CASE_00150__ who plays sheila carter on the bold and the beautiful",
+      "prediction": "Kimberlin Brown",
+      "gold": "Kimberlin Brown",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00151__ what is the current mac os operating system",
+      "prediction": "macOS",
+      "gold": "10.13.4",
+      "doc_hit": false,
+      "em": 1.0,
+      "f1": 0.5
+    },
+    {
+      "query": "__DMR_CASE_00152__ when were 2 dollar bills stopped being made",
+      "prediction": "1966",
+      "gold": "current denomination of U.S. currency",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00153__ who sings the song it ain't me",
+      "prediction": "Selena Gomez",
+      "gold": "Selena Gomez",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00154__ when does the nba season end this year",
+      "prediction": "2019",
+      "gold": "April 11, 2018",
+      "doc_hit": false,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00155__ what us president is the only president to become an eagle scout",
+      "prediction": "Gerald Ford",
+      "gold": "Ford",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.6666666666666666
+    },
+    {
+      "query": "__DMR_CASE_00156__ when was the drinking age set to 21",
+      "prediction": "1984",
+      "gold": "By mid-1988",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00157__ when is the womens ice skating for the olympics",
+      "prediction": "1956",
+      "gold": "21 February",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00158__ what position did doug peterson play in the nfl",
+      "prediction": "quarterback",
+      "gold": "holder on placekicks",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00159__ who played lionel in as time goes by",
+      "prediction": "Geoffrey Palmer",
+      "gold": "Geoffrey Dyson Palmer, OBE",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.8
+    },
+    {
+      "query": "__DMR_CASE_00160__ where does the optic nerve cross the midline \u200b",
+      "prediction": "optic chiasm",
+      "gold": "optic chiasm",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00161__ what is billy last name in where the red fern grows",
+      "prediction": "Coleman",
+      "gold": "Colman",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00162__ who painted the ceiling of the florence cathedral",
+      "prediction": "Giorgio Vasari and Federico Zuccari",
+      "gold": "Giorgio Vasari",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00163__ who sings too much time on my hands lyrics",
+      "prediction": "Tommy Shaw",
+      "gold": "Tommy Shaw",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00164__ who has hosted the most fifa world cups",
+      "prediction": "Mexico",
+      "gold": "Italy",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00165__ which is the lion's mane jellyfish's species within its genus",
+      "prediction": "capillata",
+      "gold": "C.\u00a0capillata",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00166__ who was the buccaneers qb when they won the superbowl",
+      "prediction": "Brad Johnson",
+      "gold": "Brad Johnson",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 1.0
+    },
+    {
+      "query": "__DMR_CASE_00167__ who did the central powers defeat on the eastern front before concentrating back on france",
+      "prediction": "Russia",
+      "gold": "the Russian army",
+      "doc_hit": false,
+      "em": 1.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00168__ what kind of fish live in the salton sea",
+      "prediction": "catfish, largemouth bass, mosquitofish, sailfin molly",
+      "gold": "tilapia",
+      "doc_hit": true,
+      "em": 0.0,
+      "f1": 0.0
+    },
+    {
+      "query": "__DMR_CASE_00169__ when was the defensive 3 second rule implemented",
+      "prediction": "2001",
+      "gold": "the 2001\u20132002 season",
+      "doc_hit": true,
+      "em": 1.0,
+      "f1": 0.5
+    }
+  ]
+}

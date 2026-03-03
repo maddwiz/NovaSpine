@@ -90,6 +90,33 @@ class RetrievalConfig(BaseModel):
     )
 
 
+class IngestionConfig(BaseModel):
+    enable_fact_extraction: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_FACT_EXTRACTION", False)
+    )
+    fact_extraction_mode: str = Field(
+        default_factory=lambda: _env_str("C3AE_FACT_EXTRACTION_MODE", "heuristic")
+    )
+    fact_max_per_chunk: int = Field(
+        default_factory=lambda: _env_int("C3AE_FACT_MAX_PER_CHUNK", 10)
+    )
+    fact_min_confidence: float = Field(
+        default_factory=lambda: _env_float("C3AE_FACT_MIN_CONFIDENCE", 0.55)
+    )
+    fact_llm_provider: str = Field(
+        default_factory=lambda: _env_str("C3AE_FACT_LLM_PROVIDER", "venice")
+    )
+    fact_llm_model: str = Field(
+        default_factory=lambda: _env_str("C3AE_FACT_LLM_MODEL", "")
+    )
+    fact_llm_temperature: float = Field(
+        default_factory=lambda: _env_float("C3AE_FACT_LLM_TEMPERATURE", 0.0)
+    )
+    fact_llm_max_tokens: int = Field(
+        default_factory=lambda: _env_int("C3AE_FACT_LLM_MAX_TOKENS", 512)
+    )
+
+
 class COSConfig(BaseModel):
     max_key_facts: int = 40
     max_open_questions: int = 20
@@ -199,6 +226,7 @@ class Config(BaseModel):
     data_dir: Path = Field(default_factory=_default_data_dir)
     venice: VeniceConfig = Field(default_factory=VeniceConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     cos: COSConfig = Field(default_factory=COSConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
     consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)

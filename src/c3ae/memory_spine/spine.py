@@ -18,6 +18,7 @@ from c3ae.embeddings.backends import create_embedder
 from c3ae.embeddings.cache import EmbeddingCache
 from c3ae.exceptions import GovernanceError
 from c3ae.graph.extractor import ExtractedGraph, extract_graph_facts, extract_graph_facts_async
+from c3ae.ingestion.fact_extractor import extract_facts, extract_facts_async
 from c3ae.governance.audit import AuditLog
 from c3ae.governance.guardian import Guardian
 from c3ae.llm import create_chat_backend
@@ -95,6 +96,7 @@ class MemorySpine:
         self._cogstore = None
         self._graph_chat = None
         self._consolidation_chat = None
+        self._fact_chat = None
 
     # --- Ingest ---
 
@@ -115,6 +117,7 @@ class MemorySpine:
             self.sqlite.insert_chunk(chunk)
             if not skip_graph_index:
                 await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+            await self._index_structured_facts_async(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
 
         # Embed and index
@@ -144,6 +147,7 @@ class MemorySpine:
             self.sqlite.insert_chunk(chunk)
             if not skip_graph_index:
                 self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
+            self._index_structured_facts(chunk.id, chunk.content, chunk.metadata)
             chunk_ids.append(chunk.id)
         self.audit.log_write("chunks", source_id or "inline", f"ingested {len(chunk_ids)} chunks (sync)")
         return chunk_ids
@@ -181,6 +185,7 @@ class MemorySpine:
                 self.sqlite.insert_chunk(chunk)
                 if not skip_graph_index:
                     await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+                await self._index_structured_facts_async(chunk.id, chunk.content, chunk.metadata)
                 pending_ids.append(chunk.id)
                 pending_texts.append(ct)
                 ingested_chunks += 1
@@ -244,6 +249,7 @@ class MemorySpine:
             )
             self.sqlite.insert_chunk(chunk)
             self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
+            self._index_structured_facts(chunk.id, chunk.content, chunk.metadata)
             total_ingested += 1
             roles[sc.role] = roles.get(sc.role, 0) + 1
 
@@ -294,6 +300,10 @@ class MemorySpine:
             graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
             if graph_results:
                 results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
+        if bool(self.config.ingestion.enable_fact_extraction):
+            fact_results = self.sqlite.search_structured_facts_fts(query, limit=max(top_k, 5))
+            if fact_results:
+                results = self._merge_with_structured(query, results, fact_results, top_k=top_k)
         if not benchmark_case_query:
             self._record_access(results)
         self.audit.log_search(query, len(results))
@@ -364,6 +374,24 @@ class MemorySpine:
             if len(rows) >= top_k:
                 break
         return rows
+
+    def query_structured_facts(
+        self,
+        *,
+        entity: str = "",
+        relation: str = "",
+        source_chunk_id: str = "",
+        order_by_date_desc: bool = True,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Direct structured-fact query path."""
+        return self.sqlite.list_structured_facts(
+            entity=entity,
+            relation=relation,
+            source_chunk_id=source_chunk_id,
+            order_by_date_desc=order_by_date_desc,
+            limit=limit,
+        )
 
     async def augment(
         self,
@@ -495,6 +523,7 @@ class MemorySpine:
         )
         self.sqlite.insert_chunk(chunk)
         await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+        await self._index_structured_facts_async(chunk.id, chunk.content, chunk.metadata)
         await self._embed_and_index([chunk.id], [combined])
 
         self.audit.log_write("reasoning_entry", entry.id, title)
@@ -512,6 +541,7 @@ class MemorySpine:
         )
         self.sqlite.insert_chunk(chunk)
         self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
+        self._index_structured_facts(chunk.id, chunk.content, chunk.metadata)
         self.audit.log_write("reasoning_entry", entry.id, f"supersedes {old_id}")
         return entry
 
@@ -1324,6 +1354,142 @@ class MemorySpine:
             )
         return out
 
+    def _merge_with_structured(
+        self,
+        query: str,
+        memory_results: list[SearchResult],
+        fact_results: list[SearchResult],
+        top_k: int,
+    ) -> list[SearchResult]:
+        if not fact_results:
+            return memory_results[:top_k]
+        intent = self.hybrid_search._classify_intent(query)
+        mem_weight = 0.85
+        fact_weight = 0.20
+        if intent in {"temporal", "entity_lookup"}:
+            mem_weight = 0.72
+            fact_weight = 0.35
+
+        k = 60
+        scores: dict[str, float] = {}
+        best: dict[str, SearchResult] = {}
+        for rank, r in enumerate(memory_results):
+            scores[r.id] = scores.get(r.id, 0.0) + (mem_weight / (k + rank + 1))
+            best.setdefault(r.id, r)
+        for rank, r in enumerate(fact_results):
+            key = f"fact:{r.id}"
+            scores[key] = scores.get(key, 0.0) + (fact_weight / (k + rank + 1))
+            best.setdefault(key, r)
+
+        ranked = sorted(scores, key=lambda rid: scores[rid], reverse=True)
+        out: list[SearchResult] = []
+        for rid in ranked[:top_k]:
+            r = best[rid]
+            out.append(
+                SearchResult(
+                    id=r.id,
+                    content=r.content,
+                    score=float(scores[rid]),
+                    source=r.source,
+                    metadata=r.metadata,
+                )
+            )
+        return out
+
+    def _index_structured_facts(
+        self,
+        chunk_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not bool(self.config.ingestion.enable_fact_extraction):
+            return
+        try:
+            facts = extract_facts(
+                text,
+                max_facts=max(1, int(self.config.ingestion.fact_max_per_chunk)),
+            )
+            self._persist_structured_facts(chunk_id=chunk_id, facts=facts, metadata=metadata)
+        except Exception:
+            # Fact extraction must never block ingestion.
+            return
+
+    async def _index_structured_facts_async(
+        self,
+        chunk_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not bool(self.config.ingestion.enable_fact_extraction):
+            return
+        try:
+            mode = (self.config.ingestion.fact_extraction_mode or "heuristic").strip().lower()
+            chat_backend = self._get_fact_chat_backend() if mode == "llm" else None
+            facts = await extract_facts_async(
+                text,
+                mode=mode,
+                chat_backend=chat_backend,
+                max_facts=max(1, int(self.config.ingestion.fact_max_per_chunk)),
+                temperature=float(self.config.ingestion.fact_llm_temperature),
+                max_tokens=int(self.config.ingestion.fact_llm_max_tokens),
+            )
+            self._persist_structured_facts(chunk_id=chunk_id, facts=facts, metadata=metadata)
+        except Exception:
+            return
+
+    def _persist_structured_facts(
+        self,
+        *,
+        chunk_id: str,
+        facts: list[Any],
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        min_conf = max(0.0, float(self.config.ingestion.fact_min_confidence))
+        for fact in facts:
+            conf = float(getattr(fact, "confidence", 0.0))
+            if conf < min_conf:
+                continue
+            try:
+                self.sqlite.insert_structured_fact(
+                    source_chunk_id=chunk_id,
+                    entity=str(getattr(fact, "entity", "")).strip(),
+                    relation=str(getattr(fact, "relation", "")).strip(),
+                    value=str(getattr(fact, "value", "")).strip(),
+                    fact_date=str(getattr(fact, "date", "")).strip(),
+                    confidence=conf,
+                    metadata={
+                        "source_span": str(getattr(fact, "source_span", "")).strip(),
+                        "source": metadata or {},
+                    },
+                )
+            except Exception:
+                continue
+
+    def _get_fact_chat_backend(self):
+        if self._fact_chat is not None:
+            return self._fact_chat
+        provider = (self.config.ingestion.fact_llm_provider or "venice").strip().lower()
+        kwargs: dict[str, Any] = {
+            "temperature": float(self.config.ingestion.fact_llm_temperature),
+            "max_tokens": int(self.config.ingestion.fact_llm_max_tokens),
+        }
+        if self.config.ingestion.fact_llm_model:
+            kwargs["model"] = self.config.ingestion.fact_llm_model
+        if provider in {"venice", "default"}:
+            kwargs.setdefault("api_key", self.config.venice.api_key)
+            kwargs.setdefault("base_url", self.config.venice.base_url)
+            kwargs.setdefault("timeout", self.config.venice.chat_timeout)
+        elif provider == "openai":
+            import os
+
+            kwargs.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
+        elif provider == "anthropic":
+            import os
+
+            kwargs.setdefault("api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
+        self._fact_chat = create_chat_backend(provider=provider, **kwargs)
+        return self._fact_chat
+
     def _index_graph_chunk(
         self,
         chunk_id: str,
@@ -1758,7 +1924,7 @@ class MemorySpine:
 
     async def close(self) -> None:
         await self.write_manager.close()
-        for chat_obj in (self._graph_chat, self._consolidation_chat):
+        for chat_obj in (self._graph_chat, self._consolidation_chat, self._fact_chat):
             if chat_obj is None:
                 continue
             close_fn = getattr(chat_obj, "close", None)
@@ -1769,6 +1935,7 @@ class MemorySpine:
                 await maybe
         self._graph_chat = None
         self._consolidation_chat = None
+        self._fact_chat = None
         await self.embedder.close()
         self.sqlite.close()
         if self.config.faiss_dir:
