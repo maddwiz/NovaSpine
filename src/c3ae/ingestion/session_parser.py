@@ -64,6 +64,11 @@ class SessionParser:
         if first.get("type") in ("user", "assistant", "file-history-snapshot"):
             return self._parse_claude_code(lines, session_id, source_file)
 
+        # Generic JSONL format:
+        # {"role":"user|assistant", "content":"..."}
+        if "role" in first and "content" in first:
+            return self._parse_role_content_jsonl(lines, session_id, source_file)
+
         # Unknown format — try to extract any text content
         return self._parse_generic(lines, session_id, source_file)
 
@@ -200,6 +205,52 @@ class SessionParser:
                     index=idx,
                 ))
                 idx += 1
+        return chunks
+
+    def _parse_role_content_jsonl(
+        self, lines: list[str], session_id: str, source_file: str
+    ) -> list[SessionChunk]:
+        """Parse generic JSONL chat rows with role/content fields."""
+        chunks = []
+        idx = 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            role = str(entry.get("role", "unknown")).strip().lower()
+            content = self._extract_text(entry.get("content", ""))
+            if not content or len(content) < self.MIN_CONTENT_LEN:
+                continue
+
+            if role in {"tool", "tool_call", "tool_use"}:
+                normalized_role = "tool_call"
+            elif role in {"tool_result", "toolresponse", "tool-response"}:
+                normalized_role = "tool_result"
+            elif role in {"assistant", "user", "system"}:
+                normalized_role = role
+            else:
+                normalized_role = "unknown"
+
+            chunks.append(
+                SessionChunk(
+                    role=normalized_role,
+                    content=content,
+                    session_id=session_id,
+                    source_file=source_file,
+                    index=idx,
+                    metadata={
+                        k: v
+                        for k, v in entry.items()
+                        if k not in {"role", "content"}
+                    },
+                )
+            )
+            idx += 1
         return chunks
 
     def _extract_text(self, content: Any) -> str:

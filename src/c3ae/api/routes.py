@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -175,78 +174,6 @@ class ReasonResponse(BaseModel):
     final_answer: str
 
 
-# --- Context Compaction Models ---
-
-class CompressPromptRequest(BaseModel):
-    prompt: str
-
-
-class CompressPromptResponse(BaseModel):
-    compressed: str
-    token_savings: float
-    refs_used: int
-    original_tokens: int
-
-
-class ExpandRequest(BaseModel):
-    text: str
-
-
-class ExpandResponse(BaseModel):
-    expanded: str
-
-
-# --- Temporal Tracking Models ---
-
-class TrackEventRequest(BaseModel):
-    event_type: str
-
-
-class TrackEventResponse(BaseModel):
-    motif: dict[str, Any] | None = None
-
-
-class TrackEventsBatchRequest(BaseModel):
-    events: list[str]
-
-
-class TrackEventsBatchResponse(BaseModel):
-    motifs: list[dict[str, Any]]
-    count: int
-
-
-# --- Structural Similarity Models ---
-
-class SimilarityRequest(BaseModel):
-    data_id_a: str
-    data_id_b: str
-
-
-class SimilarityResponse(BaseModel):
-    data_id_a: str
-    data_id_b: str
-    similarity: float
-
-
-class FindSimilarResponse(BaseModel):
-    data_id: str
-    matches: list[dict[str, Any]]
-    count: int
-
-
-# --- Compression Models ---
-
-class CompressMemoriesRequest(BaseModel):
-    memories: list[dict[str, Any]]
-
-
-class CompressResponse(BaseModel):
-    compressed_size: int
-    original_size: int
-    ratio: float
-    extra: dict[str, Any] = Field(default_factory=dict)
-
-
 # --- Supersede Knowledge ---
 
 class SupersedeRequest(BaseModel):
@@ -293,7 +220,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        if request.url.path in ("/api/v1/health", "/docs", "/openapi.json"):
+        if request.url.path in ("/api/v1/health", "/docs", "/redoc", "/openapi.json"):
             return await call_next(request)
         if token:
             auth = request.headers.get("Authorization", "")
@@ -336,11 +263,13 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             try:
                 chunk_ids = await spine.ingest_text(req.text, source_id=req.source_id, metadata=req.metadata)
                 return IngestResponse(chunk_ids=chunk_ids, count=len(chunk_ids))
-            except Exception as e:
+            except sqlite3.OperationalError as e:
                 last_err = e
                 if "locked" in str(e) and attempt < 2:
                     _time.sleep(1.0 * (attempt + 1))
                     continue
+                raise
+            except Exception:
                 raise
         raise last_err  # type: ignore[misc]
 
@@ -367,19 +296,6 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             ],
             "count": len(entries),
         }
-
-    @app.post("/api/v1/reasoning/run", response_model=ReasonResponse)
-    async def reasoning_run(req: ReasonRequest, spine: MemorySpine = Depends(get_spine)):
-        from c3ae.pipeline.loop import PipelineLoop
-        pipeline = PipelineLoop(spine, max_steps=req.max_steps)
-        result = await pipeline.run(req.task, steps=req.steps)
-        return ReasonResponse(
-            session_id=result.session.session_id,
-            steps_executed=len(result.session.steps),
-            entries_written=len(result.entries_written),
-            entries_blocked=len(result.entries_blocked),
-            final_answer=result.session.final_answer,
-        )
 
     @app.post("/api/v1/evidence/add", response_model=EvidenceResponse)
     async def evidence_add(req: EvidenceRequest, spine: MemorySpine = Depends(get_spine)):
@@ -568,99 +484,12 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.get("/api/v1/status/full")
     async def full_status(spine: MemorySpine = Depends(get_spine)):
-        """Full system status including all cogdedup modules."""
+        """Full system status with direct chunk count from SQLite."""
         status = spine.status()
+        row = spine.sqlite._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        status["chunks"] = int(row[0]) if row else 0
         status["service"] = "novaspine"
         return status
-
-    # --- Context Compaction (LLM Prompt Compression) ---
-
-    @app.post("/api/v1/compression/prompt", response_model=CompressPromptResponse)
-    async def compress_prompt(req: CompressPromptRequest,
-                              spine: MemorySpine = Depends(get_spine)):
-        """Compress an LLM prompt by replacing known chunks with REF placeholders."""
-        result = spine.compress_prompt(req.prompt)
-        return CompressPromptResponse(**result)
-
-    @app.post("/api/v1/compression/expand", response_model=ExpandResponse)
-    async def expand_response(req: ExpandRequest,
-                              spine: MemorySpine = Depends(get_spine)):
-        """Expand REF placeholders back to full content."""
-        expanded = spine.expand_response(req.text)
-        return ExpandResponse(expanded=expanded)
-
-    @app.post("/api/v1/compression/memories", response_model=CompressResponse)
-    async def compress_memories(req: CompressMemoriesRequest,
-                                spine: MemorySpine = Depends(get_spine)):
-        """Compress a batch of memories using cognitive dedup."""
-        blob, stats = spine.compress_memories(req.memories)
-        return CompressResponse(
-            compressed_size=stats.get("compressed_size", len(blob)),
-            original_size=stats.get("original_size", 0),
-            ratio=stats.get("ratio", 0.0),
-            extra=stats,
-        )
-
-    @app.post("/api/v1/compression/reasoning-bank", response_model=CompressResponse)
-    async def compress_reasoning_bank(spine: MemorySpine = Depends(get_spine)):
-        """Compress the entire reasoning bank for archival."""
-        blob, stats = spine.compress_reasoning_bank()
-        return CompressResponse(
-            compressed_size=stats.get("compressed_size", len(blob)),
-            original_size=stats.get("original_size", 0),
-            ratio=stats.get("ratio", 0.0),
-            extra=stats,
-        )
-
-    @app.post("/api/v1/compression/audit-log", response_model=CompressResponse)
-    async def compress_audit_log(limit: int = 10000,
-                                 spine: MemorySpine = Depends(get_spine)):
-        """Compress recent audit log entries for archival."""
-        blob, stats = spine.compress_audit_log(limit=limit)
-        return CompressResponse(
-            compressed_size=stats.get("compressed_size", len(blob)),
-            original_size=stats.get("original_size", 0),
-            ratio=stats.get("ratio", 0.0),
-            extra=stats,
-        )
-
-    # --- Temporal Event Tracking ---
-
-    @app.post("/api/v1/events/track", response_model=TrackEventResponse)
-    async def track_event(req: TrackEventRequest,
-                          spine: MemorySpine = Depends(get_spine)):
-        """Track a temporal event. Returns motif if a pattern is detected."""
-        motif = spine.track_event(req.event_type)
-        return TrackEventResponse(motif=motif)
-
-    @app.post("/api/v1/events/track-batch", response_model=TrackEventsBatchResponse)
-    async def track_events_batch(req: TrackEventsBatchRequest,
-                                 spine: MemorySpine = Depends(get_spine)):
-        """Track a batch of events. Returns all detected motifs."""
-        motifs = spine.track_events_batch(req.events)
-        return TrackEventsBatchResponse(motifs=motifs, count=len(motifs))
-
-    # --- Structural Similarity ---
-
-    @app.post("/api/v1/similarity/compare", response_model=SimilarityResponse)
-    async def structural_similarity(req: SimilarityRequest,
-                                    spine: MemorySpine = Depends(get_spine)):
-        """Compute structural similarity between two memories using shared chunks."""
-        score = spine.structural_similarity(req.data_id_a, req.data_id_b)
-        return SimilarityResponse(
-            data_id_a=req.data_id_a, data_id_b=req.data_id_b, similarity=score,
-        )
-
-    @app.get("/api/v1/similarity/find/{data_id}", response_model=FindSimilarResponse)
-    async def find_similar(data_id: str, threshold: float = 0.3,
-                           spine: MemorySpine = Depends(get_spine)):
-        """Find memories structurally similar to the given one."""
-        matches = spine.find_structurally_similar(data_id, threshold=threshold)
-        return FindSimilarResponse(
-            data_id=data_id,
-            matches=[{"id": m[0], "similarity": m[1]} for m in matches],
-            count=len(matches),
-        )
 
     # --- Reasoning Bank: Supersede ---
 
@@ -692,42 +521,5 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         spine.end_session(session_id)
         return {"session_id": session_id, "status": "ended"}
 
-    # --- Cogdedup Stats ---
-
-    @app.get("/api/v1/cogdedup/stats")
-    async def cogdedup_stats(spine: MemorySpine = Depends(get_spine)):
-        """Cognitive dedup statistics — compression store, anomaly, temporal."""
-        result: dict[str, Any] = {}
-        result["cogstore"] = spine.cogstore.stats()
-        if hasattr(spine, '_lazy_anomaly_detector'):
-            report = spine._anomaly_detector.drift_report()
-            result["anomaly"] = {
-                "total_observations": spine._anomaly_detector._observation_count,
-                "alerts": report.alerts_count,
-                "mean_ratio": round(report.current_mean, 2),
-                "std_ratio": round(report.current_std, 2),
-            }
-        if hasattr(spine, '_lazy_temporal_tracker'):
-            motifs = spine._temporal_tracker.detected_motifs()
-            result["temporal"] = {
-                "motifs_detected": len(motifs),
-                "motifs": [{"pattern": m.pattern, "count": m.occurrences} for m in motifs],
-            }
-        return result
-
-    @app.get("/api/v1/cogdedup/anomaly-report")
-    async def anomaly_report(spine: MemorySpine = Depends(get_spine)):
-        """Anomaly detection drift report from compression monitoring."""
-        report = spine._anomaly_detector.drift_report()
-        return {
-            "total_observations": spine._anomaly_detector._observation_count,
-            "alerts_count": report.alerts_count,
-            "current_mean": round(report.current_mean, 2),
-            "current_std": round(report.current_std, 2),
-            "recent_alerts": [
-                {"severity": a.severity, "z_score": round(a.z_score, 2)}
-                for a in (report.recent_alerts if hasattr(report, 'recent_alerts') else [])
-            ],
-        }
 
     return app

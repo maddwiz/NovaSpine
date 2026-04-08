@@ -7,7 +7,7 @@ name = "novaspine"
 version = "0.1.0"
 description = "NovaSpine — long-term memory for LLM agents with hybrid vector + keyword search"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "MIT"
 dependencies = [
     # USC core
     "zstandard>=0.21",
@@ -33,9 +33,13 @@ dev = [
 ]
 semantic = ["scikit-learn>=1.3"]
 crypto = ["cryptography>=41"]
+openai = ["openai>=1.0"]
+ollama = []
+local = ["sentence-transformers>=2.2"]
 
 [project.scripts]
 novaspine = "c3ae.cli:main"
+c3ae = "c3ae.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

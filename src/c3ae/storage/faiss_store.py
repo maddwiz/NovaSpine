@@ -122,6 +122,12 @@ class FAISSStore:
         index_path = self.faiss_dir / "memory.index"
         idmap_path = self.faiss_dir / "memory.idmap"
         if index_path.exists() and idmap_path.exists():
-            self._index = faiss.read_index(str(index_path))
+            loaded = faiss.read_index(str(index_path))
+            if loaded.d != self.dims:
+                raise StorageError(
+                    f"FAISS index dimension mismatch: index={loaded.d}, configured={self.dims}. "
+                    "Run `novaspine rebuild-index` after changing embedding provider/model."
+                )
+            self._index = loaded
             with open(idmap_path) as f:
                 self._id_map = json.load(f)

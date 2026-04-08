@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from pathlib import Path
 
 import click
@@ -80,28 +79,6 @@ def ingest(ctx: click.Context, path: str, source_id: str) -> None:
 
 
 @main.command()
-@click.argument("task")
-@click.option("--max-steps", "-n", default=1, help="Max reasoning steps")
-@click.pass_context
-def reason(ctx: click.Context, task: str, max_steps: int) -> None:
-    """Start a reasoning session."""
-    spine = _get_spine(ctx.obj.get("data_dir"))
-    from c3ae.pipeline.loop import PipelineLoop
-    pipeline = PipelineLoop(spine, max_steps=max_steps)
-    result = asyncio.run(pipeline.run(task))
-    click.echo(f"Session: {result.session.session_id}")
-    click.echo(f"Steps: {len(result.session.steps)}")
-    click.echo(f"Context hits: {len(result.search_results)}")
-    if result.entries_written:
-        click.echo(f"Entries written: {len(result.entries_written)}")
-    if result.entries_blocked:
-        click.echo(f"Entries blocked: {len(result.entries_blocked)}")
-    if result.session.final_answer:
-        click.echo(f"\nResult: {result.session.final_answer}")
-    spine.sqlite.close()
-
-
-@main.command()
 @click.option("--limit", "-l", default=20, help="Number of entries")
 @click.pass_context
 def bank(ctx: click.Context, limit: int) -> None:
@@ -145,102 +122,50 @@ def serve(ctx: click.Context, host: str, port: int) -> None:
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-@main.command(name="cogdedup-stats")
+@main.command(name="rebuild-index")
+@click.option(
+    "--provider",
+    type=click.Choice(["venice", "openai", "ollama", "local"], case_sensitive=False),
+    default=None,
+    help="Override C3AE_EMBEDDING_PROVIDER for this rebuild.",
+)
 @click.pass_context
-def cogdedup_stats(ctx: click.Context) -> None:
-    """Show cognitive deduplication statistics."""
+def rebuild_index(ctx: click.Context, provider: str | None) -> None:
+    """Rebuild FAISS index from all stored chunks."""
+    import os
+    import faiss
+    from c3ae.storage.faiss_store import FAISSStore
+
+    if provider:
+        os.environ["C3AE_EMBEDDING_PROVIDER"] = provider
+
     spine = _get_spine(ctx.obj.get("data_dir"))
-    st = spine.status()
+    rows = spine.sqlite._conn.execute(
+        "SELECT id, content FROM chunks ORDER BY created_at ASC"
+    ).fetchall()
+    if not rows:
+        click.echo("No chunks found; nothing to index.")
+        spine.sqlite.close()
+        return
 
-    click.echo("Cognitive Deduplication Stats")
-    click.echo("=" * 50)
+    chunk_ids = [str(r["id"]) for r in rows]
+    texts = [str(r["content"]) for r in rows]
 
-    if "cogdedup" in st:
-        cs = st["cogdedup"]
-        click.echo(f"  Chunks stored:     {cs.get('total_chunks', 0)}")
-        click.echo(f"  Total references:  {cs.get('total_references', 0)}")
-        click.echo(f"  Hot tier:          {cs.get('hot_chunks', 0)}")
-        click.echo(f"  Cold archived:     {cs.get('cold_chunks', 0)}")
-    else:
-        click.echo("  (cogstore not initialized — no sessions compressed yet)")
+    vectors = asyncio.run(spine.embedder.embed(texts))
+    new_store = FAISSStore(
+        dims=spine.embedder.dimensions,
+        faiss_dir=spine.config.faiss_dir,
+        ivf_threshold=spine.config.retrieval.faiss_ivf_threshold,
+    )
+    new_store._index = faiss.IndexFlatIP(spine.embedder.dimensions)
+    new_store._id_map = []
+    new_store.add_batch(vectors, chunk_ids)
+    new_store.save()
 
-    if "anomaly" in st:
-        a = st["anomaly"]
-        click.echo(f"\nAnomaly Detection")
-        click.echo(f"  Observations:      {a['total_observations']}")
-        click.echo(f"  Alerts fired:      {a['alerts']}")
-        click.echo(f"  Mean ratio:        {a['mean_ratio']:.2f}x")
-
-    if "temporal" in st:
-        click.echo(f"\nTemporal Patterns")
-        click.echo(f"  Motifs detected:   {st['temporal']['motifs_detected']}")
-
-    spine.sqlite.close()
-
-
-@main.command(name="compress-session")
-@click.argument("path", type=click.Path(exists=True))
-@click.option("--session-id", "-s", default="", help="Session ID")
-@click.option("--output", "-o", default="", help="Output path for compressed blob")
-@click.pass_context
-def compress_session_cmd(ctx: click.Context, path: str, session_id: str, output: str) -> None:
-    """Compress a session file using cognitive deduplication."""
-    spine = _get_spine(ctx.obj.get("data_dir"))
-    file_path = Path(path)
-    data = file_path.read_bytes()
-
-    if not session_id:
-        session_id = file_path.stem
-
-    result = spine.compress_session(data, session_id=session_id)
-    ratio = result["original_size"] / max(1, result["compressed_size"])
-
-    click.echo(f"Compressed: {file_path.name}")
-    click.echo(f"  Original:    {result['original_size']:,} bytes")
-    click.echo(f"  Compressed:  {result['compressed_size']:,} bytes")
-    click.echo(f"  Ratio:       {ratio:.1f}x")
-
-    stats = result["stats"]
-    if "anomaly_alert" in stats:
-        a = stats["anomaly_alert"]
-        click.echo(f"  ANOMALY:     {a['type']} (z={a['z_score']:.2f})")
-    if "temporal_motifs" in stats:
-        click.echo(f"  Motifs:      {stats['temporal_motifs']}")
-
-    if output:
-        out_path = Path(output)
-        out_path.write_bytes(result["blob"])
-        click.echo(f"  Saved to:    {out_path}")
-
-    spine.sqlite.close()
-
-
-@main.command(name="anomaly-report")
-@click.pass_context
-def anomaly_report(ctx: click.Context) -> None:
-    """Show anomaly detection drift report."""
-    spine = _get_spine(ctx.obj.get("data_dir"))
-
-    # Access the anomaly detector (triggers lazy init)
-    detector = spine._anomaly_detector
-    report = detector.drift_report()
-
-    click.echo("Anomaly Detection Drift Report")
-    click.echo("=" * 50)
-    click.echo(f"  Observations:        {detector._observation_count}")
-    click.echo(f"  Alerts fired:        {report.alerts_count}")
-    click.echo(f"  Mean ratio:          {report.current_mean:.2f}x")
-    click.echo(f"  Std deviation:       {report.current_std:.4f}")
-    click.echo(f"  Drifting:            {'YES' if report.is_drifting else 'no'}")
-
-    if detector._alerts:
-        click.echo(f"\nRecent Alerts ({len(detector._alerts)}):")
-        for alert in detector._alerts[-10:]:
-            click.echo(f"  [{alert.severity}] z={alert.z_score:.2f} "
-                       f"ratio={alert.ratio:.2f} label={alert.label}")
-    else:
-        click.echo("\n  No alerts recorded.")
-
+    click.echo(
+        f"Rebuilt FAISS index with {len(chunk_ids)} vectors "
+        f"({spine.embedder.dimensions} dims, provider={spine.config.embedding.provider})."
+    )
     spine.sqlite.close()
 
 

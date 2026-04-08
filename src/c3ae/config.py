@@ -25,6 +25,16 @@ class VeniceConfig(BaseModel):
     max_tokens: int = 4096
 
 
+class EmbeddingConfig(BaseModel):
+    provider: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBEDDING_PROVIDER", "venice"))
+    model: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBEDDING_MODEL", ""))
+    dimensions: int = Field(default_factory=lambda: int(os.environ.get("C3AE_EMBEDDING_DIMENSIONS", "0")))
+    api_key: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBEDDING_API_KEY", ""))
+    base_url: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBEDDING_BASE_URL", ""))
+    timeout: float = Field(default_factory=lambda: float(os.environ.get("C3AE_EMBEDDING_TIMEOUT", "30")))
+    max_batch: int = Field(default_factory=lambda: int(os.environ.get("C3AE_EMBEDDING_MAX_BATCH", "64")))
+
+
 class RetrievalConfig(BaseModel):
     vector_weight: float = 0.7
     keyword_weight: float = 0.3
@@ -48,6 +58,7 @@ class APIConfig(BaseModel):
 class Config(BaseModel):
     data_dir: Path = Field(default_factory=_default_data_dir)
     venice: VeniceConfig = Field(default_factory=VeniceConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     api: APIConfig = Field(default_factory=APIConfig)
