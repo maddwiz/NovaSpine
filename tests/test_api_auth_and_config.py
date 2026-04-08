@@ -117,3 +117,31 @@ def test_memory_ingest_uses_async_retry_sleep(tmp_path, monkeypatch):
     assert response.json() == {"chunk_ids": ["chunk-1"], "count": 1}
     assert fake_spine.calls == 3
     assert sleeps == [1.0, 2.0]
+
+
+def test_api_branding_and_exempt_docs_are_consistent(tmp_path, monkeypatch):
+    monkeypatch.setenv("C3AE_AUTH_DISABLED", "1")
+
+    app = routes.create_app(data_dir=str(tmp_path / "data"))
+
+    with TestClient(app) as client:
+        health = client.get("/api/v1/health")
+        status = client.get("/api/v1/status")
+        full_status = client.get("/api/v1/status/full")
+        docs = client.get("/docs")
+        redoc = client.get("/redoc")
+        openapi = client.get("/openapi.json")
+
+    assert health.status_code == 200
+    assert health.json()["service"] == "novaspine"
+
+    assert status.status_code == 200
+    assert status.json()["service"] == "novaspine"
+
+    assert full_status.status_code == 200
+    assert full_status.json()["service"] == "novaspine"
+
+    assert docs.status_code == 200
+    assert redoc.status_code == 200
+    assert openapi.status_code == 200
+    assert openapi.json()["info"]["title"] == "NovaSpine API"

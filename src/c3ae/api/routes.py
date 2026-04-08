@@ -1,4 +1,4 @@
-"""FastAPI HTTP API for C3/Ae."""
+"""FastAPI HTTP API for NovaSpine."""
 
 from __future__ import annotations
 
@@ -91,6 +91,7 @@ class SkillResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
+    service: str = "novaspine"
     chunks: int
     vectors: int
     reasoning_entries: int
@@ -98,6 +99,12 @@ class StatusResponse(BaseModel):
     vault_documents: int
     consolidated_memories: int | None = None
     graph: dict[str, Any] | None = None
+
+
+def _status_payload(spine: MemorySpine) -> dict[str, Any]:
+    payload = dict(spine.status())
+    payload["service"] = "novaspine"
+    return payload
 
 
 class AuditEventItem(BaseModel):
@@ -304,7 +311,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     _spine = MemorySpine(config)
 
     app = FastAPI(
-        title="C3/Ae Memory API",
+        title="NovaSpine API",
         version="0.3.0",
     )
 
@@ -342,14 +349,19 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.get("/api/v1/health")
     async def health():
-        return {"status": "ok", "service": "c3ae"}
+        return {"status": "ok", "service": "novaspine"}
 
     @app.get("/api/v1/status", response_model=StatusResponse)
     async def get_status(spine: MemorySpine = Depends(get_spine)):
-        return spine.status()
+        return _status_payload(spine)
 
     @app.post("/api/v1/memory/search", response_model=SearchResponse)
     async def memory_search(req: SearchRequest, spine: MemorySpine = Depends(get_spine)):
+        """Lower-level search endpoint for tools and debugging.
+
+        Agent integrations should generally prefer `/api/v1/memory/recall`
+        or `/api/v1/memory/augment`.
+        """
         if req.keyword_only:
             results = spine.search_keyword(req.query, top_k=req.top_k)
         else:
@@ -574,9 +586,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     @app.get("/api/v1/status/full")
     async def full_status(spine: MemorySpine = Depends(get_spine)):
         """Full system status including all cogdedup modules."""
-        status = spine.status()
-        status["service"] = "novaspine"
-        return status
+        return _status_payload(spine)
 
     @app.post("/api/v1/memory/consolidate")
     async def memory_consolidate(req: ConsolidateRequest, spine: MemorySpine = Depends(get_spine)):

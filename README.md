@@ -37,6 +37,7 @@ novaspine serve
 - default local API: `http://127.0.0.1:8420`
 - health check: `GET /api/v1/health`
 - prompt-ready recall: `POST /api/v1/memory/augment`
+- choose an auth mode before calling protected routes
 
 ### OpenClaw users
 
@@ -87,6 +88,51 @@ Current tested OpenClaw versions:
 - `2026.4.7`
 
 If an OpenClaw update changes plugin wiring, config shape, or slot bindings, re-running the installer is the supported repair path.
+
+## Auth Modes
+
+NovaSpine has two explicit API modes plus one protective default.
+
+### Mode A: token-protected API
+
+Set `C3AE_API_TOKEN` for secured local or remote access. All routes except the exempt health/docs routes require Bearer auth.
+
+Exempt routes:
+
+- `/api/v1/health`
+- `/docs`
+- `/redoc`
+- `/openapi.json`
+
+```bash
+export C3AE_API_TOKEN=your-secret-token
+novaspine serve
+
+curl -X POST http://127.0.0.1:8420/api/v1/memory/recall \
+  -H "Authorization: Bearer $C3AE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"dark mode","top_k":5}'
+```
+
+### Mode B: explicit local unauthenticated mode
+
+Set `C3AE_AUTH_DISABLED=1` only when you intentionally want local unauthenticated access.
+
+```bash
+export C3AE_AUTH_DISABLED=1
+novaspine serve
+
+curl -X POST http://127.0.0.1:8420/api/v1/memory/augment \
+  -H "Content-Type: application/json" \
+  -d '{"query":"what does the user like?","top_k":3,"format":"xml"}'
+```
+
+### Default if neither is set
+
+If neither `C3AE_API_TOKEN` nor `C3AE_AUTH_DISABLED=1` is set:
+
+- `/api/v1/health`, `/docs`, `/redoc`, and `/openapi.json` still work
+- all other routes return `503` until you explicitly choose one of the two modes above
 
 ## Benchmark Highlights
 
@@ -162,22 +208,42 @@ curl -X POST localhost:8420/api/v1/memory/augment \
 
 Returns pre-formatted `<relevant-memories>` block ready for LLM context injection.
 
-## Authentication
+## Search vs Recall
 
-If `C3AE_API_TOKEN` is set, all endpoints except `/api/v1/health`, `/docs`, `/redoc`, and `/openapi.json` require Bearer auth:
+NovaSpine intentionally exposes both a lower-level search route and the agent-facing memory contract.
+
+- `/api/v1/memory/recall`: use this first for agent memory retrieval across sessions and memories
+- `/api/v1/memory/augment`: use this first when you want prompt-ready context injection
+- `/api/v1/memory/search`: lower-level search endpoint for tools, debugging, and raw hybrid-search access
+
+If you are building an agent integration, start with `recall` or `augment`, not `search`.
+
+## First Run Sanity Check
+
+### Standalone NovaSpine
 
 ```bash
-export C3AE_API_TOKEN=your-secret-token
-curl -X POST localhost:8420/api/v1/memory/recall \
-  -H "Authorization: Bearer your-secret-token" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"dark mode","top_k":5}'
+export C3AE_AUTH_DISABLED=1
+novaspine serve
 ```
 
-If `C3AE_API_TOKEN` is not set and `C3AE_AUTH_DISABLED` is not set, NovaSpine fails closed:
+In another shell:
 
-- `/api/v1/health`, `/docs`, `/redoc`, and `/openapi.json` remain available
-- all other routes return `503` until you either set `C3AE_API_TOKEN` or explicitly opt into local unauthenticated mode with `C3AE_AUTH_DISABLED=1`
+```bash
+curl http://127.0.0.1:8420/api/v1/health
+
+curl -X POST http://127.0.0.1:8420/api/v1/memory/augment \
+  -H "Content-Type: application/json" \
+  -d '{"query":"sanity check","top_k":3,"format":"xml"}'
+```
+
+### OpenClaw install
+
+```bash
+./scripts/install-openclaw.sh
+novaspine doctor
+openclaw config validate
+```
 
 ### Query the memory graph
 ```bash
@@ -316,10 +382,13 @@ See [`examples/memory_manager.env.example`](examples/memory_manager.env.example)
 ```bash
 docker build -t novaspine:latest .
 docker run --rm -p 8420:8420 \
+  -e C3AE_AUTH_DISABLED=1 \
   -e C3AE_EMBEDDING_PROVIDER=venice \
   -e VENICE_API_KEY=your-key \
   novaspine:latest
 ```
+
+For a first local Docker run, `C3AE_AUTH_DISABLED=1` is the simplest path. For any shared or remote deployment, replace that with `C3AE_API_TOKEN=...` and use Bearer auth.
 
 ## Benchmarks
 
