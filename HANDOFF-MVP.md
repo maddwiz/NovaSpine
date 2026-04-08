@@ -590,8 +590,8 @@ sentence-transformers>=2.2  # Local embeddings
 
 ```bash
 # Clone
-git clone https://github.com/maddwiz/Nova-v1.git
-cd Nova-v1
+git clone https://github.com/maddwiz/NovaSpine.git
+cd NovaSpine
 
 # Setup
 python3 -m venv .venv

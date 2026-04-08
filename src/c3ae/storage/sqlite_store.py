@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -392,6 +393,7 @@ class SQLiteStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False,
                                      timeout=30.0)
+        self._write_lock = threading.Lock()
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -401,15 +403,16 @@ class SQLiteStore:
     def _commit(self, retries: int = 3) -> None:
         """Commit with retry on database-locked errors."""
         import time as _time
-        for attempt in range(retries):
-            try:
-                self._conn.commit()
-                return
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e) and attempt < retries - 1:
-                    _time.sleep(1.0 * (attempt + 1))
-                    continue
-                raise
+        with self._write_lock:
+            for attempt in range(retries):
+                try:
+                    self._conn.commit()
+                    return
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e) and attempt < retries - 1:
+                        _time.sleep(0.1 * (2 ** attempt))
+                        continue
+                    raise
 
     def _init_schema(self) -> None:
         import time as _time

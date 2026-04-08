@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import hashlib
+import logging
 import re
 from datetime import timedelta
 from pathlib import Path
@@ -46,6 +47,12 @@ from c3ae.utils import (
     parse_json_object,
     utcnow,
 )
+
+
+logger = logging.getLogger(__name__)
+
+# Maximum number of candidates fetched during recall/augment over-fetch passes.
+_RECALL_OVERFETCH_CAP = 200
 
 
 class MemorySpine:
@@ -287,6 +294,11 @@ class MemorySpine:
         try:
             query_vec = await self._embed_text(query)
         except Exception:
+            logger.warning(
+                "Embedding failed for query, falling back to keyword-only: %s",
+                query,
+                exc_info=True,
+            )
             pass  # Fall back to keyword-only
 
         benchmark_case_query = bool(self._extract_benchmark_case_token(query))
@@ -339,7 +351,10 @@ class MemorySpine:
         session_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Stable protocol method returning normalized recall rows."""
-        results = await self.search(query, top_k=max(top_k * 2, top_k))
+        results = await self.search(
+            query,
+            top_k=min(max(top_k * 2, top_k), _RECALL_OVERFETCH_CAP),
+        )
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         for r in results:
@@ -403,7 +418,10 @@ class MemorySpine:
     ) -> str:
         """Stable protocol method producing pre-formatted memory context."""
         allowed_roles = set(roles or ["user", "assistant"])
-        recalled = await self.recall(query, top_k=max(top_k * 10, top_k))
+        recalled = await self.recall(
+            query,
+            top_k=min(max(top_k * 10, top_k), _RECALL_OVERFETCH_CAP),
+        )
         selected: list[dict[str, Any]] = []
         for row in recalled:
             meta = row.get("metadata") or {}
@@ -1240,10 +1258,15 @@ class MemorySpine:
                 "edges": self.sqlite.count_edges(active_only=True),
             }
         except Exception:
+            logger.warning("Could not fetch graph stats for status endpoint", exc_info=True)
             status["graph"] = {"entities": 0, "edges": 0}
         try:
             status["consolidated_memories"] = self.sqlite.count_consolidated_memories()
         except Exception:
+            logger.warning(
+                "Could not fetch consolidated_memories count for status endpoint",
+                exc_info=True,
+            )
             status["consolidated_memories"] = 0
         # Add compression stats if vault is CompressedVault
         if hasattr(self.vault, 'compression_stats'):
@@ -1289,6 +1312,11 @@ class MemorySpine:
         try:
             self.sqlite.increment_memory_access(ids)
         except Exception:
+            logger.warning(
+                "Failed to record memory access for %d ids",
+                len(ids),
+                exc_info=True,
+            )
             # Access tracking must never break retrieval paths.
             return
 
@@ -1319,7 +1347,7 @@ class MemorySpine:
     ) -> list[SearchResult]:
         if not graph_results:
             return memory_results[:top_k]
-        intent = self.hybrid_search._classify_intent(query)
+        intent = self.hybrid_search.classify_intent(query)
         mem_weight = 0.85
         graph_weight = float(self.config.retrieval.graph_weight)
         if intent in {"temporal"}:
@@ -1363,7 +1391,7 @@ class MemorySpine:
     ) -> list[SearchResult]:
         if not fact_results:
             return memory_results[:top_k]
-        intent = self.hybrid_search._classify_intent(query)
+        intent = self.hybrid_search.classify_intent(query)
         mem_weight = 0.85
         fact_weight = 0.20
         if intent in {"temporal", "entity_lookup"}:
@@ -1411,6 +1439,11 @@ class MemorySpine:
             )
             self._persist_structured_facts(chunk_id=chunk_id, facts=facts, metadata=metadata)
         except Exception:
+            logger.warning(
+                "Fact extraction failed for chunk %s, skipping",
+                chunk_id,
+                exc_info=True,
+            )
             # Fact extraction must never block ingestion.
             return
 
@@ -1435,6 +1468,11 @@ class MemorySpine:
             )
             self._persist_structured_facts(chunk_id=chunk_id, facts=facts, metadata=metadata)
         except Exception:
+            logger.warning(
+                "Async fact extraction failed for chunk %s, skipping",
+                chunk_id,
+                exc_info=True,
+            )
             return
 
     def _persist_structured_facts(
@@ -1463,31 +1501,50 @@ class MemorySpine:
                     },
                 )
             except Exception:
+                logger.warning(
+                    "Failed to persist fact for chunk %s, continuing",
+                    chunk_id,
+                    exc_info=True,
+                )
                 continue
 
-    def _get_fact_chat_backend(self):
-        if self._fact_chat is not None:
-            return self._fact_chat
-        provider = (self.config.ingestion.fact_llm_provider or "venice").strip().lower()
+    def _get_chat_backend(
+        self,
+        *,
+        provider: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> Any:
+        """Shared factory for LLM chat backends used by graph/fact/consolidation subsystems."""
+        import os
+
         kwargs: dict[str, Any] = {
-            "temperature": float(self.config.ingestion.fact_llm_temperature),
-            "max_tokens": int(self.config.ingestion.fact_llm_max_tokens),
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
         }
-        if self.config.ingestion.fact_llm_model:
-            kwargs["model"] = self.config.ingestion.fact_llm_model
+        if model:
+            kwargs["model"] = model
         if provider in {"venice", "default"}:
             kwargs.setdefault("api_key", self.config.venice.api_key)
             kwargs.setdefault("base_url", self.config.venice.base_url)
             kwargs.setdefault("timeout", self.config.venice.chat_timeout)
         elif provider == "openai":
-            import os
-
             kwargs.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
         elif provider == "anthropic":
-            import os
-
             kwargs.setdefault("api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
-        self._fact_chat = create_chat_backend(provider=provider, **kwargs)
+        return create_chat_backend(provider=provider, **kwargs)
+
+    def _get_fact_chat_backend(self):
+        if self._fact_chat is not None:
+            return self._fact_chat
+        provider = (self.config.ingestion.fact_llm_provider or "venice").strip().lower()
+        self._fact_chat = self._get_chat_backend(
+            provider=provider,
+            model=self.config.ingestion.fact_llm_model,
+            temperature=self.config.ingestion.fact_llm_temperature,
+            max_tokens=self.config.ingestion.fact_llm_max_tokens,
+        )
         return self._fact_chat
 
     def _index_graph_chunk(
@@ -1511,6 +1568,11 @@ class MemorySpine:
                 metadata=metadata,
             )
         except Exception:
+            logger.warning(
+                "Graph indexing failed for chunk %s, skipping",
+                chunk_id,
+                exc_info=True,
+            )
             # Graph indexing must never block memory ingest.
             return
 
@@ -1541,6 +1603,11 @@ class MemorySpine:
                 metadata=metadata,
             )
         except Exception:
+            logger.warning(
+                "Async graph indexing failed for chunk %s, skipping",
+                chunk_id,
+                exc_info=True,
+            )
             return
 
     def _apply_graph_extraction(
@@ -1620,50 +1687,24 @@ class MemorySpine:
         if self._graph_chat is not None:
             return self._graph_chat
         provider = (self.config.graph.llm_provider or "venice").strip().lower()
-        kwargs: dict[str, Any] = {
-            "temperature": float(self.config.graph.llm_temperature),
-            "max_tokens": int(self.config.graph.llm_max_tokens),
-        }
-        if self.config.graph.llm_model:
-            kwargs["model"] = self.config.graph.llm_model
-        if provider in {"venice", "default"}:
-            kwargs.setdefault("api_key", self.config.venice.api_key)
-            kwargs.setdefault("base_url", self.config.venice.base_url)
-            kwargs.setdefault("timeout", self.config.venice.chat_timeout)
-        elif provider == "openai":
-            import os
-
-            kwargs.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
-        elif provider == "anthropic":
-            import os
-
-            kwargs.setdefault("api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
-        self._graph_chat = create_chat_backend(provider=provider, **kwargs)
+        self._graph_chat = self._get_chat_backend(
+            provider=provider,
+            model=self.config.graph.llm_model,
+            temperature=self.config.graph.llm_temperature,
+            max_tokens=self.config.graph.llm_max_tokens,
+        )
         return self._graph_chat
 
     def _get_consolidation_chat_backend(self):
         if self._consolidation_chat is not None:
             return self._consolidation_chat
         provider = (self.config.consolidation.llm_provider or "venice").strip().lower()
-        kwargs: dict[str, Any] = {
-            "temperature": float(self.config.consolidation.llm_temperature),
-            "max_tokens": int(self.config.consolidation.llm_max_tokens),
-        }
-        if self.config.consolidation.llm_model:
-            kwargs["model"] = self.config.consolidation.llm_model
-        if provider in {"venice", "default"}:
-            kwargs.setdefault("api_key", self.config.venice.api_key)
-            kwargs.setdefault("base_url", self.config.venice.base_url)
-            kwargs.setdefault("timeout", self.config.venice.chat_timeout)
-        elif provider == "openai":
-            import os
-
-            kwargs.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
-        elif provider == "anthropic":
-            import os
-
-            kwargs.setdefault("api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
-        self._consolidation_chat = create_chat_backend(provider=provider, **kwargs)
+        self._consolidation_chat = self._get_chat_backend(
+            provider=provider,
+            model=self.config.consolidation.llm_model,
+            temperature=self.config.consolidation.llm_temperature,
+            max_tokens=self.config.consolidation.llm_max_tokens,
+        )
         return self._consolidation_chat
 
     def _cluster_key(self, chunks: list[Chunk], session_id: str | None = None) -> str:
@@ -1742,7 +1783,10 @@ class MemorySpine:
             if out:
                 return out, True
         except Exception:
-            pass
+            logger.warning(
+                "LLM fact extraction failed for cluster, using heuristic fallback",
+                exc_info=True,
+            )
         return heuristic, False
 
     def _summarize_cluster(self, chunks: list[Chunk], facts: list[str]) -> str:
@@ -1802,7 +1846,10 @@ class MemorySpine:
             if summary:
                 return summary, True
         except Exception:
-            pass
+            logger.warning(
+                "LLM cluster summarization failed, using heuristic fallback",
+                exc_info=True,
+            )
         return heuristic, False
 
     @staticmethod
@@ -1869,6 +1916,7 @@ class MemorySpine:
                 "compressed_size": int(stats.get("compressed_size", 0)),
             }
         except Exception:
+            logger.warning("Recompression preview failed", exc_info=True)
             return {"eligible_memories": len(rows), "compression_ratio": 0.0}
 
     def _dream_novelty_estimate(self, limit: int = 200) -> dict[str, Any]:
@@ -1910,6 +1958,11 @@ class MemorySpine:
                 for j, mi in enumerate(miss_indices):
                     results[mi] = new_vecs[j]
             except Exception:
+                logger.warning(
+                    "Embedding batch failed, skipping vector indexing for %d chunks",
+                    len(miss_texts),
+                    exc_info=True,
+                )
                 # If embedding fails, skip vector indexing
                 return
 

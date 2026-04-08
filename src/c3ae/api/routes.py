@@ -307,6 +307,17 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     # Bearer token auth middleware
     token = config.api.bearer_token
+    auth_disabled = config.api.auth_disabled
+
+    if not token and not auth_disabled:
+        import warnings
+
+        warnings.warn(
+            "C3AE_API_TOKEN is not set and C3AE_AUTH_DISABLED is not set. "
+            "The API is running UNAUTHENTICATED. Set C3AE_API_TOKEN or set "
+            "C3AE_AUTH_DISABLED=1 to silence this warning.",
+            stacklevel=2,
+        )
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -316,6 +327,11 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             auth = request.headers.get("Authorization", "")
             if not auth.startswith("Bearer ") or auth[7:] != token:
                 return ORJSONResponse({"detail": "Unauthorized"}, status_code=401)
+        elif not auth_disabled:
+            return ORJSONResponse(
+                {"detail": "API authentication not configured. Set C3AE_API_TOKEN."},
+                status_code=503,
+            )
         return await call_next(request)
 
     # --- Routes ---

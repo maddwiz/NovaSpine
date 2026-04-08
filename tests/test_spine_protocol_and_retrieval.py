@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from c3ae.config import Config, RetrievalConfig
 from c3ae.embeddings.backends import HashEmbedder, create_embedder
-from c3ae.memory_spine.spine import MemorySpine
+from c3ae.memory_spine.spine import MemorySpine, _RECALL_OVERFETCH_CAP
 from c3ae.retrieval.hybrid import HybridSearch
 from c3ae.types import SearchResult
 
@@ -305,6 +305,40 @@ def test_recall_dedupes_by_benchmark_doc_id(tmp_path):
             rows = await spine.recall("alpha", top_k=3)
             assert len(rows) == 2
             assert [r["metadata"]["benchmark_doc_id"] for r in rows] == ["doc-1", "doc-2"]
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_augment_overfetch_is_capped(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+
+        spine = MemorySpine(cfg)
+        try:
+            observed_top_k: list[int | None] = []
+
+            async def _fake_search(query: str, top_k: int | None = None) -> list[SearchResult]:
+                observed_top_k.append(top_k)
+                return [
+                    SearchResult(
+                        id="alpha",
+                        content="Alpha memory",
+                        score=0.9,
+                        source="test",
+                        metadata={"role": "assistant"},
+                    )
+                ]
+
+            spine.search = _fake_search  # type: ignore[method-assign]
+            context = await spine.augment("test", top_k=50, min_score=0.0)
+            assert context.startswith("<relevant-memories>")
+            assert observed_top_k
+            assert observed_top_k[0] == _RECALL_OVERFETCH_CAP
+            assert observed_top_k[0] <= _RECALL_OVERFETCH_CAP
         finally:
             await spine.close()
 

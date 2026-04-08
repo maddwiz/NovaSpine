@@ -220,6 +220,9 @@ class APIConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8420
     bearer_token: str = Field(default_factory=lambda: os.environ.get("C3AE_API_TOKEN", ""))
+    auth_disabled: bool = Field(
+        default_factory=lambda: os.environ.get("C3AE_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes"}
+    )
 
 
 class Config(BaseModel):

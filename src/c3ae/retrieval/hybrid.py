@@ -135,7 +135,7 @@ class HybridSearch:
             total = kw + vec
             return kw / total, vec / total
 
-        intent = self._classify_intent(query)
+        intent = self.classify_intent(query)
         if intent == "entity_lookup":
             kw *= 2.0
             vec *= 0.5
@@ -150,7 +150,7 @@ class HybridSearch:
         return kw / total, vec / total
 
     @staticmethod
-    def _classify_intent(query: str) -> str:
+    def classify_intent(query: str) -> str:
         q = query.strip().lower()
         temporal_terms = {
             "when", "before", "after", "timeline", "history", "previous",
