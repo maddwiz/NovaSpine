@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+include Dockerfile
+include .dockerignore
+recursive-include integrations *
+recursive-include packages *
+recursive-include scripts *.sh

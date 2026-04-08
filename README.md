@@ -1,6 +1,14 @@
-# NovaSpine — Long-Term Memory for LLM Agents
+# NovaSpine — Long-Term Memory and Cognition for LLM Agents
 
 Give any AI agent persistent memory with hybrid search (vector + keyword fusion). NovaSpine automatically stores, indexes, and retrieves relevant context from past conversations.
+
+NovaSpine now also ships the reusable OpenClaw-facing integration layer that we
+have been running live:
+
+- the core memory engine in `src/`
+- the OpenClaw memory and context plugins in `packages/openclaw-memory-plugin/` and `packages/openclaw-context-engine/`
+- the OpenClaw consciousness plugin in `packages/openclaw-consciousness/`
+- generic OpenClaw maintenance scripts in `integrations/openclaw/scripts/`
 
 ## Why NovaSpine?
 
@@ -46,6 +54,18 @@ curl -X POST localhost:8420/api/v1/memory/augment \
 
 Returns pre-formatted `<relevant-memories>` block ready for LLM context injection.
 
+## Authentication
+
+If `C3AE_API_TOKEN` is set, all endpoints except `/api/v1/health`, `/docs`, `/redoc`, and `/openapi.json` require Bearer auth:
+
+```bash
+export C3AE_API_TOKEN=your-secret-token
+curl -X POST localhost:8420/api/v1/memory/recall \
+  -H "Authorization: Bearer your-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"dark mode","top_k":5}'
+```
+
 ### Query the memory graph
 ```bash
 curl -X POST localhost:8420/api/v2/graph/query \
@@ -78,7 +98,6 @@ status = client.status()
 ```
 
 `/api/v1/*` remains the stable remote contract. Future additive methods are exposed under protocol `v2` without breaking `v1`.
-
 ## Architecture
 
 ```
@@ -149,6 +168,10 @@ results = spine.search_keyword("dark mode", top_k=5)
 # Environment variables
 C3AE_DATA_DIR=/path/to/data          # Database + index location
 C3AE_API_TOKEN=your-secret           # Bearer token for API auth
+C3AE_EMBEDDING_PROVIDER=venice       # venice|openai|ollama|local
+C3AE_EMBEDDING_MODEL=text-embedding-bge-m3
+C3AE_EMBEDDING_DIMENSIONS=1024
+C3AE_EMBEDDING_API_KEY=...           # for openai/venice (or use VENICE_API_KEY)
 VENICE_API_KEY=your-key              # Embedding provider API key
 
 # Memory write manager (runtime-tunable)
@@ -164,9 +187,25 @@ C3AE_MEMORY_MANAGER_MAX_TOKENS=256
 
 See [`examples/memory_manager.env.example`](examples/memory_manager.env.example) for a ready-to-copy profile.
 
+If you switch provider/model dimensions, rebuild vectors:
+
+```bash
+novaspine rebuild-index --provider openai
+```
+
+See [`examples/memory_manager.env.example`](examples/memory_manager.env.example) for a ready-to-copy profile.
+
 ## Also Includes: USC Compression Engine
 
-NovaSpine includes **USC (Unified State Codec)** — a cognitive compression engine that learns from repeated patterns across sessions. Compression ratios improve over time as the dictionary grows (3.7x → 6.1x across 64 sessions).
+## Docker
+
+```bash
+docker build -t novaspine:latest .
+docker run --rm -p 8420:8420 \
+  -e C3AE_EMBEDDING_PROVIDER=venice \
+  -e VENICE_API_KEY=your-key \
+  novaspine:latest
+```
 
 ## Benchmarks
 
@@ -292,12 +331,38 @@ Optional retrieval tuning presets:
 See [HANDOFF-MVP.md](HANDOFF-MVP.md) for detailed technical documentation, architecture guide, and MVP roadmap.
 
 ```bash
-git clone https://github.com/maddwiz/Nova-v1.git
-cd Nova-v1
+git clone https://github.com/maddwiz/NovaSpine.git
+cd NovaSpine
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+## Repo Layout
+
+```text
+src/                            Core NovaSpine engine
+packages/openclaw-memory-plugin OpenClaw memory slot plugin
+packages/openclaw-context-engine OpenClaw contextEngine plugin
+packages/openclaw-consciousness OpenClaw plugin for continuity/cognition
+integrations/openclaw/scripts/  Generic maintenance and ingestion scripts
+scripts/                        Core CLI/server helpers
+```
+
+## OpenClaw Install
+
+For a turnkey OpenClaw install from the repo:
+
+```bash
+./integrations/openclaw/install.sh
+```
+
+That copies the NovaSpine OpenClaw assets into a stable local install root,
+installs the three plugins, and patches `~/.openclaw/openclaw.json` safely when
+it exists.
+
+For repo boundaries and what is intentionally excluded, see
+`integrations/openclaw/README.md`.
 
 ## License
 

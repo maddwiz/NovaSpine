@@ -1,0 +1,20 @@
+{
+  "name": "novaspine-context",
+  "version": "0.1.0",
+  "description": "NovaSpine context engine for OpenClaw",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maddwiz/NovaSpine.git",
+    "directory": "packages/openclaw-context-engine"
+  },
+  "homepage": "https://github.com/maddwiz/NovaSpine#readme",
+  "bugs": {
+    "url": "https://github.com/maddwiz/NovaSpine/issues"
+  }
+}

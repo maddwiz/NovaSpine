@@ -1,0 +1,20 @@
+{
+  "name": "novaspine-memory",
+  "version": "0.1.0",
+  "description": "NovaSpine local-first memory plugin for OpenClaw",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maddwiz/NovaSpine.git",
+    "directory": "packages/openclaw-memory-plugin"
+  },
+  "homepage": "https://github.com/maddwiz/NovaSpine#readme",
+  "bugs": {
+    "url": "https://github.com/maddwiz/NovaSpine/issues"
+  }
+}
