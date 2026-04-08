@@ -174,6 +174,11 @@ curl -X POST localhost:8420/api/v1/memory/recall \
   -d '{"query":"dark mode","top_k":5}'
 ```
 
+If `C3AE_API_TOKEN` is not set and `C3AE_AUTH_DISABLED` is not set, NovaSpine fails closed:
+
+- `/api/v1/health`, `/docs`, `/redoc`, and `/openapi.json` remain available
+- all other routes return `503` until you either set `C3AE_API_TOKEN` or explicitly opt into local unauthenticated mode with `C3AE_AUTH_DISABLED=1`
+
 ### Query the memory graph
 ```bash
 curl -X POST localhost:8420/api/v2/graph/query \
@@ -276,11 +281,12 @@ results = spine.search_keyword("dark mode", top_k=5)
 # Environment variables
 C3AE_DATA_DIR=/path/to/data          # Database + index location
 C3AE_API_TOKEN=your-secret           # Bearer token for API auth
-C3AE_EMBEDDING_PROVIDER=venice       # venice|openai|ollama|local
-C3AE_EMBEDDING_MODEL=text-embedding-bge-m3
-C3AE_EMBEDDING_DIMENSIONS=1024
-C3AE_EMBEDDING_API_KEY=...           # for openai/venice (or use VENICE_API_KEY)
-VENICE_API_KEY=your-key              # Embedding provider API key
+C3AE_AUTH_DISABLED=0                 # set to 1 only for explicit local unauthenticated use
+C3AE_EMBEDDING_PROVIDER=venice       # preferred name; legacy: C3AE_EMBED_PROVIDER
+C3AE_EMBEDDING_MODEL=text-embedding-bge-m3      # legacy: C3AE_EMBED_MODEL
+C3AE_EMBEDDING_DIMENSIONS=1024                 # legacy: C3AE_EMBED_DIMS
+C3AE_EMBEDDING_API_KEY=...           # shared embedding API key alias for venice/openai
+VENICE_API_KEY=your-key              # legacy/provider-specific Venice key
 
 # Memory write manager (runtime-tunable)
 C3AE_MEMORY_MANAGER_ENABLED=1

@@ -217,6 +217,7 @@ def create_embedder(config: VeniceConfig | None = None) -> EmbeddingBackend:
         return VeniceEmbedder(cfg)
     if provider == "openai":
         return OpenAIEmbedder(
+            api_key=cfg.api_key or os.environ.get("OPENAI_API_KEY", ""),
             model=cfg.embedding_model,
             dims=cfg.embedding_dims,
         )

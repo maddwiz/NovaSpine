@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
-import faiss
 import numpy as np
+
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"builtin type SwigPyPacked has no __module__ attribute",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"builtin type SwigPyObject has no __module__ attribute",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"builtin type swigvarlink has no __module__ attribute",
+        category=DeprecationWarning,
+    )
+    import faiss
 
 from c3ae.exceptions import StorageError
 

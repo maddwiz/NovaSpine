@@ -148,7 +148,8 @@ def main() -> int:
     if not config_path.exists():
         raise SystemExit(f"OpenClaw config not found: {config_path}")
 
-    data = json.loads(config_path.read_text())
+    original_text = config_path.read_text()
+    data = json.loads(original_text)
     if not isinstance(data, dict):
         raise SystemExit("OpenClaw config must be a JSON object")
 
@@ -178,7 +179,7 @@ def main() -> int:
     if not args.no_backup:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         backup_path = config_path.with_name(f"{config_path.name}.bak.{stamp}")
-        backup_path.write_text(json.dumps(data, indent=2) + "\n")
+        backup_path.write_text(original_text)
 
     config_path.write_text(json.dumps(data, indent=2) + "\n")
 

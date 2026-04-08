@@ -126,7 +126,7 @@ def ingest(ctx: click.Context, path: str, source_id: str) -> None:
     """Ingest a file into memory."""
     spine = _get_spine(ctx.obj.get("data_dir"))
     file_path = Path(path)
-    chunk_ids = asyncio.run(spine.ingest_file(file_path))
+    chunk_ids = asyncio.run(spine.ingest_file(file_path, source_id=source_id))
     click.echo(f"Ingested {file_path.name}: {len(chunk_ids)} chunks indexed")
     spine.sqlite.close()
 

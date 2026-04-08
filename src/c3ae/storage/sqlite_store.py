@@ -393,39 +393,52 @@ class SQLiteStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False,
                                      timeout=30.0)
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
-    def _commit(self, retries: int = 3) -> None:
-        """Commit with retry on database-locked errors."""
+    def _commit_locked(self, retries: int = 3) -> None:
+        """Commit with retry on database-locked errors.
+
+        Caller must already hold ``self._write_lock``.
+        """
         import time as _time
+        for attempt in range(retries):
+            try:
+                self._conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) and attempt < retries - 1:
+                    _time.sleep(0.1 * (2 ** attempt))
+                    continue
+                raise
+
+    def _commit(self, retries: int = 3) -> None:
         with self._write_lock:
-            for attempt in range(retries):
-                try:
-                    self._conn.commit()
-                    return
-                except sqlite3.OperationalError as e:
-                    if "locked" in str(e) and attempt < retries - 1:
-                        _time.sleep(0.1 * (2 ** attempt))
-                        continue
-                    raise
+            self._commit_locked(retries)
+
+    def _execute_write(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        with self._write_lock:
+            cur = self._conn.execute(sql, params)
+            self._commit_locked()
+            return cur
 
     def _init_schema(self) -> None:
         import time as _time
         for attempt in range(5):
             try:
-                cur = self._conn.cursor()
-                cur.executescript(_SCHEMA)
-                cur.executescript(_FTS_TRIGGERS)
-                cur.execute(
-                    "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
-                    ("schema_version", str(SCHEMA_VERSION)),
-                )
-                self._conn.commit()
+                with self._write_lock:
+                    cur = self._conn.cursor()
+                    cur.executescript(_SCHEMA)
+                    cur.executescript(_FTS_TRIGGERS)
+                    cur.execute(
+                        "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
+                        ("schema_version", str(SCHEMA_VERSION)),
+                    )
+                    self._commit_locked()
                 return
             except sqlite3.OperationalError as e:
                 if "locked" in str(e) and attempt < 4:
@@ -439,28 +452,25 @@ class SQLiteStore:
     # --- Sessions ---
 
     def create_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> str:
-        self._conn.execute(
+        self._execute_write(
             "INSERT INTO sessions(id, started_at, metadata) VALUES (?, ?, ?)",
             (session_id, iso_str(utcnow()), json_dumps(metadata or {})),
         )
-        self._commit()
         return session_id
 
     def end_session(self, session_id: str) -> None:
-        self._conn.execute(
+        self._execute_write(
             "UPDATE sessions SET ended_at=? WHERE id=?",
             (iso_str(utcnow()), session_id),
         )
-        self._commit()
 
     # --- Chunks ---
 
     def insert_chunk(self, chunk: Chunk) -> str:
-        self._conn.execute(
+        self._execute_write(
             "INSERT INTO chunks(id, source_id, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
             (chunk.id, chunk.source_id, chunk.content, json_dumps(chunk.metadata), iso_str(chunk.created_at)),
         )
-        self._commit()
         return chunk.id
 
     def get_chunk(self, chunk_id: str) -> Chunk | None:
@@ -478,8 +488,7 @@ class SQLiteStore:
         return row[0] if row else None
 
     def delete_chunk(self, chunk_id: str) -> bool:
-        cur = self._conn.execute("DELETE FROM chunks WHERE id=?", (chunk_id,))
-        self._commit()
+        cur = self._execute_write("DELETE FROM chunks WHERE id=?", (chunk_id,))
         return cur.rowcount > 0
 
     def search_chunks_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
@@ -604,46 +613,53 @@ class SQLiteStore:
         now = iso_str(utcnow())
 
         # Upsert-by-content for idempotent re-ingestion.
-        row = self._conn.execute(
-            """SELECT id FROM structured_facts
-               WHERE source_chunk_id=? AND entity=? AND relation=? AND value=? AND fact_date=?""",
-            (source_chunk_id, entity_clean, relation_clean, value_clean, fact_date.strip()),
-        ).fetchone()
-        if row:
-            fact_id = str(row["id"])
-            self._conn.execute(
-                """UPDATE structured_facts
-                   SET confidence=?, metadata=?, created_at=?
-                   WHERE id=?""",
+        with self._write_lock:
+            row = self._conn.execute(
+                """SELECT id FROM structured_facts
+                   WHERE source_chunk_id=? AND entity=? AND relation=? AND value=? AND fact_date=?""",
                 (
+                    source_chunk_id,
+                    entity_clean,
+                    relation_clean,
+                    value_clean,
+                    fact_date.strip(),
+                ),
+            ).fetchone()
+            if row:
+                fact_id = str(row["id"])
+                self._conn.execute(
+                    """UPDATE structured_facts
+                       SET confidence=?, metadata=?, created_at=?
+                       WHERE id=?""",
+                    (
+                        float(confidence),
+                        json_dumps(metadata or {}),
+                        now,
+                        fact_id,
+                    ),
+                )
+                self._commit_locked()
+                return fact_id
+
+            fact_id = uuid4().hex
+            self._conn.execute(
+                """INSERT INTO structured_facts(
+                    id, source_chunk_id, entity, relation, value, fact_date, confidence, metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    fact_id,
+                    source_chunk_id,
+                    entity_clean,
+                    relation_clean,
+                    value_clean,
+                    fact_date.strip(),
                     float(confidence),
                     json_dumps(metadata or {}),
                     now,
-                    fact_id,
                 ),
             )
-            self._commit()
+            self._commit_locked()
             return fact_id
-
-        fact_id = uuid4().hex
-        self._conn.execute(
-            """INSERT INTO structured_facts(
-                id, source_chunk_id, entity, relation, value, fact_date, confidence, metadata, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                fact_id,
-                source_chunk_id,
-                entity_clean,
-                relation_clean,
-                value_clean,
-                fact_date.strip(),
-                float(confidence),
-                json_dumps(metadata or {}),
-                now,
-            ),
-        )
-        self._commit()
-        return fact_id
 
     def list_structured_facts(
         self,
@@ -731,7 +747,7 @@ class SQLiteStore:
     # --- Reasoning Bank ---
 
     def insert_reasoning_entry(self, entry: ReasoningEntry) -> str:
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO reasoning_bank(id, title, content, tags, evidence_ids,
                status, superseded_by, session_id, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -742,7 +758,6 @@ class SQLiteStore:
                 json_dumps(entry.metadata), iso_str(entry.created_at),
             ),
         )
-        self._commit()
         return entry.id
 
     def get_reasoning_entry(self, entry_id: str) -> ReasoningEntry | None:
@@ -752,11 +767,30 @@ class SQLiteStore:
         return self._row_to_reasoning_entry(row)
 
     def supersede_reasoning_entry(self, old_id: str, new_entry: ReasoningEntry) -> str:
-        self._conn.execute(
-            "UPDATE reasoning_bank SET status='superseded', superseded_by=? WHERE id=?",
-            (new_entry.id, old_id),
-        )
-        return self.insert_reasoning_entry(new_entry)
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE reasoning_bank SET status='superseded', superseded_by=? WHERE id=?",
+                (new_entry.id, old_id),
+            )
+            self._conn.execute(
+                """INSERT INTO reasoning_bank(id, title, content, tags, evidence_ids,
+                   status, superseded_by, session_id, metadata, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    new_entry.id,
+                    new_entry.title,
+                    new_entry.content,
+                    json_dumps(new_entry.tags),
+                    json_dumps(new_entry.evidence_ids),
+                    new_entry.status.value,
+                    new_entry.superseded_by,
+                    new_entry.session_id,
+                    json_dumps(new_entry.metadata),
+                    iso_str(new_entry.created_at),
+                ),
+            )
+            self._commit_locked()
+            return new_entry.id
 
     def list_reasoning_entries(self, status: str = "active", limit: int = 100) -> list[ReasoningEntry]:
         rows = self._conn.execute(
@@ -796,7 +830,7 @@ class SQLiteStore:
     # --- Evidence Packs ---
 
     def insert_evidence_pack(self, pack: EvidencePack) -> str:
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO evidence_packs(id, claim, sources, confidence, reasoning, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
@@ -805,7 +839,6 @@ class SQLiteStore:
                 json_dumps(pack.metadata), iso_str(pack.created_at),
             ),
         )
-        self._commit()
         return pack.id
 
     def get_evidence_pack(self, pack_id: str) -> EvidencePack | None:
@@ -825,7 +858,7 @@ class SQLiteStore:
     # --- COS ---
 
     def insert_cos(self, cos: CarryOverSummary) -> str:
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO cos(id, session_id, sequence, summary, key_facts, open_questions, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
@@ -834,7 +867,6 @@ class SQLiteStore:
                 json_dumps(cos.metadata), iso_str(cos.created_at),
             ),
         )
-        self._commit()
         return cos.id
 
     def get_latest_cos(self, session_id: str) -> CarryOverSummary | None:
@@ -856,7 +888,7 @@ class SQLiteStore:
     # --- Skill Capsules ---
 
     def insert_skill_capsule(self, capsule: SkillCapsule) -> str:
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO skill_capsules(id, name, description, procedure, tags, version, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
@@ -865,7 +897,6 @@ class SQLiteStore:
                 json_dumps(capsule.metadata), iso_str(capsule.created_at),
             ),
         )
-        self._commit()
         return capsule.id
 
     def get_skill_capsule(self, capsule_id: str) -> SkillCapsule | None:
@@ -914,45 +945,46 @@ class SQLiteStore:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         now = iso_str(utcnow())
-        row = self._conn.execute(
-            "SELECT id FROM consolidated_memories WHERE cluster_key=?",
-            (cluster_key,),
-        ).fetchone()
-        if row:
-            memory_id = str(row["id"])
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT id FROM consolidated_memories WHERE cluster_key=?",
+                (cluster_key,),
+            ).fetchone()
+            if row:
+                memory_id = str(row["id"])
+                self._conn.execute(
+                    """UPDATE consolidated_memories
+                       SET summary=?, facts=?, source_chunk_ids=?, metadata=?, updated_at=?
+                       WHERE id=?""",
+                    (
+                        summary,
+                        json_dumps(facts),
+                        json_dumps(source_chunk_ids),
+                        json_dumps(metadata or {}),
+                        now,
+                        memory_id,
+                    ),
+                )
+                self._commit_locked()
+                return memory_id
+            memory_id = uuid4().hex
             self._conn.execute(
-                """UPDATE consolidated_memories
-                   SET summary=?, facts=?, source_chunk_ids=?, metadata=?, updated_at=?
-                   WHERE id=?""",
+                """INSERT INTO consolidated_memories(
+                    id, cluster_key, summary, facts, source_chunk_ids, metadata, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    memory_id,
+                    cluster_key,
                     summary,
                     json_dumps(facts),
                     json_dumps(source_chunk_ids),
                     json_dumps(metadata or {}),
                     now,
-                    memory_id,
+                    now,
                 ),
             )
-            self._commit()
+            self._commit_locked()
             return memory_id
-        memory_id = uuid4().hex
-        self._conn.execute(
-            """INSERT INTO consolidated_memories(
-                id, cluster_key, summary, facts, source_chunk_ids, metadata, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                memory_id,
-                cluster_key,
-                summary,
-                json_dumps(facts),
-                json_dumps(source_chunk_ids),
-                json_dumps(metadata or {}),
-                now,
-                now,
-            ),
-        )
-        self._commit()
-        return memory_id
 
     def search_consolidated_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
         fts_query = _sanitize_fts_query(query)
@@ -1024,37 +1056,38 @@ class SQLiteStore:
         if not normalized:
             raise ValueError("Entity name cannot be empty")
         now = iso_str(utcnow())
-        row = self._conn.execute(
-            "SELECT id, metadata FROM entities WHERE normalized_name=?",
-            (normalized,),
-        ).fetchone()
-        if row:
-            entity_id = str(row["id"])
-            current_meta = json_loads(row["metadata"])
-            merged_meta = {**current_meta, **(metadata or {})}
-            self._conn.execute(
-                "UPDATE entities SET name=?, entity_type=?, metadata=?, updated_at=? WHERE id=?",
-                (name.strip(), entity_type, json_dumps(merged_meta), now, entity_id),
-            )
-            self._commit()
-            return entity_id
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT id, metadata FROM entities WHERE normalized_name=?",
+                (normalized,),
+            ).fetchone()
+            if row:
+                entity_id = str(row["id"])
+                current_meta = json_loads(row["metadata"])
+                merged_meta = {**current_meta, **(metadata or {})}
+                self._conn.execute(
+                    "UPDATE entities SET name=?, entity_type=?, metadata=?, updated_at=? WHERE id=?",
+                    (name.strip(), entity_type, json_dumps(merged_meta), now, entity_id),
+                )
+                self._commit_locked()
+                return entity_id
 
-        entity_id = uuid4().hex
-        self._conn.execute(
-            """INSERT INTO entities(id, name, normalized_name, entity_type, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                entity_id,
-                name.strip(),
-                normalized,
-                entity_type,
-                json_dumps(metadata or {}),
-                now,
-                now,
-            ),
-        )
-        self._commit()
-        return entity_id
+            entity_id = uuid4().hex
+            self._conn.execute(
+                """INSERT INTO entities(id, name, normalized_name, entity_type, metadata, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entity_id,
+                    name.strip(),
+                    normalized,
+                    entity_type,
+                    json_dumps(metadata or {}),
+                    now,
+                    now,
+                ),
+            )
+            self._commit_locked()
+            return entity_id
 
     def get_entity_by_name(self, name: str) -> dict[str, Any] | None:
         normalized = _normalize_entity_name(name)
@@ -1105,12 +1138,11 @@ class SQLiteStore:
 
     def add_entity_mention(self, entity_id: str, chunk_id: str, confidence: float = 0.5) -> str:
         mention_id = uuid4().hex
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO entity_mentions(id, entity_id, chunk_id, confidence, created_at)
                VALUES (?, ?, ?, ?, ?)""",
             (mention_id, entity_id, chunk_id, float(confidence), iso_str(utcnow())),
         )
-        self._commit()
         return mention_id
 
     def get_entities_for_chunk_ids(self, chunk_ids: list[str]) -> dict[str, set[str]]:
@@ -1145,33 +1177,34 @@ class SQLiteStore:
     ) -> str:
         now = iso_str(utcnow())
         relation_norm = relation.strip().lower().replace(" ", "_")
-        if invalidate_existing_relation:
+        with self._write_lock:
+            if invalidate_existing_relation:
+                self._conn.execute(
+                    """UPDATE edges
+                       SET status='inactive', valid_to=?
+                       WHERE src_entity_id=? AND relation=? AND status='active' AND dst_entity_id != ?""",
+                    (now, src_entity_id, relation_norm, dst_entity_id),
+                )
+            edge_id = uuid4().hex
             self._conn.execute(
-                """UPDATE edges
-                   SET status='inactive', valid_to=?
-                   WHERE src_entity_id=? AND relation=? AND status='active' AND dst_entity_id != ?""",
-                (now, src_entity_id, relation_norm, dst_entity_id),
+                """INSERT INTO edges(
+                    id, src_entity_id, relation, dst_entity_id, source_chunk_id,
+                    valid_from, valid_to, confidence, status, metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?)""",
+                (
+                    edge_id,
+                    src_entity_id,
+                    relation_norm,
+                    dst_entity_id,
+                    source_chunk_id,
+                    now,
+                    float(confidence),
+                    json_dumps(metadata or {}),
+                    now,
+                ),
             )
-        edge_id = uuid4().hex
-        self._conn.execute(
-            """INSERT INTO edges(
-                id, src_entity_id, relation, dst_entity_id, source_chunk_id,
-                valid_from, valid_to, confidence, status, metadata, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?)""",
-            (
-                edge_id,
-                src_entity_id,
-                relation_norm,
-                dst_entity_id,
-                source_chunk_id,
-                now,
-                float(confidence),
-                json_dumps(metadata or {}),
-                now,
-            ),
-        )
-        self._commit()
-        return edge_id
+            self._commit_locked()
+            return edge_id
 
     def query_graph(self, entity: str, depth: int = 2, limit: int = 200) -> dict[str, Any]:
         seed = self.get_entity_by_name(entity)
@@ -1345,7 +1378,7 @@ class SQLiteStore:
     # --- Audit Log ---
 
     def insert_audit_event(self, event: AuditEvent) -> str:
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO audit_log(id, action, target_type, target_id, detail, outcome, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
@@ -1353,7 +1386,6 @@ class SQLiteStore:
                 event.detail, event.outcome, iso_str(event.created_at),
             ),
         )
-        self._commit()
         return event.id
 
     def list_audit_events(self, limit: int = 100, target_type: str | None = None) -> list[AuditEvent]:
@@ -1381,16 +1413,17 @@ class SQLiteStore:
         if not memory_ids:
             return
         ts = iso_str(utcnow())
-        for memory_id in memory_ids:
-            self._conn.execute(
-                """INSERT INTO memory_access(memory_id, access_count, last_accessed)
-                   VALUES (?, 1, ?)
-                   ON CONFLICT(memory_id) DO UPDATE SET
-                     access_count = access_count + 1,
-                     last_accessed = excluded.last_accessed""",
-                (memory_id, ts),
-            )
-        self._commit()
+        with self._write_lock:
+            for memory_id in memory_ids:
+                self._conn.execute(
+                    """INSERT INTO memory_access(memory_id, access_count, last_accessed)
+                       VALUES (?, 1, ?)
+                       ON CONFLICT(memory_id) DO UPDATE SET
+                         access_count = access_count + 1,
+                         last_accessed = excluded.last_accessed""",
+                    (memory_id, ts),
+                )
+            self._commit_locked()
 
     def get_memory_access_count(self, memory_id: str) -> int:
         row = self._conn.execute(
@@ -1418,23 +1451,21 @@ class SQLiteStore:
         return row["embedding"] if row else None
 
     def cache_embedding(self, text_hash: str, embedding: bytes, model: str) -> None:
-        self._conn.execute(
+        self._execute_write(
             "INSERT OR REPLACE INTO embedding_cache(text_hash, embedding, model, created_at) VALUES (?, ?, ?, ?)",
             (text_hash, embedding, model, iso_str(utcnow())),
         )
-        self._commit()
 
     # --- Files ---
 
     def insert_file(self, file_id: str, path: str, content_hash: str,
                     size_bytes: int, mime_type: str, metadata: dict[str, Any] | None = None) -> str:
-        self._conn.execute(
+        self._execute_write(
             """INSERT INTO files(id, path, content_hash, size_bytes, mime_type, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (file_id, path, content_hash, size_bytes, mime_type,
              json_dumps(metadata or {}), iso_str(utcnow())),
         )
-        self._commit()
         return file_id
 
     def get_file_by_path(self, path: str) -> dict[str, Any] | None:

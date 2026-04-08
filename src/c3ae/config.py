@@ -3,13 +3,30 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 
 def _default_data_dir() -> Path:
-    return Path(os.environ.get("C3AE_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+    configured = os.environ.get("C3AE_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "NovaSpine"
+
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA", "").strip() or os.environ.get("APPDATA", "").strip()
+        if root:
+            return Path(root).expanduser() / "NovaSpine"
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg_data_home:
+        return Path(xdg_data_home).expanduser() / "novaspine"
+
+    return Path.home() / ".local" / "share" / "novaspine"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -52,12 +69,55 @@ def _env_str(name: str, default: str) -> str:
     return val if val else default
 
 
+def _env_any_str(names: tuple[str, ...], default: str) -> str:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        val = raw.strip()
+        if val:
+            return val
+    return default
+
+
+def _env_any_int(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return default
+
+
 class VeniceConfig(BaseModel):
-    embedding_provider: str = Field(default_factory=lambda: os.environ.get("C3AE_EMBED_PROVIDER", "venice"))
-    api_key: str = Field(default_factory=lambda: os.environ.get("VENICE_API_KEY", ""))
+    embedding_provider: str = Field(
+        default_factory=lambda: _env_any_str(
+            ("C3AE_EMBEDDING_PROVIDER", "C3AE_EMBED_PROVIDER"),
+            "venice",
+        )
+    )
+    api_key: str = Field(
+        default_factory=lambda: _env_any_str(
+            ("C3AE_EMBEDDING_API_KEY", "VENICE_API_KEY"),
+            "",
+        )
+    )
     base_url: str = "https://api.venice.ai/api/v1"
-    embedding_model: str = "text-embedding-bge-m3"
-    embedding_dims: int = 1024
+    embedding_model: str = Field(
+        default_factory=lambda: _env_any_str(
+            ("C3AE_EMBEDDING_MODEL", "C3AE_EMBED_MODEL"),
+            "text-embedding-bge-m3",
+        )
+    )
+    embedding_dims: int = Field(
+        default_factory=lambda: _env_any_int(
+            ("C3AE_EMBEDDING_DIMENSIONS", "C3AE_EMBED_DIMS"),
+            1024,
+        )
+    )
     chat_model: str = "qwen3-235b-a22b-instruct-2507"
     timeout: float = 30.0
     chat_timeout: float = 120.0

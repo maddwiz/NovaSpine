@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from c3ae.config import Config
 from c3ae.memory_spine.spine import MemorySpine
+
+
+AUTH_EXEMPT_PATHS = ("/api/v1/health", "/docs", "/redoc", "/openapi.json")
 
 
 # --- Request/Response Models ---
@@ -302,7 +306,6 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     app = FastAPI(
         title="C3/Ae Memory API",
         version="0.3.0",
-        default_response_class=ORJSONResponse,
     )
 
     # Bearer token auth middleware
@@ -314,21 +317,22 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
         warnings.warn(
             "C3AE_API_TOKEN is not set and C3AE_AUTH_DISABLED is not set. "
-            "The API is running UNAUTHENTICATED. Set C3AE_API_TOKEN or set "
-            "C3AE_AUTH_DISABLED=1 to silence this warning.",
+            "Non-health and non-docs API routes will return 503 until authentication "
+            "is configured. Set C3AE_API_TOKEN, or set C3AE_AUTH_DISABLED=1 for "
+            "explicit local unauthenticated access.",
             stacklevel=2,
         )
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        if request.url.path in ("/api/v1/health", "/docs", "/openapi.json"):
+        if request.url.path in AUTH_EXEMPT_PATHS:
             return await call_next(request)
         if token:
             auth = request.headers.get("Authorization", "")
             if not auth.startswith("Bearer ") or auth[7:] != token:
-                return ORJSONResponse({"detail": "Unauthorized"}, status_code=401)
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         elif not auth_disabled:
-            return ORJSONResponse(
+            return JSONResponse(
                 {"detail": "API authentication not configured. Set C3AE_API_TOKEN."},
                 status_code=503,
             )
@@ -363,7 +367,6 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.post("/api/v1/memory/ingest", response_model=IngestResponse)
     async def memory_ingest(req: IngestRequest, spine: MemorySpine = Depends(get_spine)):
-        import time as _time
         last_err = None
         for attempt in range(3):
             try:
@@ -372,7 +375,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             except Exception as e:
                 last_err = e
                 if "locked" in str(e) and attempt < 2:
-                    _time.sleep(1.0 * (attempt + 1))
+                    await asyncio.sleep(1.0 * (attempt + 1))
                     continue
                 raise
         raise last_err  # type: ignore[misc]

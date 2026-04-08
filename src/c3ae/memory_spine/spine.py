@@ -7,6 +7,7 @@ import inspect
 import hashlib
 import logging
 import re
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -239,6 +240,8 @@ class MemorySpine:
         roles: dict[str, int] = {}
         skipped: dict[str, int] = {}
         total_ingested = 0
+        chunk_ids: list[str] = []
+        chunk_texts: list[str] = []
 
         for sc in session_chunks:
             if sc.role not in _INGEST_ROLES:
@@ -258,7 +261,12 @@ class MemorySpine:
             self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
             self._index_structured_facts(chunk.id, chunk.content, chunk.metadata)
             total_ingested += 1
+            chunk_ids.append(chunk.id)
+            chunk_texts.append(chunk.content)
             roles[sc.role] = roles.get(sc.role, 0) + 1
+
+        if chunk_ids:
+            self._run_async_sync(self._embed_and_index(chunk_ids, chunk_texts))
 
         self.audit.log_write("session_ingest", session_id,
                              f"ingested {total_ingested} chunks from {session_path.name}"
@@ -271,7 +279,12 @@ class MemorySpine:
             "skipped": skipped,
         }
 
-    async def ingest_file(self, file_path: Path, metadata: dict[str, Any] | None = None) -> list[str]:
+    async def ingest_file(
+        self,
+        file_path: Path,
+        metadata: dict[str, Any] | None = None,
+        source_id: str = "",
+    ) -> list[str]:
         """Ingest a file from disk."""
         data = file_path.read_bytes()
         text = data.decode("utf-8", errors="replace")
@@ -281,7 +294,11 @@ class MemorySpine:
             content_hash, str(file_path), content_hash, len(data),
             "", metadata,
         )
-        return await self.ingest_text(text, source_id=content_hash, metadata=metadata)
+        return await self.ingest_text(
+            text,
+            source_id=source_id or content_hash,
+            metadata=metadata,
+        )
 
     # --- Search ---
 
@@ -1974,6 +1991,29 @@ class MemorySpine:
         # Save FAISS index
         if self.config.faiss_dir:
             self.faiss.save()
+
+    @staticmethod
+    def _run_async_sync(coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result: dict[str, Any] = {}
+        error: dict[str, BaseException] = {}
+
+        def _runner() -> None:
+            try:
+                result["value"] = asyncio.run(coro)
+            except BaseException as exc:  # pragma: no cover - defensive passthrough
+                error["exc"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+        if "exc" in error:
+            raise error["exc"]
+        return result.get("value")
 
     async def close(self) -> None:
         await self.write_manager.close()
