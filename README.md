@@ -1,35 +1,89 @@
-# NovaSpine — Long-Term Memory and Cognition for LLM Agents
+# NovaSpine — Long-Term Memory and Cognition for AI Agents
 
-Give any AI agent persistent memory with hybrid search (vector + keyword fusion). NovaSpine automatically stores, indexes, and retrieves relevant context from past conversations.
+NovaSpine is a memory and cognition stack for agent builders. It gives an AI agent durable recall, structured facts, consolidation, dreaming, and optional OpenClaw consciousness/continuity without forcing you into one app or one model provider.
 
-NovaSpine now also ships the reusable OpenClaw-facing integration layer that we
-have been running live:
+You can use it in two ways:
 
-- the core memory engine in `src/`
-- the OpenClaw memory and context plugins in `packages/openclaw-memory-plugin/` and `packages/openclaw-context-engine/`
-- the OpenClaw consciousness plugin in `packages/openclaw-consciousness/`
-- generic OpenClaw maintenance scripts in `integrations/openclaw/scripts/`
+- **Standalone memory engine** for any agent framework via Python or the HTTP API
+- **Turnkey OpenClaw integration** with one install step for memory, context, and consciousness plugins
 
-## Why NovaSpine?
+## What You Get
 
-Most LLM memory solutions use only vector search. NovaSpine combines **FAISS vector search** with **SQLite FTS5 keyword search** via **Reciprocal Rank Fusion** — catching both semantic similarity AND exact keyword matches.
+- **Hybrid memory retrieval**: FAISS vector search + SQLite FTS5 keyword search + RRF fusion
+- **LLM-ready context injection**: `/augment` returns clean memory blocks ready for prompts
+- **Structured memory**: entities, facts, graph edges, reasoning bank, and skill capsules
+- **Consolidation + dreams**: episodic memories can be compressed into more durable semantic memory
+- **OpenClaw stack included**: memory plugin, context engine, consciousness plugin, maintenance scripts, and config patcher
+- **Benchmark tooling included**: official-source prep, retrieval benchmarks, and end-to-end QA harnesses
 
-| Feature | NovaSpine | Vector-only (Mem0, etc.) |
-|---------|-----------|--------------------------|
-| "Find messages about Desmond" | Keyword match + semantic | May miss if embedding is weak |
-| "What did we discuss about auth?" | Semantic match + keyword boost | Works, but no keyword boost |
-| Pre-formatted LLM injection | `/augment` endpoint | DIY formatting |
-| Role filtering | Built-in (user/assistant only) | Manual |
-| Content deduplication | Built-in | Manual |
-| Temporal memory graph | Built-in (SQLite graph tables) | Usually external add-on |
-| Episodic→semantic consolidation | Built-in | Rarely included |
+## Install
 
-## Quick Start
+### Any agent framework
 
 ```bash
 pip install novaspine
-novaspine serve  # starts API on :8420
+novaspine serve
 ```
+
+### OpenClaw users
+
+```bash
+./scripts/install-openclaw.sh
+novaspine doctor
+```
+
+That install path copies the reusable integration layer, installs the NovaSpine plugins when `openclaw` is available, patches `openclaw.json`, and gives you a `novaspine doctor` check to verify the wiring.
+
+## Benchmark Highlights
+
+These are the strongest benchmark results already checked into `bench/results/` and summarized from official-source runs.
+
+### Retrieval
+
+| Benchmark | Best verified profile | Top-line result |
+|---|---|---:|
+| LongMemEval | `official_longmemeval_retrieval_hash_keywordplus_20260302_r29` | `doc_hit 1.000` |
+| LoCoMo-MC10 | `official_locomo_retrieval_hash_keywordplus_k15_20260302_r29` | `doc_hit 0.937` |
+| DMR-500 | `official_dmr_retrieval_sbert_variants_20260302_r29` | `doc_hit 0.848` |
+
+### End-to-End QA
+
+| Benchmark | Best verified profile | doc_hit | EM | F1 |
+|---|---|---:|---:|---:|
+| LongMemEval | `official_longmemeval_qa_openai_20260228_r9` | `1.000` | `0.304` | `0.367` |
+| LoCoMo-MC10 quality | `official_locomo_qa_openai_20260228_r6_mini` | `0.860` | `0.455` | `0.484` |
+| LoCoMo-MC10 high recall | `official_locomo_qa_openai_20260228_r9_k15_lexctx` | `0.944` | `0.448` | `0.458` |
+| DMR-500 | `official_dmr_qa_openai_20260301_r16_large_legacy` | `0.950` | `0.628` | `0.632` |
+
+Artifact summaries:
+
+- `bench/results/official_benchmark_summary.md`
+- `bench/results/official_qa_summary_20260228_openai_tuned.md`
+
+## NovaSpine Stack
+
+NovaSpine now ships as one reusable stack instead of “just the old memory engine”:
+
+- `src/`: core memory engine, retrieval, graph, facts, consolidation, and dream paths
+- `packages/openclaw-memory-plugin/`: OpenClaw memory capture and recall
+- `packages/openclaw-context-engine/`: OpenClaw prompt-context injection
+- `packages/openclaw-consciousness/`: continuity, low-noise cognition, goals, decisions, and thread resume hooks
+- `integrations/openclaw/scripts/`: maintenance, sync, pruning, writeback, and dream runners
+
+## Why NovaSpine?
+
+Most memory layers stop at “vector DB + semantic search.” NovaSpine is designed as a fuller cognitive stack:
+
+| Capability | NovaSpine | Typical vector-only memory |
+|---|---|---|
+| Exact keyword + semantic recall | Yes | Usually semantic only |
+| Structured facts + graph | Yes | Often absent |
+| Consolidation + dream passes | Yes | Rare |
+| Prompt-ready augmentation | Built in | Usually manual |
+| OpenClaw turnkey integration | Built in | Usually custom glue |
+| Consciousness/continuity layer | Available | Rare |
+
+## Quick Start
 
 ### Store a memory
 ```bash
