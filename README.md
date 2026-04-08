@@ -34,6 +34,25 @@ novaspine doctor
 
 That install path copies the reusable integration layer, installs the NovaSpine plugins when `openclaw` is available, patches `openclaw.json`, and gives you a `novaspine doctor` check to verify the wiring.
 
+### OpenClaw compatibility
+
+NovaSpine's standalone Python/API layer is relatively stable. The OpenClaw integration layer depends on OpenClaw's plugin and config surfaces, so major or fast-moving OpenClaw updates can require a repair pass.
+
+Current tested OpenClaw versions:
+
+- `2026.4.5`
+- `2026.4.7`
+
+Recommended upgrade flow for OpenClaw users:
+
+```bash
+./scripts/install-openclaw.sh
+novaspine doctor
+openclaw config validate
+```
+
+If an OpenClaw update changes plugin wiring, config shape, or slot bindings, re-running the installer is the supported repair path.
+
 ## Benchmark Highlights
 
 These are the strongest benchmark results already checked into `bench/results/` and summarized from official-source runs.
