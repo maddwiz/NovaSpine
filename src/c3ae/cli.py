@@ -1,4 +1,4 @@
-"""C3/Ae CLI."""
+"""NovaSpine CLI."""
 
 from __future__ import annotations
 
@@ -71,11 +71,24 @@ def _doctor_check(name: str, level: str, detail: str) -> dict[str, str]:
     return {"name": name, "level": level, "detail": detail}
 
 
+def _preview_text(text: str, limit: int = 220) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return f"{collapsed[: limit - 3].rstrip()}..."
+
+
 @click.group()
 @click.option("--data-dir", envvar="C3AE_DATA_DIR", default=None, help="Data directory")
 @click.pass_context
 def main(ctx: click.Context, data_dir: str | None) -> None:
-    """C3/Ae Memory Stack — persistent cognitive memory system."""
+    """NovaSpine CLI for storing, recalling, and inspecting memory.
+
+    Use `novaspine ingest` to store memory, `novaspine recall` to retrieve it,
+    `novaspine search` for lower-level inspection, `novaspine status` to inspect
+    state, `novaspine doctor` to verify installs, and `novaspine serve` to run
+    the HTTP API.
+    """
     ctx.ensure_object(dict)
     ctx.obj["data_dir"] = data_dir
 
@@ -83,10 +96,10 @@ def main(ctx: click.Context, data_dir: str | None) -> None:
 @main.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
-    """Show memory system status."""
+    """Show NovaSpine memory status."""
     spine = _get_spine(ctx.obj.get("data_dir"))
     st = spine.status()
-    click.echo("C3/Ae Memory Status")
+    click.echo("NovaSpine Status")
     click.echo(f"  Chunks:            {st['chunks']}")
     click.echo(f"  Vectors:           {st['vectors']}")
     click.echo(f"  Reasoning entries: {st['reasoning_entries']}")
@@ -101,20 +114,53 @@ def status(ctx: click.Context) -> None:
 @click.option("--keyword-only", "-K", is_flag=True, help="Keyword search only (no embeddings)")
 @click.pass_context
 def search(ctx: click.Context, query: str, top_k: int, keyword_only: bool) -> None:
-    """Search memory."""
+    """Inspect lower-level hybrid search results for debugging and manual review."""
     spine = _get_spine(ctx.obj.get("data_dir"))
     if keyword_only:
         results = spine.search_keyword(query, top_k=top_k)
     else:
         results = asyncio.run(spine.search(query, top_k=top_k))
     if not results:
-        click.echo("No results found.")
+        click.echo("No search results found.")
     else:
+        click.echo(f"NovaSpine Search: {query}")
         for i, r in enumerate(results, 1):
             click.echo(f"\n--- Result {i} (score: {r.score:.4f}, source: {r.source}) ---")
             click.echo(f"ID: {r.id}")
-            preview = r.content[:200].replace("\n", " ")
+            preview = _preview_text(r.content)
             click.echo(f"{preview}")
+    spine.sqlite.close()
+
+
+@main.command()
+@click.argument("query")
+@click.option("--top-k", "-k", default=5, help="Number of memories to return")
+@click.option("--json-output", is_flag=True, help="Emit machine-readable JSON")
+@click.pass_context
+def recall(ctx: click.Context, query: str, top_k: int, json_output: bool) -> None:
+    """Recall useful memories for a query.
+
+    This is the preferred high-level retrieval command for humans and agents.
+    Use `search` when you want lower-level hybrid search inspection instead.
+    """
+    spine = _get_spine(ctx.obj.get("data_dir"))
+    rows = asyncio.run(spine.recall(query, top_k=top_k))
+    if json_output:
+        click.echo(json.dumps(rows, indent=2))
+    elif not rows:
+        click.echo("No memories recalled.")
+    else:
+        click.echo(f"NovaSpine Recall: {query}")
+        for i, row in enumerate(rows, 1):
+            metadata = row.get("metadata") or {}
+            score = float(row.get("score", 0.0))
+            source = str(row.get("source", "") or "memory")
+            click.echo(f"\n--- Memory {i} (score: {score:.4f}, source: {source}) ---")
+            click.echo(f"ID: {row.get('id', '')}")
+            source_id = str(metadata.get("source_id", "")).strip()
+            if source_id:
+                click.echo(f"Source ID: {source_id}")
+            click.echo(_preview_text(str(row.get("content", ""))))
     spine.sqlite.close()
 
 
@@ -123,7 +169,7 @@ def search(ctx: click.Context, query: str, top_k: int, keyword_only: bool) -> No
 @click.option("--source-id", "-s", default="", help="Source identifier")
 @click.pass_context
 def ingest(ctx: click.Context, path: str, source_id: str) -> None:
-    """Ingest a file into memory."""
+    """Ingest a file into NovaSpine memory."""
     spine = _get_spine(ctx.obj.get("data_dir"))
     file_path = Path(path)
     chunk_ids = asyncio.run(spine.ingest_file(file_path, source_id=source_id))
@@ -187,13 +233,13 @@ def cos_cmd(ctx: click.Context, session_id: str) -> None:
 @click.option("--port", "-p", default=8420, type=int, help="Bind port")
 @click.pass_context
 def serve(ctx: click.Context, host: str, port: int) -> None:
-    """Start the HTTP API server."""
+    """Start the NovaSpine HTTP API server."""
     import uvicorn
     from c3ae.api.routes import create_app
 
     data_dir = ctx.obj.get("data_dir")
     app = create_app(data_dir=data_dir)
-    click.echo(f"Starting C3/Ae API on {host}:{port}")
+    click.echo(f"Starting NovaSpine API on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 

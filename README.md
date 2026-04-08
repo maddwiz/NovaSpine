@@ -4,6 +4,39 @@ NovaSpine gives an AI agent memory that survives across sessions, comes back in 
 
 You can use it as a standalone memory API for any agent stack, or install it as a turnkey memory/context/consciousness layer for OpenClaw.
 
+## 30-Second Quickstart
+
+If you just want to try NovaSpine from a terminal, start here:
+
+```bash
+pip install novaspine
+printf '%s\n' 'Retrieval notes: keep keyword fallback for exact facts.' > notes.txt
+novaspine ingest ./notes.txt
+novaspine recall "what did I save about retrieval?"
+novaspine status
+novaspine doctor
+```
+
+That is the shortest path to:
+
+- put memory in with `novaspine ingest`
+- get useful memory back with `novaspine recall`
+- inspect local state with `novaspine status`
+- verify the install with `novaspine doctor`
+
+If you want HTTP or OpenClaw integration after that, keep reading.
+
+## CLI Usage for Humans
+
+NovaSpine is usable directly from the terminal. The main commands are:
+
+- `novaspine ingest`: store memory from a file
+- `novaspine recall`: preferred high-level memory retrieval command
+- `novaspine search`: lower-level/manual search for debugging and inspection
+- `novaspine status`: inspect local memory state
+- `novaspine doctor`: diagnose installation and OpenClaw wiring
+- `novaspine serve`: run the local HTTP API for apps and agents
+
 ## Why People Use It
 
 - **Remember across sessions** instead of starting cold every time
@@ -38,6 +71,8 @@ pip install novaspine
 ```bash
 novaspine serve
 ```
+
+If you only want the CLI, you can skip `novaspine serve` until you need HTTP access.
 
 3. Point your app or agent at:
 
@@ -192,7 +227,7 @@ Most memory layers stop at “vector DB + semantic search.” NovaSpine is desig
 | OpenClaw turnkey integration | Built in | Usually custom glue |
 | Consciousness/continuity layer | Available | Rare |
 
-## Quick Start
+## API Quick Start
 
 ### Store a memory
 ```bash
@@ -221,11 +256,13 @@ Returns pre-formatted `<relevant-memories>` block ready for LLM context injectio
 
 NovaSpine intentionally exposes both a lower-level search route and the agent-facing memory contract.
 
+- `novaspine recall`: start here in the CLI for useful memory retrieval
+- `novaspine search`: use this when you want lower-level/manual search inspection
 - `/api/v1/memory/recall`: use this first for agent memory retrieval across sessions and memories
 - `/api/v1/memory/augment`: use this first when you want prompt-ready context injection
 - `/api/v1/memory/search`: lower-level search endpoint for tools, debugging, and raw hybrid-search access
 
-If you are building an agent integration, start with `recall` or `augment`, not `search`.
+If you are using the CLI, start with `recall`, not `search`. If you are building an agent integration, start with `recall` or `augment`, not `search`.
 
 ## First Run Sanity Check
 
