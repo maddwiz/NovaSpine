@@ -10,13 +10,6 @@ have been running live:
 - the OpenClaw consciousness plugin in `packages/openclaw-consciousness/`
 - generic OpenClaw maintenance scripts in `integrations/openclaw/scripts/`
 
-Intentionally not bundled as first-class repo content:
-
-- machine-specific systemd/launchd units
-- personal Discord and The Lab routing glue
-- profile-local runtime state, secrets, or sidecar copies
-- the old Nemo-specific sidecar wrapper layer
-
 ## Why NovaSpine?
 
 Most LLM memory solutions use only vector search. NovaSpine combines **FAISS vector search** with **SQLite FTS5 keyword search** via **Reciprocal Rank Fusion** — catching both semantic similarity AND exact keyword matches.
