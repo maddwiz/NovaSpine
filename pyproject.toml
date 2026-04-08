@@ -7,7 +7,7 @@ name = "novaspine"
 version = "0.3.0"
 description = "NovaSpine — long-term memory for LLM agents with hybrid vector + keyword search"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "MIT"
 dependencies = [
     # USC core
     "zstandard>=0.21",

@@ -90,6 +90,41 @@ def _default_paths(install_root: Path) -> list[str]:
     ]
 
 
+def _merge_plugin_entries(plugins: dict, defaults_map: dict[str, dict]) -> None:
+    entries = plugins.setdefault("entries", {})
+
+    if isinstance(entries, dict):
+        for plugin_id, defaults in defaults_map.items():
+            current = entries.get(plugin_id)
+            if not isinstance(current, dict):
+                entries[plugin_id] = deepcopy(defaults)
+                continue
+            _merge_missing(current, defaults)
+        return
+
+    if isinstance(entries, list):
+        by_id: dict[str, dict] = {}
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            plugin_id = item.get("name") or item.get("id") or item.get("plugin")
+            if isinstance(plugin_id, str) and plugin_id:
+                by_id[plugin_id] = item
+
+        for plugin_id, defaults in defaults_map.items():
+            current = by_id.get(plugin_id)
+            if current is None:
+                item = {"name": plugin_id}
+                _merge_missing(item, defaults)
+                entries.append(item)
+                by_id[plugin_id] = item
+                continue
+            _merge_missing(current, defaults)
+        return
+
+    plugins["entries"] = deepcopy(defaults_map)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Patch an OpenClaw config with NovaSpine plugins.")
     parser.add_argument("--config", required=True, help="Path to openclaw.json")
@@ -135,13 +170,10 @@ def main() -> int:
     if args.force_slots or "contextEngine" not in slots:
         slots["contextEngine"] = "novaspine-context"
 
-    entries = plugins.setdefault("entries", {})
-    for plugin_id, defaults in _default_plugin_entries(args.base_url, args.consciousness_base_url).items():
-        current = entries.get(plugin_id)
-        if not isinstance(current, dict):
-            entries[plugin_id] = deepcopy(defaults)
-            continue
-        _merge_missing(current, defaults)
+    _merge_plugin_entries(
+        plugins,
+        _default_plugin_entries(args.base_url, args.consciousness_base_url),
+    )
 
     if not args.no_backup:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
