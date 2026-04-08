@@ -26,7 +26,7 @@ That is the shortest path to:
 
 If you want HTTP or OpenClaw integration after that, keep reading.
 
-## CLI Usage for Humans
+## Using NovaSpine from the Terminal
 
 NovaSpine is usable directly from the terminal. The main commands are:
 
