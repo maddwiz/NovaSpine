@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 import click
 
@@ -17,6 +21,54 @@ def _get_spine(data_dir: str | None = None) -> MemorySpine:
     if data_dir:
         config.data_dir = Path(data_dir)
     return MemorySpine(config)
+
+
+def _default_data_dir(data_dir: str | None) -> Path:
+    config = Config()
+    if data_dir:
+        config.data_dir = Path(data_dir)
+    return config.data_dir
+
+
+def _default_openclaw_install_root() -> Path:
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
+    return Path(os.environ.get("NOVASPINE_OPENCLAW_HOME", base / "novaspine" / "openclaw"))
+
+
+def _default_openclaw_config_path() -> Path:
+    return Path(os.environ.get("OPENCLAW_CONFIG_PATH", Path.home() / ".openclaw" / "openclaw.json"))
+
+
+def _find_plugin_entry(entries: object, plugin_id: str) -> dict | None:
+    if isinstance(entries, dict):
+        value = entries.get(plugin_id)
+        return value if isinstance(value, dict) else None
+    if isinstance(entries, list):
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("name") or item.get("id") or item.get("plugin")
+            if candidate == plugin_id:
+                return item
+    return None
+
+
+def _probe_json(url: str, timeout: float = 2.0) -> tuple[bool, str]:
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return True, json.dumps(payload, sort_keys=True)
+    except HTTPError as error:
+        return False, f"HTTP {error.code}"
+    except URLError as error:
+        return False, str(error.reason)
+    except Exception as error:  # pragma: no cover - defensive
+        return False, str(error)
+
+
+def _doctor_check(name: str, level: str, detail: str) -> dict[str, str]:
+    return {"name": name, "level": level, "detail": detail}
 
 
 @click.group()
@@ -284,6 +336,153 @@ def dream_cmd(ctx: click.Context) -> None:
         click.echo(result)
     finally:
         asyncio.run(spine.close())
+
+
+@main.command(name="doctor")
+@click.option("--api-url", default="http://127.0.0.1:8420", show_default=True, help="NovaSpine API URL to probe")
+@click.option("--openclaw-config", default=None, help="Path to openclaw.json to inspect")
+@click.option("--install-root", default=None, help="NovaSpine OpenClaw install root to inspect")
+@click.option("--skip-api-check", is_flag=True, help="Do not probe the HTTP health endpoint")
+@click.option("--json-output", is_flag=True, help="Emit machine-readable JSON")
+@click.pass_context
+def doctor_cmd(
+    ctx: click.Context,
+    api_url: str,
+    openclaw_config: str | None,
+    install_root: str | None,
+    skip_api_check: bool,
+    json_output: bool,
+) -> None:
+    """Inspect NovaSpine and OpenClaw integration health."""
+    data_dir = _default_data_dir(ctx.obj.get("data_dir"))
+    install_root_path = Path(install_root).expanduser() if install_root else _default_openclaw_install_root()
+    openclaw_config_path = Path(openclaw_config).expanduser() if openclaw_config else _default_openclaw_config_path()
+
+    spine = _get_spine(ctx.obj.get("data_dir"))
+    try:
+        status = spine.status()
+    finally:
+        spine.sqlite.close()
+
+    checks: list[dict[str, str]] = []
+    checks.append(_doctor_check("data-dir", "ok" if data_dir.exists() else "fail", str(data_dir)))
+    checks.append(_doctor_check(
+        "memory-core",
+        "ok",
+        f"chunks={status.get('chunks', 0)} consolidated={status.get('consolidated_memories', 0)} graph_entities={((status.get('graph') or {}).get('entities', 0))}",
+    ))
+
+    required_install_paths = [
+        install_root_path / "packages" / "openclaw-memory-plugin",
+        install_root_path / "packages" / "openclaw-context-engine",
+        install_root_path / "packages" / "openclaw-consciousness",
+        install_root_path / "scripts" / "run-memory-maintenance.sh",
+        install_root_path / "scripts" / "run-consciousness-suite.sh",
+    ]
+    missing_install_paths = [str(path) for path in required_install_paths if not path.exists()]
+    checks.append(_doctor_check(
+        "openclaw-install-root",
+        "ok" if not missing_install_paths else "warn",
+        str(install_root_path) if not missing_install_paths else f"missing: {', '.join(missing_install_paths)}",
+    ))
+
+    if skip_api_check:
+        checks.append(_doctor_check("api-health", "warn", "skipped"))
+    else:
+        ok, detail = _probe_json(f"{api_url.rstrip('/')}/api/v1/health")
+        checks.append(_doctor_check("api-health", "ok" if ok else "warn", detail))
+
+    if not openclaw_config_path.exists():
+        checks.append(_doctor_check("openclaw-config", "warn", f"not found: {openclaw_config_path}"))
+    else:
+        try:
+            config_data = json.loads(openclaw_config_path.read_text())
+            plugins = config_data.get("plugins") if isinstance(config_data, dict) else {}
+            allow = (plugins.get("allow") or []) if isinstance(plugins, dict) else []
+            load = (plugins.get("load") or {}) if isinstance(plugins, dict) else {}
+            slots = (plugins.get("slots") or {}) if isinstance(plugins, dict) else {}
+            paths = (load.get("paths") or []) if isinstance(load, dict) else []
+            entries = (plugins.get("entries") or {}) if isinstance(plugins, dict) else {}
+
+            expected_plugin_ids = ("novaspine-memory", "novaspine-context", "nova-consciousness")
+            missing_allow = [plugin_id for plugin_id in expected_plugin_ids if plugin_id not in allow]
+            missing_paths = [
+                str(candidate)
+                for candidate in [
+                    install_root_path / "packages" / "openclaw-memory-plugin",
+                    install_root_path / "packages" / "openclaw-context-engine",
+                    install_root_path / "packages" / "openclaw-consciousness",
+                ]
+                if str(candidate) not in paths
+            ]
+            bad_slots = []
+            if slots.get("memory") != "novaspine-memory":
+                bad_slots.append(f"memory={slots.get('memory')!r}")
+            if slots.get("contextEngine") != "novaspine-context":
+                bad_slots.append(f"contextEngine={slots.get('contextEngine')!r}")
+
+            entry_notes = []
+            for plugin_id in expected_plugin_ids:
+                entry = _find_plugin_entry(entries, plugin_id)
+                if not entry:
+                    entry_notes.append(f"{plugin_id}:missing")
+                    continue
+                enabled = entry.get("enabled")
+                config = entry.get("config") if isinstance(entry.get("config"), dict) else {}
+                base_url = config.get("baseUrl", "")
+                entry_notes.append(f"{plugin_id}:{'on' if enabled is not False else 'off'}:{base_url or 'no-base-url'}")
+
+            detail_parts = []
+            if missing_allow:
+                detail_parts.append(f"allow missing {missing_allow}")
+            if missing_paths:
+                detail_parts.append(f"paths missing {missing_paths}")
+            if bad_slots:
+                detail_parts.append(f"slots {'; '.join(bad_slots)}")
+            detail_parts.append(", ".join(entry_notes))
+
+            level = "ok" if not missing_allow and not missing_paths and not bad_slots else "fail"
+            checks.append(_doctor_check("openclaw-config", level, " | ".join(detail_parts)))
+        except Exception as error:
+            checks.append(_doctor_check("openclaw-config", "fail", f"{openclaw_config_path}: {error}"))
+
+    counts = {
+        "ok": sum(1 for check in checks if check["level"] == "ok"),
+        "warn": sum(1 for check in checks if check["level"] == "warn"),
+        "fail": sum(1 for check in checks if check["level"] == "fail"),
+    }
+    payload = {
+        "data_dir": str(data_dir),
+        "install_root": str(install_root_path),
+        "openclaw_config": str(openclaw_config_path),
+        "memory_status": status,
+        "checks": checks,
+        "summary": counts,
+    }
+
+    if json_output:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        click.echo("NovaSpine Doctor")
+        click.echo(f"  data dir:         {payload['data_dir']}")
+        click.echo(f"  install root:     {payload['install_root']}")
+        click.echo(f"  openclaw config:  {payload['openclaw_config']}")
+        click.echo(
+            "  memory status:    "
+            f"chunks={status.get('chunks', 0)} "
+            f"consolidated={status.get('consolidated_memories', 0)} "
+            f"reasoning={status.get('reasoning_entries', 0)} "
+            f"skills={status.get('skills', 0)}"
+        )
+        for check in checks:
+            icon = {"ok": "OK", "warn": "WARN", "fail": "FAIL"}[check["level"]]
+            click.echo(f"  [{icon}] {check['name']}: {check['detail']}")
+        click.echo(
+            f"  summary: ok={counts['ok']} warn={counts['warn']} fail={counts['fail']}"
+        )
+
+    if counts["fail"] > 0:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

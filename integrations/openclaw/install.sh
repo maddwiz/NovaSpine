@@ -8,6 +8,7 @@ BASE_URL="${NOVASPINE_BASE_URL:-http://127.0.0.1:8420}"
 CONSCIOUSNESS_BASE_URL="${NOVASPINE_CONSCIOUSNESS_BASE_URL:-http://127.0.0.1:4111}"
 SKIP_PLUGIN_INSTALL=0
 SKIP_CONFIG_PATCH=0
+SKIP_VALIDATE=0
 FORCE_SLOTS=0
 
 usage() {
@@ -21,6 +22,7 @@ Options:
   --consciousness-base-url URL   Consciousness suite base URL
   --skip-plugin-install          Do not run `openclaw plugins install`
   --skip-config-patch            Copy assets only; do not patch openclaw.json
+  --skip-validate               Do not run `openclaw config validate` or `novaspine doctor`
   --force-slots                  Replace existing memory/contextEngine slot bindings
   --help                         Show this message
 EOF
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-config-patch)
       SKIP_CONFIG_PATCH=1
+      shift
+      ;;
+    --skip-validate)
+      SKIP_VALIDATE=1
       shift
       ;;
     --force-slots)
@@ -144,6 +150,20 @@ if [[ "$SKIP_CONFIG_PATCH" -eq 0 ]] && [[ -f "$OPENCLAW_CONFIG" ]]; then
   python3 "${PATCH_ARGS[@]}"
 fi
 
+if [[ "$SKIP_VALIDATE" -eq 0 ]]; then
+  if command -v openclaw >/dev/null 2>&1 && [[ -f "$OPENCLAW_CONFIG" ]]; then
+    if ! openclaw config validate >/dev/null 2>&1; then
+      echo "warning: openclaw config validate reported an issue" >&2
+    fi
+  fi
+
+  if command -v novaspine >/dev/null 2>&1; then
+    if ! novaspine doctor --skip-api-check >/dev/null 2>&1; then
+      echo "warning: novaspine doctor reported an issue" >&2
+    fi
+  fi
+fi
+
 cat <<EOF
 NovaSpine OpenClaw integration installed.
 
@@ -154,5 +174,5 @@ OpenClaw config: $OPENCLAW_CONFIG
 Next:
   1. Ensure the NovaSpine API is running at $BASE_URL
   2. Ensure the consciousness suite is running at $CONSCIOUSNESS_BASE_URL if you want continuity features
-  3. Run \`openclaw config validate\`
+  3. Run \`openclaw config validate\` and \`novaspine doctor\`
 EOF
