@@ -1,45 +1,54 @@
-# NovaSpine — Long-Term Memory and Cognition for AI Agents
+# NovaSpine — Durable Memory for AI Agents
 
-NovaSpine is a memory and cognition stack for agent builders. It gives an AI agent durable recall, structured facts, consolidation, dreaming, and optional OpenClaw consciousness/continuity without forcing you into one app or one model provider.
+NovaSpine gives an AI agent memory that survives across sessions, comes back in useful form, and can grow beyond raw chat history into facts, summaries, and working context.
 
-You can use it in two ways:
+You can use it as a standalone memory API for any agent stack, or install it as a turnkey memory/context/consciousness layer for OpenClaw.
 
-- **Standalone memory engine** for any agent framework via Python or the HTTP API
-- **Turnkey OpenClaw integration** with one install step for memory, context, and consciousness plugins
+## Why People Use It
+
+- **Remember across sessions** instead of starting cold every time
+- **Recall the right context fast** with hybrid semantic + keyword retrieval
+- **Inject memory into prompts cleanly** with `/augment`
+- **Promote raw history into better memory** with facts, consolidation, and dream passes
+- **Install quickly for OpenClaw** without building your own glue first
 
 ## What You Get
 
-- **Hybrid memory retrieval**: FAISS vector search + SQLite FTS5 keyword search + RRF fusion
-- **LLM-ready context injection**: `/augment` returns clean memory blocks ready for prompts
-- **Structured memory**: entities, facts, graph edges, reasoning bank, and skill capsules
+- **Hybrid retrieval**: FAISS vector search + SQLite FTS5 keyword search + RRF fusion
+- **Prompt-ready memory**: `/augment` returns memory blocks formatted for LLM injection
+- **Structured memory**: entities, facts, graph edges, reasoning entries, and skill capsules
 - **Consolidation + dreams**: episodic memories can be compressed into more durable semantic memory
-- **OpenClaw stack included**: memory plugin, context engine, consciousness plugin, maintenance scripts, and config patcher
-- **Benchmark tooling included**: official-source prep, retrieval benchmarks, and end-to-end QA harnesses
+- **OpenClaw integration**: memory plugin, context engine, consciousness plugin, maintenance scripts, and config patcher
+- **Benchmark tooling**: official-source prep, retrieval benchmarks, and end-to-end QA harnesses
 
-## Install
+## Choose Your Setup
 
-### Any agent framework
+### Option 1: any agent framework
 
-1. Install NovaSpine:
+Use NovaSpine as a Python package or local HTTP API.
+
+1. Install:
 
 ```bash
 pip install novaspine
 ```
 
-2. Start the API server:
+2. Start the server:
 
 ```bash
 novaspine serve
 ```
 
-3. Point your agent or app at the API:
+3. Point your app or agent at:
 
 - default local API: `http://127.0.0.1:8420`
 - health check: `GET /api/v1/health`
 - prompt-ready recall: `POST /api/v1/memory/augment`
 - choose an auth mode before calling protected routes
 
-### OpenClaw users
+### Option 2: OpenClaw
+
+Use the bundled OpenClaw install kit for memory, context, and consciousness.
 
 1. Clone the repo:
 
@@ -61,7 +70,7 @@ novaspine doctor
 openclaw config validate
 ```
 
-4. Start or restart your normal OpenClaw workflow.
+4. Start or restart OpenClaw normally.
 
 The installer:
 
