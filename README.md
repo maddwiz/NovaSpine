@@ -20,19 +20,62 @@ You can use it in two ways:
 
 ### Any agent framework
 
+1. Install NovaSpine:
+
 ```bash
 pip install novaspine
+```
+
+2. Start the API server:
+
+```bash
 novaspine serve
 ```
 
+3. Point your agent or app at the API:
+
+- default local API: `http://127.0.0.1:8420`
+- health check: `GET /api/v1/health`
+- prompt-ready recall: `POST /api/v1/memory/augment`
+
 ### OpenClaw users
+
+1. Clone the repo:
+
+```bash
+git clone https://github.com/maddwiz/NovaSpine.git
+cd NovaSpine
+```
+
+2. Run the OpenClaw installer:
+
+```bash
+./scripts/install-openclaw.sh
+```
+
+3. Verify the install:
+
+```bash
+novaspine doctor
+openclaw config validate
+```
+
+4. Start or restart your normal OpenClaw workflow.
+
+The installer:
+
+- copies the reusable integration layer
+- installs the NovaSpine memory, context, and consciousness plugins when `openclaw` is available
+- patches `openclaw.json`
+- leaves you with `novaspine doctor` as the repair/verification check
+
+If you update OpenClaw later, the supported repair flow is:
 
 ```bash
 ./scripts/install-openclaw.sh
 novaspine doctor
+openclaw config validate
 ```
-
-That install path copies the reusable integration layer, installs the NovaSpine plugins when `openclaw` is available, patches `openclaw.json`, and gives you a `novaspine doctor` check to verify the wiring.
 
 ### OpenClaw compatibility
 
@@ -42,14 +85,6 @@ Current tested OpenClaw versions:
 
 - `2026.4.5`
 - `2026.4.7`
-
-Recommended upgrade flow for OpenClaw users:
-
-```bash
-./scripts/install-openclaw.sh
-novaspine doctor
-openclaw config validate
-```
 
 If an OpenClaw update changes plugin wiring, config shape, or slot bindings, re-running the installer is the supported repair path.
 
