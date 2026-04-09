@@ -706,6 +706,200 @@ class SQLiteStore:
             for r in rows
         ]
 
+    @staticmethod
+    def _fact_status(fact: dict[str, Any]) -> str:
+        metadata = dict(fact.get("metadata") or {})
+        status = str(metadata.get("fact_status", "")).strip().lower()
+        return status if status in {"current", "historical"} else ""
+
+    @staticmethod
+    def _fact_sort_key(fact: dict[str, Any]) -> tuple[str, str, float]:
+        return (
+            str(fact.get("date") or ""),
+            str(fact.get("created_at") or ""),
+            float(fact.get("confidence") or 0.0),
+        )
+
+    def _facts_by_group(
+        self,
+        *,
+        entity: str = "",
+        relation: str = "",
+        limit: int = 200,
+    ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for fact in self.list_structured_facts(
+            entity=entity,
+            relation=relation,
+            order_by_date_desc=True,
+            limit=max(1, limit),
+        ):
+            key = (str(fact["entity"]).lower(), str(fact["relation"]).lower())
+            groups.setdefault(key, []).append(fact)
+        return groups
+
+    def get_structured_fact(self, fact_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """SELECT id, source_chunk_id, entity, relation, value, fact_date, confidence, metadata, created_at
+               FROM structured_facts
+               WHERE id=?""",
+            (fact_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "source_chunk_id": str(row["source_chunk_id"]),
+            "entity": str(row["entity"]),
+            "relation": str(row["relation"]),
+            "value": str(row["value"]),
+            "date": str(row["fact_date"]),
+            "confidence": float(row["confidence"]),
+            "metadata": json_loads(row["metadata"]),
+            "created_at": str(row["created_at"]),
+        }
+
+    def update_structured_fact_metadata(self, fact_id: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        now = iso_str(utcnow())
+        self._execute_write(
+            "UPDATE structured_facts SET metadata=?, created_at=? WHERE id=?",
+            (json_dumps(metadata), now, fact_id),
+        )
+        return self.get_structured_fact(fact_id)
+
+    def list_current_structured_facts(
+        self,
+        *,
+        entity: str = "",
+        relation: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        current: list[dict[str, Any]] = []
+        for facts in self._facts_by_group(entity=entity, relation=relation, limit=max(limit * 4, 200)).values():
+            explicit_current = [fact for fact in facts if self._fact_status(fact) == "current"]
+            if explicit_current:
+                winners = explicit_current
+            else:
+                latest_date = next((str(fact.get("date") or "") for fact in facts if str(fact.get("date") or "")), "")
+                if latest_date:
+                    winners = [fact for fact in facts if str(fact.get("date") or "") == latest_date]
+                else:
+                    winners = [sorted(facts, key=self._fact_sort_key, reverse=True)[0]]
+            current.extend(sorted(winners, key=self._fact_sort_key, reverse=True))
+        current.sort(key=self._fact_sort_key, reverse=True)
+        return current[: max(1, limit)]
+
+    def list_structured_truth(
+        self,
+        *,
+        entity: str = "",
+        relation: str = "",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        for (_, _), facts in self._facts_by_group(entity=entity, relation=relation, limit=max(limit * 6, 200)).items():
+            current = self.list_current_structured_facts(
+                entity=str(facts[0]["entity"]),
+                relation=str(facts[0]["relation"]),
+                limit=max(len(facts), 4),
+            )
+            current_ids = {str(fact["id"]) for fact in current}
+            historical = [fact for fact in facts if str(fact["id"]) not in current_ids]
+            groups.append(
+                {
+                    "entity": str(facts[0]["entity"]),
+                    "relation": str(facts[0]["relation"]),
+                    "current_facts": current,
+                    "historical_facts": sorted(historical, key=self._fact_sort_key, reverse=True),
+                }
+            )
+        groups.sort(
+            key=lambda item: max(
+                [self._fact_sort_key(fact) for fact in [*item["current_facts"], *item["historical_facts"]]],
+                default=("", "", 0.0),
+            ),
+            reverse=True,
+        )
+        return groups[: max(1, limit)]
+
+    def list_structured_fact_conflicts(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        conflicts: list[dict[str, Any]] = []
+        for group in self.list_structured_truth(limit=max(limit * 4, 100)):
+            current = list(group["current_facts"])
+            values = {str(fact.get("value") or "").strip() for fact in current if str(fact.get("value") or "").strip()}
+            if len(values) <= 1:
+                continue
+            conflicts.append(
+                {
+                    "entity": group["entity"],
+                    "relation": group["relation"],
+                    "value_count": len(values),
+                    "current_facts": current,
+                    "historical_facts": group["historical_facts"],
+                }
+            )
+        return conflicts[: max(1, limit)]
+
+    def resolve_structured_fact_conflict(
+        self,
+        *,
+        winner_fact_id: str,
+        loser_fact_ids: list[str],
+        reason: str = "",
+        user_confirmation: str = "",
+        resolution_ticket_id: str = "",
+    ) -> dict[str, Any]:
+        winner = self.get_structured_fact(winner_fact_id)
+        if not winner:
+            raise ValueError(f"Unknown fact id: {winner_fact_id}")
+        related = [winner]
+        for fact_id in loser_fact_ids:
+            fact = self.get_structured_fact(fact_id)
+            if not fact:
+                raise ValueError(f"Unknown fact id: {fact_id}")
+            related.append(fact)
+        entity = str(winner["entity"]).lower()
+        relation = str(winner["relation"]).lower()
+        for fact in related[1:]:
+            if str(fact["entity"]).lower() != entity or str(fact["relation"]).lower() != relation:
+                raise ValueError("All resolved facts must share the same entity and relation")
+
+        resolved_at = iso_str(utcnow())
+        resolution_id = resolution_ticket_id or uuid4().hex
+        updated_winner_meta = dict(winner.get("metadata") or {})
+        updated_winner_meta.update(
+            {
+                "fact_status": "current",
+                "resolved_at": resolved_at,
+                "resolution_id": resolution_id,
+                "resolution_reason": reason,
+                "user_confirmation": user_confirmation,
+            }
+        )
+        updated_winner = self.update_structured_fact_metadata(winner_fact_id, updated_winner_meta)
+        superseded: list[dict[str, Any]] = []
+        for fact in related[1:]:
+            metadata = dict(fact.get("metadata") or {})
+            metadata.update(
+                {
+                    "fact_status": "historical",
+                    "resolved_at": resolved_at,
+                    "resolution_id": resolution_id,
+                    "resolution_reason": reason,
+                    "user_confirmation": user_confirmation,
+                    "superseded_by_fact_id": winner_fact_id,
+                }
+            )
+            updated = self.update_structured_fact_metadata(str(fact["id"]), metadata)
+            if updated:
+                superseded.append(updated)
+        return {
+            "winner_fact": updated_winner,
+            "superseded_facts": superseded,
+            "resolved_at": resolved_at,
+            "resolution_id": resolution_id,
+        }
+
     def search_structured_facts_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
         fts_query = _sanitize_fts_query(query)
         rows = self._conn.execute(

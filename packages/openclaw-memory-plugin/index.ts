@@ -50,6 +50,22 @@ type HealthResponse = {
 
 type StatusResponse = Record<string, unknown>;
 
+type DreamStatusState = {
+  status?: string;
+  profile?: string;
+  generated_at?: string;
+  clusters_created?: number;
+  consolidated_created?: number;
+  forget_candidate_count?: number;
+  contradictions_count?: number;
+  skill_candidate_count?: number;
+  recompression_candidate_count?: number;
+  novelty_ratio?: number;
+  top_contradictions?: string[];
+  top_skill_candidates?: string[];
+  report?: Record<string, unknown>;
+};
+
 type ExplainMemory = RecallMemory & {
   why_recalled?: {
     reasons?: string[];
@@ -121,6 +137,64 @@ type FactResolveResponse = {
   resolution_id: string;
 };
 
+type WikiStatusResponse = {
+  service?: string;
+  generated_at?: string;
+  vault_root?: string;
+  entity_pages?: number;
+  current_claims?: number;
+  historical_claims?: number;
+  conflicts?: number;
+  low_confidence?: number;
+  open_questions?: number;
+  reports?: Record<string, string>;
+  cache?: Record<string, string>;
+};
+
+type WikiSearchItem = {
+  kind: string;
+  id: string;
+  title: string;
+  path?: string;
+  score?: number;
+  preview?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type WikiSearchResponse = {
+  ok?: boolean;
+  query: string;
+  count: number;
+  results: WikiSearchItem[];
+  status?: WikiStatusResponse;
+};
+
+type WikiPageResponse = {
+  ok?: boolean;
+  id: string;
+  entity?: string;
+  title?: string;
+  path?: string;
+  absolute_path?: string;
+  content?: string;
+  summary?: string;
+  claims?: Array<Record<string, unknown>>;
+  current_claims?: Array<Record<string, unknown>>;
+  historical_claims?: Array<Record<string, unknown>>;
+  conflict_relations?: string[];
+  manual?: Record<string, unknown>;
+};
+
+type WikiLintResponse = {
+  ok?: boolean;
+  status?: WikiStatusResponse;
+  counts?: Record<string, number>;
+  conflicts?: Array<Record<string, unknown>>;
+  low_confidence?: Array<Record<string, unknown>>;
+  missing_evidence?: Array<Record<string, unknown>>;
+  reports?: Record<string, string>;
+};
+
 type SessionIngestResponse = {
   session_id: string;
   chunks_ingested: number;
@@ -152,6 +226,10 @@ const MEMORY_EXPLAIN_PATTERN =
   /(why.*remember|why.*recalled|where.*memory come|where did that come from|provenance|how do you know|why do you know)/i;
 const FACT_RESOLUTION_PATTERN =
   /(resolve.*conflict|which.*current|what.*current now|supersede|retire.*old|outdated.*fact|conflicting facts?)/i;
+const DREAM_QUERY_PATTERN =
+  /\b(dream(?:ing|s)?|dream diary|diary|reflection|reflections|themes?|what have you been learning|what have you noticed)\b/i;
+const WIKI_QUERY_PATTERN =
+  /\b(wiki|knowledge vault|durable knowledge|claim health|low confidence|open questions?|belief layer|compiled claims?)\b/i;
 const configSchema = {
   type: "object",
   additionalProperties: false,
@@ -342,8 +420,55 @@ function memoryStateDir(api: OpenClawPluginApi): string {
   return api.resolvePath("~/.openclaw/plugin-state/novaspine-memory");
 }
 
+function configuredWorkspaceDir(api: OpenClawPluginApi): string {
+  const config = asRecord(api.config);
+  const agents = asRecord(config.agents);
+  const defaults = asRecord(agents.defaults);
+  const workspace = readOptionalString(defaults.workspace);
+  return workspace ? api.resolvePath(workspace) : api.resolvePath("~/.openclaw/workspace");
+}
+
+function profileRootDir(api: OpenClawPluginApi): string {
+  return path.dirname(configuredWorkspaceDir(api));
+}
+
+function profileLabel(api: OpenClawPluginApi): string {
+  const base = path.basename(profileRootDir(api));
+  if (base === ".openclaw-arc") return "arc";
+  if (base === ".openclaw-gemma4") return "saga";
+  return "nemo";
+}
+
+function dreamStatusPath(api: OpenClawPluginApi): string {
+  return path.join(profileRootDir(api), "status", "novaspine-dream-status.json");
+}
+
+function dreamDiaryPath(api: OpenClawPluginApi): string {
+  return path.join(configuredWorkspaceDir(api), "DREAMS.md");
+}
+
+function dreamMachineLatestPath(api: OpenClawPluginApi): string {
+  return path.join(profileRootDir(api), "memory", ".dreams", "latest.json");
+}
+
 function resolutionStorePath(api: OpenClawPluginApi): string {
   return path.join(memoryStateDir(api), "resolution-tickets.json");
+}
+
+async function readJsonFile<T>(target: string): Promise<T | undefined> {
+  try {
+    return JSON.parse(await readFile(target, "utf-8")) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readTextFile(target: string): Promise<string | undefined> {
+  try {
+    return await readFile(target, "utf-8");
+  } catch {
+    return undefined;
+  }
 }
 
 async function writeWorkspaceMemory(api: OpenClawPluginApi, text: string, metadata: Record<string, unknown> = {}) {
@@ -400,6 +525,116 @@ async function saveResolutionStore(api: OpenClawPluginApi, store: ResolutionStor
   const target = resolutionStorePath(api);
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, `${JSON.stringify(store, null, 2)}\n`, "utf-8");
+}
+
+function buildDreamSummary(api: OpenClawPluginApi, report: Record<string, unknown>): DreamStatusState {
+  const consolidation = asRecord(report.consolidation);
+  const forgetting = asRecord(report.forgetting_preview);
+  const recompression = asRecord(report.recompression_preview);
+  const novelty = asRecord(report.novelty);
+  const contradictions = Array.isArray(report.contradictions) ? report.contradictions : [];
+  const skillCandidates = Array.isArray(report.skill_candidates) ? report.skill_candidates : [];
+  const topContradictions = contradictions
+    .slice(0, 3)
+    .map((item) => {
+      const row = asRecord(item);
+      const entity = readString(row.entity ?? row.src_name, "unknown");
+      const relation = readString(row.relation, "contradiction");
+      const value = readOptionalString(row.value ?? row.dst_name);
+      return value ? `${entity} ${relation} -> ${value}` : `${entity} ${relation}`;
+    });
+  const topSkillCandidates = skillCandidates
+    .slice(0, 3)
+    .map((item) => readString(asRecord(item).title ?? asRecord(item).name ?? asRecord(item).summary, ""))
+    .filter(Boolean);
+  return {
+    status: "ok",
+    profile: profileLabel(api),
+    generated_at: new Date().toISOString(),
+    clusters_created: Math.floor(readNumber(consolidation.clusters_created, 0)),
+    consolidated_created: Math.floor(readNumber(consolidation.consolidated_created, 0)),
+    forget_candidate_count: Math.floor(readNumber(forgetting.candidate_count, 0)),
+    contradictions_count: contradictions.length,
+    skill_candidate_count: skillCandidates.length,
+    recompression_candidate_count: Math.floor(readNumber(recompression.candidate_count, 0)),
+    novelty_ratio: readNumber(novelty.novelty_ratio, 0),
+    top_contradictions: topContradictions,
+    top_skill_candidates: topSkillCandidates,
+    report,
+  };
+}
+
+function renderDreamStatusText(state: DreamStatusState, statusPath: string): string {
+  return [
+    `NovaSpine dreaming: ${state.status || "unknown"}`,
+    `Profile: ${state.profile || "unknown"}`,
+    `Last run: ${state.generated_at || "never"}`,
+    `Clusters created: ${state.clusters_created ?? 0}`,
+    `Contradictions: ${state.contradictions_count ?? 0}`,
+    `Skill candidates: ${state.skill_candidate_count ?? 0}`,
+    `Novelty ratio: ${(readNumber(state.novelty_ratio, 0)).toFixed(4)}`,
+    `Status file: ${statusPath}`,
+  ].join("\n");
+}
+
+function buildDreamDiaryBlock(state: DreamStatusState): string {
+  const lines = [
+    `## ${state.generated_at || new Date().toISOString()}`,
+    `- Profile: ${state.profile || "unknown"}`,
+    `- Clusters created: ${state.clusters_created ?? 0}`,
+    `- Consolidated memories created: ${state.consolidated_created ?? 0}`,
+    `- Forget preview candidates: ${state.forget_candidate_count ?? 0}`,
+    `- Contradictions: ${state.contradictions_count ?? 0}`,
+    `- Skill candidates: ${state.skill_candidate_count ?? 0}`,
+    `- Recompression candidates: ${state.recompression_candidate_count ?? 0}`,
+    `- Novelty ratio: ${readNumber(state.novelty_ratio, 0).toFixed(4)}`,
+  ];
+  if (Array.isArray(state.top_contradictions) && state.top_contradictions.length) {
+    lines.push("- Top contradictions:");
+    for (const item of state.top_contradictions) lines.push(`  - ${item}`);
+  }
+  if (Array.isArray(state.top_skill_candidates) && state.top_skill_candidates.length) {
+    lines.push("- Top skill candidates:");
+    for (const item of state.top_skill_candidates) lines.push(`  - ${item}`);
+  }
+  return `${lines.join("\n")}\n\n`;
+}
+
+async function persistDreamArtifacts(api: OpenClawPluginApi, state: DreamStatusState): Promise<void> {
+  const statusTarget = dreamStatusPath(api);
+  const diaryTarget = dreamDiaryPath(api);
+  const machineTarget = dreamMachineLatestPath(api);
+  await mkdir(path.dirname(statusTarget), { recursive: true });
+  await mkdir(path.dirname(diaryTarget), { recursive: true });
+  await mkdir(path.dirname(machineTarget), { recursive: true });
+  await writeFile(statusTarget, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+  await writeFile(machineTarget, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+  const existingDiary = await readTextFile(diaryTarget);
+  if (!existingDiary) {
+    await writeFile(diaryTarget, "# NovaSpine Dream Diary\n\n", "utf-8");
+  }
+  await appendFile(diaryTarget, buildDreamDiaryBlock(state), "utf-8");
+}
+
+async function loadDreamState(api: OpenClawPluginApi): Promise<DreamStatusState | undefined> {
+  return readJsonFile<DreamStatusState>(dreamStatusPath(api));
+}
+
+async function readDreamDiary(api: OpenClawPluginApi, maxChars = 2400): Promise<string | undefined> {
+  const diary = await readTextFile(dreamDiaryPath(api));
+  if (!diary) return undefined;
+  const trimmed = diary.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `…${trimmed.slice(-maxChars)}`;
+}
+
+async function runDreamPass(api: OpenClawPluginApi, cfg: NovaSpinePluginConfig): Promise<DreamStatusState> {
+  const report = await requestJson<Record<string, unknown>>(cfg, "/api/v1/memory/dream", {
+    method: "POST",
+  });
+  const state = buildDreamSummary(api, report);
+  await persistDreamArtifacts(api, state);
+  return state;
 }
 
 function formatFact(fact: FactItem, index: number): string {
@@ -494,6 +729,62 @@ async function applyResolutionTicket(
   return response;
 }
 
+function renderWikiStatusText(status: WikiStatusResponse): string {
+  return [
+    `NovaSpine wiki: ${readString(status.service, "novaspine")}`,
+    `Last compile: ${readString(status.generated_at, "never")}`,
+    `Entity pages: ${Math.floor(readNumber(status.entity_pages, 0))}`,
+    `Current claims: ${Math.floor(readNumber(status.current_claims, 0))}`,
+    `Historical claims: ${Math.floor(readNumber(status.historical_claims, 0))}`,
+    `Conflicts: ${Math.floor(readNumber(status.conflicts, 0))}`,
+    `Low confidence: ${Math.floor(readNumber(status.low_confidence, 0))}`,
+    `Open questions: ${Math.floor(readNumber(status.open_questions, 0))}`,
+    `Vault: ${readString(status.vault_root, "unknown")}`,
+  ].join("\n");
+}
+
+function renderWikiSearchText(response: WikiSearchResponse): string {
+  if (!Array.isArray(response.results) || response.results.length === 0) {
+    return `No NovaSpine wiki results found for: ${response.query}`;
+  }
+  const lines = [`NovaSpine wiki results for: ${response.query}`, ""];
+  for (const [index, item] of response.results.entries()) {
+    lines.push(
+      `${index + 1}. [${item.kind}] ${readString(item.title, item.id)}${item.path ? ` (${item.path})` : ""}`,
+    );
+    if (item.preview) lines.push(`   ${item.preview}`);
+  }
+  return lines.join("\n");
+}
+
+function renderWikiPageText(page: WikiPageResponse): string {
+  const claims = Array.isArray(page.claims) ? page.claims.length : 0;
+  const conflicts = Array.isArray(page.conflict_relations) ? page.conflict_relations.length : 0;
+  const excerpt = summarizeText(readString(page.content, ""), 1800);
+  return [
+    `NovaSpine wiki page: ${readString(page.title || page.entity, page.id)}`,
+    `Path: ${readString(page.path, "unknown")}`,
+    `Claims: ${claims}`,
+    `Conflict relations: ${conflicts}`,
+    page.summary ? `Summary: ${page.summary}` : "",
+    "",
+    excerpt,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function renderWikiLintText(report: WikiLintResponse): string {
+  const counts = asRecord(report.counts);
+  return [
+    "NovaSpine wiki lint",
+    `Conflicts: ${Math.floor(readNumber(counts.conflicts, 0))}`,
+    `Low confidence: ${Math.floor(readNumber(counts.low_confidence, 0))}`,
+    `Missing evidence: ${Math.floor(readNumber(counts.missing_evidence, 0))}`,
+    `Open questions: ${Math.floor(readNumber(counts.open_questions, 0))}`,
+  ].join("\n");
+}
+
 const NOVASPINE_GUIDANCE = [
   "NovaSpine memory is available.",
   "Use injected memories only when they materially improve the answer.",
@@ -503,6 +794,8 @@ const NOVASPINE_GUIDANCE = [
   "For facts that may have changed over time, call novaspine_current_facts.",
   "For conflicting current facts, call novaspine_resolution_prepare, ask the user which option should stay current, then call novaspine_resolution_apply after explicit approval.",
   "Prefer novaspine_recall over generic memory_search for cross-session conversational memory.",
+  "For dreaming, reflection, or dream diary questions, call novaspine_dream_status or novaspine_dream_diary.",
+  "For durable knowledge pages, claim health, open questions, or compiled contradictions, call wiki_status, wiki_search, wiki_get, or wiki_lint.",
   "Do not claim memory certainty when no relevant NovaSpine memories were returned.",
 ].join("\n");
 
@@ -776,6 +1069,261 @@ const novaspineMemoryPlugin = {
       { name: "novaspine_resolution_apply" },
     );
 
+    api.registerTool(
+      {
+        name: "novaspine_dream_status",
+        label: "NovaSpine Dream Status",
+        description: "Show the latest NovaSpine dream summary and where the dream diary is stored.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() {
+          const state = await loadDreamState(api);
+          if (!state) {
+            return formatTool({
+              ok: true,
+              available: false,
+              message: "No NovaSpine dream diary has been written yet.",
+              diaryPath: dreamDiaryPath(api),
+              statusPath: dreamStatusPath(api),
+            });
+          }
+          return {
+            content: [{ type: "text" as const, text: renderDreamStatusText(state, dreamStatusPath(api)) }],
+            details: {
+              ok: true,
+              available: true,
+              state,
+              diaryPath: dreamDiaryPath(api),
+              statusPath: dreamStatusPath(api),
+            },
+          };
+        },
+      },
+      { name: "novaspine_dream_status" },
+    );
+
+    api.registerTool(
+      {
+        name: "novaspine_dream_diary",
+        label: "NovaSpine Dream Diary",
+        description: "Read the latest NovaSpine dream diary excerpt.",
+        parameters: {
+          type: "object",
+          properties: {
+            maxChars: { type: "number", minimum: 200, maximum: 8000 },
+          },
+          additionalProperties: false,
+        },
+        async execute(_toolCallId, params) {
+          const maxChars = Math.max(200, Math.min(8000, Math.floor(Number((params as { maxChars?: number }).maxChars || 2400))));
+          const diary = await readDreamDiary(api, maxChars);
+          if (!diary) {
+            return formatTool({
+              ok: true,
+              available: false,
+              message: "No NovaSpine dream diary entries found yet.",
+              diaryPath: dreamDiaryPath(api),
+            });
+          }
+          return {
+            content: [{ type: "text" as const, text: diary }],
+            details: { ok: true, available: true, diaryPath: dreamDiaryPath(api), excerpt: diary },
+          };
+        },
+      },
+      { name: "novaspine_dream_diary" },
+    );
+
+    api.registerTool(
+      {
+        name: "novaspine_dream_run",
+        label: "NovaSpine Dream Run",
+        description: "Run a fresh NovaSpine dream pass and persist the resulting diary/status artifacts.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() {
+          try {
+            const state = await runDreamPass(api, cfg);
+            return {
+              content: [{ type: "text" as const, text: renderDreamStatusText(state, dreamStatusPath(api)) }],
+              details: {
+                ok: true,
+                state,
+                diaryPath: dreamDiaryPath(api),
+                statusPath: dreamStatusPath(api),
+              },
+            };
+          } catch (error) {
+            return formatTool({ ok: false, error: String(error) });
+          }
+        },
+      },
+      { name: "novaspine_dream_run" },
+    );
+
+    api.registerTool(
+      {
+        name: "wiki_status",
+        label: "NovaSpine Wiki Status",
+        description: "Show the compiled NovaSpine wiki status, counts, and artifact paths.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() {
+          try {
+            const response = await requestJson<WikiStatusResponse>(cfg, "/api/v1/wiki/status");
+            return {
+              content: [{ type: "text" as const, text: renderWikiStatusText(response) }],
+              details: response,
+            };
+          } catch (error) {
+            return formatTool({ ok: false, error: String(error) });
+          }
+        },
+      },
+      { name: "wiki_status" },
+    );
+
+    api.registerTool(
+      {
+        name: "wiki_search",
+        label: "NovaSpine Wiki Search",
+        description: "Search NovaSpine's compiled durable knowledge pages, claims, and syntheses.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "number", minimum: 1, maximum: 50 },
+          },
+          required: ["query"],
+        },
+        async execute(_toolCallId, params) {
+          try {
+            const input = params as { query: string; limit?: number };
+            const response = await requestJson<WikiSearchResponse>(cfg, "/api/v1/wiki/search", {
+              method: "POST",
+              body: {
+                query: input.query.trim(),
+                limit: Math.max(1, Math.min(50, Math.floor(Number(input.limit || 8)))),
+              },
+            });
+            return {
+              content: [{ type: "text" as const, text: renderWikiSearchText(response) }],
+              details: response,
+            };
+          } catch (error) {
+            return formatTool({ ok: false, error: String(error) });
+          }
+        },
+      },
+      { name: "wiki_search" },
+    );
+
+    api.registerTool(
+      {
+        name: "wiki_get",
+        label: "NovaSpine Wiki Get",
+        description: "Read a NovaSpine wiki page by entity, path, or claim id.",
+        parameters: {
+          type: "object",
+          properties: {
+            entity: { type: "string" },
+            path: { type: "string" },
+            claimId: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+        async execute(_toolCallId, params) {
+          try {
+            const input = params as { entity?: string; path?: string; claimId?: string };
+            const query = new URLSearchParams();
+            if (input.entity?.trim()) query.set("entity", input.entity.trim());
+            if (input.path?.trim()) query.set("path", input.path.trim());
+            if (input.claimId?.trim()) query.set("claim_id", input.claimId.trim());
+            const response = await requestJson<WikiPageResponse>(cfg, `/api/v1/wiki/get?${query.toString()}`);
+            return {
+              content: [{ type: "text" as const, text: renderWikiPageText(response) }],
+              details: response,
+            };
+          } catch (error) {
+            return formatTool({ ok: false, error: String(error) });
+          }
+        },
+      },
+      { name: "wiki_get" },
+    );
+
+    api.registerTool(
+      {
+        name: "wiki_apply",
+        label: "NovaSpine Wiki Apply",
+        description: "Apply narrow summary, note, tag, or open-question edits to a NovaSpine wiki page.",
+        parameters: {
+          type: "object",
+          properties: {
+            entity: { type: "string" },
+            summary: { type: "string" },
+            note: { type: "string" },
+            openQuestions: { type: "array", items: { type: "string" } },
+            tags: { type: "array", items: { type: "string" } },
+          },
+          required: ["entity"],
+        },
+        async execute(_toolCallId, params) {
+          try {
+            const input = params as {
+              entity: string;
+              summary?: string;
+              note?: string;
+              openQuestions?: string[];
+              tags?: string[];
+            };
+            const response = await requestJson<WikiPageResponse>(cfg, "/api/v1/wiki/apply", {
+              method: "POST",
+              body: {
+                entity: input.entity.trim(),
+                summary: input.summary,
+                note: input.note,
+                open_questions: Array.isArray(input.openQuestions) ? input.openQuestions : undefined,
+                tags: Array.isArray(input.tags) ? input.tags : undefined,
+              },
+            });
+            return {
+              content: [{ type: "text" as const, text: renderWikiPageText(response) }],
+              details: response,
+            };
+          } catch (error) {
+            return formatTool({ ok: false, error: String(error) });
+          }
+        },
+      },
+      { name: "wiki_apply" },
+    );
+
+    api.registerTool(
+      {
+        name: "wiki_lint",
+        label: "NovaSpine Wiki Lint",
+        description: "Check compiled NovaSpine wiki pages for conflicts, low-confidence claims, and missing evidence.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: { type: "number", minimum: 1, maximum: 100 },
+          },
+          additionalProperties: false,
+        },
+        async execute(_toolCallId, params) {
+          try {
+            const limit = Math.max(1, Math.min(100, Math.floor(Number((params as { limit?: number }).limit || 20))));
+            const response = await requestJson<WikiLintResponse>(cfg, `/api/v1/wiki/lint?limit=${limit}`);
+            return {
+              content: [{ type: "text" as const, text: renderWikiLintText(response) }],
+              details: response,
+            };
+          } catch (error) {
+            return formatTool({ ok: false, error: String(error) });
+          }
+        },
+      },
+      { name: "wiki_lint" },
+    );
+
     api.registerCli(
       ({ program }) => {
         const memory = program.command("novaspine").description("NovaSpine memory plugin commands");
@@ -810,9 +1358,139 @@ const novaspineMemoryPlugin = {
           const response = await requestJson<FactConflictsResponse>(cfg, "/api/v1/facts/conflicts?limit=20");
           console.log(JSON.stringify(response, null, 2));
         });
+        memory.command("dream-status").description("Show the latest NovaSpine dream summary").action(async () => {
+          const state = await loadDreamState(api);
+          if (!state) {
+            console.log(JSON.stringify({ ok: true, available: false, message: "No dream diary entries found yet." }, null, 2));
+            return;
+          }
+          console.log(JSON.stringify(state, null, 2));
+        });
+        memory.command("dream-diary").description("Print the latest NovaSpine dream diary excerpt").action(async () => {
+          const diary = await readDreamDiary(api, 4000);
+          console.log(diary || "No dream diary entries found yet.");
+        });
+        memory.command("dream").description("Run a fresh NovaSpine dream pass").action(async () => {
+          const state = await runDreamPass(api, cfg);
+          console.log(JSON.stringify(state, null, 2));
+        });
+
+        const wiki = program.command("wiki").description("NovaSpine wiki commands");
+        wiki.command("status").description("Show NovaSpine wiki status").action(async () => {
+          const response = await requestJson<WikiStatusResponse>(cfg, "/api/v1/wiki/status");
+          console.log(JSON.stringify(response, null, 2));
+        });
+        wiki.command("search").description("Search compiled NovaSpine wiki pages and claims").argument("<query>").action(async (query) => {
+          const response = await requestJson<WikiSearchResponse>(cfg, "/api/v1/wiki/search", {
+            method: "POST",
+            body: { query, limit: 8 },
+          });
+          console.log(JSON.stringify(response, null, 2));
+        });
+        wiki.command("get").description("Read a NovaSpine wiki page by entity").argument("<entity>").action(async (entity) => {
+          const response = await requestJson<WikiPageResponse>(cfg, `/api/v1/wiki/get?${new URLSearchParams({ entity }).toString()}`);
+          console.log(JSON.stringify(response, null, 2));
+        });
+        wiki.command("lint").description("Run NovaSpine wiki lint checks").action(async () => {
+          const response = await requestJson<WikiLintResponse>(cfg, "/api/v1/wiki/lint?limit=20");
+          console.log(JSON.stringify(response, null, 2));
+        });
       },
-      { commands: ["novaspine"] },
+      { commands: ["novaspine", "wiki"] },
     );
+
+    api.registerCommand({
+      name: "dreaming",
+      description: "NovaSpine dreaming status, diary, and manual dream runs.",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const subcommand = readString(ctx.args, "").split(/\s+/)[0]?.toLowerCase() || "status";
+        try {
+          if (subcommand === "run" || subcommand === "now") {
+            const state = await runDreamPass(api, cfg);
+            return { text: renderDreamStatusText(state, dreamStatusPath(api)) };
+          }
+          if (subcommand === "diary") {
+            const diary = await readDreamDiary(api, 2400);
+            return { text: diary || `No NovaSpine dream diary entries found yet.\nPath: ${dreamDiaryPath(api)}` };
+          }
+          if (subcommand === "help") {
+            return {
+              text: [
+                "NovaSpine dreaming commands",
+                "/dreaming status",
+                "/dreaming diary",
+                "/dreaming run",
+              ].join("\n"),
+            };
+          }
+          const state = await loadDreamState(api);
+          if (!state) {
+            return {
+              text: [
+                "NovaSpine dreaming is available but no diary entries exist yet.",
+                `Diary: ${dreamDiaryPath(api)}`,
+                `Status: ${dreamStatusPath(api)}`,
+              ].join("\n"),
+            };
+          }
+          return { text: renderDreamStatusText(state, dreamStatusPath(api)) };
+        } catch (error) {
+          return { text: `NovaSpine dreaming failed: ${String(error)}` };
+        }
+      },
+    });
+
+    api.registerCommand({
+      name: "wiki",
+      description: "NovaSpine wiki status, search, page access, and linting.",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const raw = readString(ctx.args, "").trim();
+        const [subcommandRaw, ...rest] = raw.split(/\s+/).filter(Boolean);
+        const subcommand = (subcommandRaw || "status").toLowerCase();
+        try {
+          if (subcommand === "search") {
+            const query = rest.join(" ").trim();
+            if (!query) {
+              return { text: "Usage: /wiki search <query>" };
+            }
+            const response = await requestJson<WikiSearchResponse>(cfg, "/api/v1/wiki/search", {
+              method: "POST",
+              body: { query, limit: 8 },
+            });
+            return { text: renderWikiSearchText(response) };
+          }
+          if (subcommand === "get") {
+            const entity = rest.join(" ").trim();
+            if (!entity) {
+              return { text: "Usage: /wiki get <entity>" };
+            }
+            const response = await requestJson<WikiPageResponse>(cfg, `/api/v1/wiki/get?${new URLSearchParams({ entity }).toString()}`);
+            return { text: renderWikiPageText(response) };
+          }
+          if (subcommand === "lint") {
+            const response = await requestJson<WikiLintResponse>(cfg, "/api/v1/wiki/lint?limit=20");
+            return { text: renderWikiLintText(response) };
+          }
+          if (subcommand === "help") {
+            return {
+              text: [
+                "NovaSpine wiki commands",
+                "/wiki status",
+                "/wiki search <query>",
+                "/wiki get <entity>",
+                "/wiki lint",
+              ].join("\n"),
+            };
+          }
+          const response = await requestJson<WikiStatusResponse>(cfg, "/api/v1/wiki/status");
+          return { text: renderWikiStatusText(response) };
+        } catch (error) {
+          return { text: `NovaSpine wiki failed: ${String(error)}` };
+        }
+      },
+    });
 
     api.on("before_prompt_build", async (event) => {
       const result: { prependContext?: string; prependSystemContext?: string } = {};
@@ -851,6 +1529,25 @@ const novaspineMemoryPlugin = {
           "The current prompt may require resolving conflicting or changed facts.",
           "First call novaspine_resolution_prepare, then ask the user which option should remain current.",
           "Do not call novaspine_resolution_apply until the user explicitly approves the winner.",
+        ].join("\n");
+        return result;
+      }
+      if (WIKI_QUERY_PATTERN.test(prompt)) {
+        result.prependSystemContext = [
+          NOVASPINE_GUIDANCE,
+          "The current prompt is asking about compiled durable knowledge, page health, or open questions.",
+          "Call wiki_status for the overall compiled wiki state.",
+          "Call wiki_search to find pages or claims, wiki_get to read a page, and wiki_lint for contradictions or low-confidence items.",
+        ].join("\n");
+        return result;
+      }
+      if (DREAM_QUERY_PATTERN.test(prompt)) {
+        result.prependSystemContext = [
+          NOVASPINE_GUIDANCE,
+          "The user is asking about NovaSpine dreaming, dream diary entries, or learned themes.",
+          "Call novaspine_dream_status for the latest summary.",
+          "Call novaspine_dream_diary for the diary excerpt.",
+          "Only call novaspine_dream_run if the user explicitly asks for a fresh dream pass now.",
         ].join("\n");
         return result;
       }

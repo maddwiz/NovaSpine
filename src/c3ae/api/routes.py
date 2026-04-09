@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from c3ae.config import Config
 from c3ae.memory_spine.spine import MemorySpine
+from c3ae.wiki_layer import NovaSpineWiki
 
 
 AUTH_EXEMPT_PATHS = ("/api/v1/health", "/docs", "/redoc", "/openapi.json")
@@ -144,6 +145,23 @@ class RecallResponse(BaseModel):
     query: str
 
 
+class ExplainRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    session_filter: str | None = None
+
+
+class RecallExplainItem(RecallItem):
+    why_recalled: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExplainResponse(BaseModel):
+    memories: list[RecallExplainItem]
+    count: int
+    query: str
+
+
 class AugmentRequest(BaseModel):
     """Request pre-formatted memory context for LLM injection."""
     query: str
@@ -173,6 +191,136 @@ class SessionListItem(BaseModel):
     session_id: str
     source: str
     chunks: int
+
+
+class FactItem(BaseModel):
+    id: str
+    source_chunk_id: str
+    entity: str
+    relation: str
+    value: str
+    date: str = ""
+    confidence: float = 0.0
+    status: str = "current"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class CurrentFactsResponse(BaseModel):
+    facts: list[FactItem]
+    count: int
+
+
+class FactTruthGroup(BaseModel):
+    entity: str
+    relation: str
+    current_facts: list[FactItem] = Field(default_factory=list)
+    historical_facts: list[FactItem] = Field(default_factory=list)
+
+
+class FactTruthResponse(BaseModel):
+    fact_groups: list[FactTruthGroup]
+    count: int
+
+
+class FactConflictItem(BaseModel):
+    entity: str
+    relation: str
+    value_count: int
+    current_facts: list[FactItem] = Field(default_factory=list)
+    historical_facts: list[FactItem] = Field(default_factory=list)
+
+
+class FactConflictsResponse(BaseModel):
+    conflicts: list[FactConflictItem]
+    count: int
+
+
+class FactResolveRequest(BaseModel):
+    winner_fact_id: str
+    loser_fact_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+    user_confirmation: str = ""
+    resolution_ticket_id: str = ""
+
+
+class FactResolveResponse(BaseModel):
+    ok: bool
+    winner_fact: FactItem
+    superseded_facts: list[FactItem]
+    resolved_at: str
+    resolution_id: str
+
+
+class WikiStatusResponse(BaseModel):
+    service: str
+    generated_at: str
+    vault_root: str
+    entity_pages: int
+    current_claims: int
+    historical_claims: int
+    conflicts: int
+    low_confidence: int
+    open_questions: int
+    reports: dict[str, str] = Field(default_factory=dict)
+    cache: dict[str, str] = Field(default_factory=dict)
+
+
+class WikiSearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+
+
+class WikiSearchItem(BaseModel):
+    kind: str
+    id: str
+    title: str
+    path: str = ""
+    score: float = 0.0
+    preview: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WikiSearchResponse(BaseModel):
+    ok: bool = True
+    query: str
+    count: int
+    results: list[WikiSearchItem] = Field(default_factory=list)
+    status: dict[str, Any] = Field(default_factory=dict)
+
+
+class WikiGetResponse(BaseModel):
+    ok: bool = True
+    id: str
+    entity: str = ""
+    title: str = ""
+    path: str = ""
+    absolute_path: str = ""
+    content: str = ""
+    summary: str = ""
+    claims: list[dict[str, Any]] = Field(default_factory=list)
+    current_claims: list[dict[str, Any]] = Field(default_factory=list)
+    historical_claims: list[dict[str, Any]] = Field(default_factory=list)
+    conflict_relations: list[str] = Field(default_factory=list)
+    manual: dict[str, Any] = Field(default_factory=dict)
+
+
+class WikiApplyRequest(BaseModel):
+    entity: str
+    summary: str | None = None
+    note: str | None = None
+    open_questions: list[str] | None = None
+    tags: list[str] | None = None
+
+
+class WikiLintResponse(BaseModel):
+    ok: bool = True
+    status: dict[str, Any] = Field(default_factory=dict)
+    counts: dict[str, int] = Field(default_factory=dict)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    low_confidence: list[dict[str, Any]] = Field(default_factory=list)
+    missing_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    reports: dict[str, str] = Field(default_factory=dict)
 
 
 class ReasonRequest(BaseModel):
@@ -227,6 +375,66 @@ class TrackEventsBatchRequest(BaseModel):
 class TrackEventsBatchResponse(BaseModel):
     motifs: list[dict[str, Any]]
     count: int
+
+
+def _fact_status(fact: dict[str, Any]) -> str:
+    metadata = dict(fact.get("metadata") or {})
+    status = str(metadata.get("fact_status", "")).strip().lower()
+    return status if status in {"current", "historical"} else "current"
+
+
+def _to_fact_item(fact: dict[str, Any]) -> FactItem:
+    return FactItem(
+        id=str(fact.get("id", "")),
+        source_chunk_id=str(fact.get("source_chunk_id", "")),
+        entity=str(fact.get("entity", "")),
+        relation=str(fact.get("relation", "")),
+        value=str(fact.get("value", "")),
+        date=str(fact.get("date", "")),
+        confidence=float(fact.get("confidence", 0.0)),
+        status=_fact_status(fact),
+        metadata=dict(fact.get("metadata") or {}),
+        created_at=str(fact.get("created_at", "")),
+    )
+
+
+def _wiki(spine: MemorySpine) -> NovaSpineWiki:
+    return NovaSpineWiki(spine)
+
+
+def _build_recall_explain_item(row: dict[str, Any]) -> RecallExplainItem:
+    metadata = dict(row.get("metadata") or {})
+    source_kind = str(metadata.get("_source_kind") or metadata.get("type") or row.get("source") or "memory")
+    reasons: list[str] = []
+    score = float(row.get("score", 0.0))
+    if score >= 0.8:
+        reasons.append("very high recall score")
+    elif score >= 0.5:
+        reasons.append("strong recall score")
+    elif score >= 0.2:
+        reasons.append("moderate recall score")
+    if metadata.get("session_id"):
+        reasons.append("linked to a prior session")
+    if metadata.get("source_file"):
+        reasons.append("has a source transcript or file reference")
+    if source_kind not in {"", "memory"}:
+        reasons.append(f"memory source is {source_kind}")
+    return RecallExplainItem(
+        id=str(row.get("id", "")),
+        content=str(row.get("content", "")),
+        role=str(metadata.get("role", "unknown")),
+        session_id=str(metadata.get("session_id", "")),
+        score=score,
+        metadata=metadata,
+        why_recalled={"reasons": reasons, "score": score},
+        provenance={
+            "source_kind": source_kind,
+            "session_id": str(metadata.get("session_id", "")),
+            "source_file": str(metadata.get("source_file", "")),
+            "source_id": str(metadata.get("source_id", "")),
+            "created_at": str(metadata.get("_created_at", "")),
+        },
+    )
 
 
 # --- Structural Similarity Models ---
@@ -499,6 +707,20 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             query=req.query,
         )
 
+    @app.post("/api/v1/memory/explain", response_model=ExplainResponse)
+    async def memory_explain(req: ExplainRequest, spine: MemorySpine = Depends(get_spine)):
+        rows = await spine.recall(
+            req.query,
+            top_k=req.top_k,
+            session_filter=req.session_filter,
+        )
+        memories = [_build_recall_explain_item(row) for row in rows]
+        return ExplainResponse(
+            memories=memories,
+            count=len(memories),
+            query=req.query,
+        )
+
     # --- Memory Augment (pre-formatted context for LLM injection) ---
 
     @app.post("/api/v1/memory/augment", response_model=AugmentResponse)
@@ -580,6 +802,164 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 })
 
         return {"sessions": sessions, "count": len(sessions)}
+
+    # --- Structured Facts / Current Truth ---
+
+    @app.get("/api/v1/facts/current", response_model=CurrentFactsResponse)
+    async def facts_current(
+        entity: str = "",
+        relation: str = "",
+        limit: int = 20,
+        spine: MemorySpine = Depends(get_spine),
+    ):
+        facts = spine.sqlite.list_current_structured_facts(
+            entity=entity,
+            relation=relation,
+            limit=max(1, min(limit, 100)),
+        )
+        items = [_to_fact_item(fact) for fact in facts]
+        return CurrentFactsResponse(facts=items, count=len(items))
+
+    @app.get("/api/v1/facts/truth", response_model=FactTruthResponse)
+    async def facts_truth(
+        entity: str = "",
+        relation: str = "",
+        limit: int = 20,
+        spine: MemorySpine = Depends(get_spine),
+    ):
+        groups = spine.sqlite.list_structured_truth(
+            entity=entity,
+            relation=relation,
+            limit=max(1, min(limit, 100)),
+        )
+        items = [
+            FactTruthGroup(
+                entity=str(group["entity"]),
+                relation=str(group["relation"]),
+                current_facts=[_to_fact_item(fact) for fact in group["current_facts"]],
+                historical_facts=[_to_fact_item(fact) for fact in group["historical_facts"]],
+            )
+            for group in groups
+        ]
+        return FactTruthResponse(fact_groups=items, count=len(items))
+
+    @app.get("/api/v1/facts/conflicts", response_model=FactConflictsResponse)
+    async def facts_conflicts(limit: int = 20, spine: MemorySpine = Depends(get_spine)):
+        conflicts = spine.sqlite.list_structured_fact_conflicts(limit=max(1, min(limit, 100)))
+        items = [
+            FactConflictItem(
+                entity=str(group["entity"]),
+                relation=str(group["relation"]),
+                value_count=int(group["value_count"]),
+                current_facts=[_to_fact_item(fact) for fact in group["current_facts"]],
+                historical_facts=[_to_fact_item(fact) for fact in group["historical_facts"]],
+            )
+            for group in conflicts
+        ]
+        return FactConflictsResponse(conflicts=items, count=len(items))
+
+    @app.post("/api/v1/facts/resolve", response_model=FactResolveResponse)
+    async def facts_resolve(req: FactResolveRequest, spine: MemorySpine = Depends(get_spine)):
+        winner = spine.sqlite.get_structured_fact(req.winner_fact_id)
+        if not winner:
+            raise HTTPException(status_code=404, detail=f"Unknown winner fact id: {req.winner_fact_id}")
+
+        loser_ids = [fact_id for fact_id in req.loser_fact_ids if fact_id and fact_id != req.winner_fact_id]
+        if not loser_ids:
+            truth_groups = spine.sqlite.list_structured_truth(
+                entity=str(winner["entity"]),
+                relation=str(winner["relation"]),
+                limit=5,
+            )
+            for group in truth_groups:
+                if (
+                    str(group["entity"]).lower() == str(winner["entity"]).lower()
+                    and str(group["relation"]).lower() == str(winner["relation"]).lower()
+                ):
+                    loser_ids = [
+                        str(fact["id"])
+                        for fact in group["current_facts"]
+                        if str(fact["id"]) != req.winner_fact_id
+                    ]
+                    break
+
+        try:
+            resolved = spine.sqlite.resolve_structured_fact_conflict(
+                winner_fact_id=req.winner_fact_id,
+                loser_fact_ids=loser_ids,
+                reason=req.reason,
+                user_confirmation=req.user_confirmation,
+                resolution_ticket_id=req.resolution_ticket_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        return FactResolveResponse(
+            ok=True,
+            winner_fact=_to_fact_item(dict(resolved["winner_fact"] or {})),
+            superseded_facts=[_to_fact_item(fact) for fact in resolved["superseded_facts"]],
+            resolved_at=str(resolved["resolved_at"]),
+            resolution_id=str(resolved["resolution_id"]),
+        )
+
+    # --- Wiki Layer / Durable Knowledge Views ---
+
+    @app.get("/api/v1/wiki/status", response_model=WikiStatusResponse)
+    async def wiki_status(spine: MemorySpine = Depends(get_spine)):
+        return WikiStatusResponse(**_wiki(spine).compile())
+
+    @app.post("/api/v1/wiki/search", response_model=WikiSearchResponse)
+    async def wiki_search(req: WikiSearchRequest, spine: MemorySpine = Depends(get_spine)):
+        payload = _wiki(spine).search(req.query, limit=max(1, min(int(req.limit or 10), 50)))
+        return WikiSearchResponse(
+            ok=bool(payload.get("ok", True)),
+            query=str(payload.get("query", "")),
+            count=int(payload.get("count", 0)),
+            results=[
+                WikiSearchItem(
+                    kind=str(item.get("kind", "")),
+                    id=str(item.get("id", "")),
+                    title=str(item.get("title", "")),
+                    path=str(item.get("path", "")),
+                    score=float(item.get("score", 0.0)),
+                    preview=str(item.get("preview", "")),
+                    metadata=dict(item.get("metadata") or {}),
+                )
+                for item in payload.get("results", [])
+            ],
+            status=dict(payload.get("status") or {}),
+        )
+
+    @app.get("/api/v1/wiki/get", response_model=WikiGetResponse)
+    async def wiki_get(
+        entity: str = "",
+        path: str = "",
+        claim_id: str = "",
+        spine: MemorySpine = Depends(get_spine),
+    ):
+        page = _wiki(spine).get_page(entity=entity, path=path, claim_id=claim_id)
+        if not page:
+            raise HTTPException(status_code=404, detail="Wiki page or claim not found")
+        return WikiGetResponse(**page)
+
+    @app.post("/api/v1/wiki/apply", response_model=WikiGetResponse)
+    async def wiki_apply(req: WikiApplyRequest, spine: MemorySpine = Depends(get_spine)):
+        try:
+            page = _wiki(spine).apply_page_update(
+                entity=req.entity,
+                summary=req.summary,
+                note=req.note,
+                open_questions=req.open_questions,
+                tags=req.tags,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return WikiGetResponse(**page)
+
+    @app.get("/api/v1/wiki/lint", response_model=WikiLintResponse)
+    async def wiki_lint(limit: int = 20, spine: MemorySpine = Depends(get_spine)):
+        payload = _wiki(spine).lint(limit=max(1, min(limit, 100)))
+        return WikiLintResponse(**payload)
 
     # --- Extended Status ---
 

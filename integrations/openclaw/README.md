@@ -11,6 +11,7 @@ Included here:
 - `scripts/novaspine-prune-noise.py`
 - `scripts/novaspine-promote-fixes.py`
 - `scripts/novaspine-writeback-lessons.py`
+- `scripts/novaspine-dream-report.py`
 - `scripts/run-memory-maintenance.sh`
 - `scripts/run-consciousness-suite.sh`
 - `scripts/install.sh`

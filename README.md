@@ -126,12 +126,28 @@ openclaw config validate
 
 NovaSpine's standalone Python/API layer is relatively stable. The OpenClaw integration layer depends on OpenClaw's plugin and config surfaces, so major or fast-moving OpenClaw updates can require a repair pass.
 
+A compatibility matrix helps answer three user-facing questions:
+
+- which OpenClaw versions are actually tested
+- what still benefits from upstream OpenClaw updates
+- which new upstream memory features need a NovaSpine port or adapter first
+
 Current tested OpenClaw versions:
 
 - `2026.4.5`
 - `2026.4.7`
+- `2026.4.9`
 
 If an OpenClaw update changes plugin wiring, config shape, or slot bindings, re-running the installer is the supported repair path.
+
+Quick rule:
+
+- OpenClaw core/runtime improvements still matter
+- slot-aware memory improvements can still benefit NovaSpine
+- NovaSpine-native dream diary/status and wiki surfaces can be carried forward in the integration layer
+- `memory-core`-specific memory features are not guaranteed automatically when NovaSpine is the active memory slot
+
+For the fuller upgrade/feature matrix, see [OPENCLAW_COMPATIBILITY.md](/home/nova/NovaSpine/OPENCLAW_COMPATIBILITY.md).
 
 ## Auth Modes
 

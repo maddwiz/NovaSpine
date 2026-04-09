@@ -139,7 +139,7 @@ case "$ACTION" in
     fi
     ;;
   dream)
-    "$PYTHON_PATH" -m c3ae.cli dream || status=$?
+    "$PYTHON_PATH" "$SCRIPT_DIR/novaspine-dream-report.py" || status=$?
     ;;
   *)
     usage
