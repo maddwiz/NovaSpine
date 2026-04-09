@@ -8,6 +8,7 @@ build/
 *.so
 .pytest_cache/
 .venv/
+node_modules/
 *.db
 data/
 bench/.runs/

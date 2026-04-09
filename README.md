@@ -307,6 +307,13 @@ novaspine doctor
 openclaw config validate
 ```
 
+### Local plugin type checks
+
+```bash
+cd packages/openclaw-memory-plugin && npm install && npm run typecheck
+cd ../openclaw-context-engine && npm install && npm run typecheck
+```
+
 ### Query the memory graph
 ```bash
 curl -X POST localhost:8420/api/v2/graph/query \

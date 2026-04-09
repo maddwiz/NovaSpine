@@ -459,7 +459,7 @@ function createNovaSpineContextEngine(
       const trimmedMessages = trimMessagesToBudget(params.messages, messageBudget);
       return {
         messages: trimmedMessages,
-        estimatedTokens: approximateTokens(envelope) + trimmedMessages.reduce((sum, msg) => sum + approximateTokens(extractMessageText(msg)), 0),
+        estimatedTokens: approximateTokens(envelope) + trimmedMessages.reduce<number>((sum, msg) => sum + approximateTokens(extractMessageText(msg)), 0),
         systemPromptAddition: envelope
           ? `${CONTEXT_ENGINE_GUIDANCE}\n\n${envelope}`
           : CONTEXT_ENGINE_GUIDANCE,
