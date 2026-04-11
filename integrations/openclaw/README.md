@@ -65,4 +65,5 @@ That will:
 - copy the reusable NovaSpine OpenClaw assets into a stable install root
 - install the three OpenClaw plugins when `openclaw` is available
 - patch `~/.openclaw/openclaw.json` safely and idempotently when it exists
+- enable NovaSpine-routed Active Memory defaults for compatible OpenClaw installs
 - write an example config snippet under the install root

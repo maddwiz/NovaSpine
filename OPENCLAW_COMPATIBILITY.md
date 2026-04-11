@@ -27,6 +27,7 @@ The truth is between those two.
 | `2026.4.5` | Supported | Verified installer/doctor flow |
 | `2026.4.7` | Supported | Verified installer/doctor flow |
 | `2026.4.9` | Supported | Verified in live NovaSpine-backed OpenClaw deployments |
+| `2026.4.10` | Supported | Verified in live NovaSpine-backed OpenClaw deployments; NovaSpine plugin carries Active Memory support |
 
 ## Upgrade Behavior Matrix
 
@@ -35,6 +36,7 @@ The truth is between those two.
 | Gateway/runtime/chat/tool plumbing | Usually still benefits from upstream updates | NovaSpine does not block normal OpenClaw runtime improvements |
 | Generic plugin/config handling | Usually still benefits | NovaSpine depends on these public seams staying compatible |
 | Selected memory-slot behavior | Can benefit if OpenClaw honors the active memory slot | This is the best case for NovaSpine-backed installs |
+| OpenClaw Active Memory | Can benefit when ported through `novaspine-memory` | Stock `active-memory` can stay disabled while NovaSpine remains the source of truth |
 | NovaSpine-native dream/wiki adapters | Supported when shipped in the NovaSpine integration layer | These let NovaSpine users keep dream diary/status and compiled wiki views without switching back to `memory-core` |
 | `memory-core` internal UI/workflows | Not automatic | These are not guaranteed just because OpenClaw added them upstream |
 | `memory-core`-specific dream/wiki workflows | Need NovaSpine porting or an adapter | NovaSpine is the active memory system, so those features do not appear by magic |
@@ -57,6 +59,7 @@ That means:
 - `novaspine-memory` as the active memory slot
 - `novaspine-context` as the active context engine
 - NovaSpine capture / recall / augment
+- NovaSpine-routed Active Memory summaries and session toggles
 - NovaSpine-native dream diary / dream status surfaces
 - NovaSpine-native wiki status / search / page / lint surfaces
 - NovaSpine maintenance and consolidation

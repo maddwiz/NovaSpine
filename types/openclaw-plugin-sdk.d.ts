@@ -19,6 +19,6 @@ declare module "openclaw/plugin-sdk/memory-core" {
     registerCli(handler: (args: { program: any }) => void, options?: unknown): void;
     registerContextEngine(name: string, factory: () => unknown): void;
     registerCommand(command: unknown): void;
-    on(event: string, handler: (payload: any) => unknown): void;
+    on(event: string, handler: (...args: any[]) => unknown): void;
   };
 }

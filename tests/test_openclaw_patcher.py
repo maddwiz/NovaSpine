@@ -46,4 +46,9 @@ def test_patch_openclaw_config_backup_preserves_pre_patch_state(tmp_path, monkey
 
     live_data = json.loads(config_path.read_text())
     assert "novaspine-memory" in live_data["plugins"]["allow"]
+    active_memory = live_data["plugins"]["entries"]["novaspine-memory"]["config"]["activeMemory"]
+    assert active_memory["enabled"] is True
+    assert active_memory["allowedChatTypes"] == ["direct", "group", "channel"]
+    assert active_memory["queryMode"] == "recent"
+    assert active_memory["promptStyle"] == "balanced"
     assert config_path.read_text() != original_text

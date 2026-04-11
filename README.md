@@ -137,6 +137,7 @@ Current tested OpenClaw versions:
 - `2026.4.5`
 - `2026.4.7`
 - `2026.4.9`
+- `2026.4.10`
 
 If an OpenClaw update changes plugin wiring, config shape, or slot bindings, re-running the installer is the supported repair path.
 
@@ -144,6 +145,7 @@ Quick rule:
 
 - OpenClaw core/runtime improvements still matter
 - slot-aware memory improvements can still benefit NovaSpine
+- OpenClaw `2026.4.10` Active Memory can be carried through NovaSpine's memory plugin without enabling stock `active-memory`
 - NovaSpine-native dream diary/status and wiki surfaces can be carried forward in the integration layer
 - `memory-core`-specific memory features are not guaranteed automatically when NovaSpine is the active memory slot
 
