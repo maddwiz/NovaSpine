@@ -52,6 +52,7 @@ def test_patch_openclaw_config_backup_preserves_pre_patch_state(tmp_path, monkey
     assert active_memory["allowedChatTypes"] == ["direct", "group"]
     assert active_memory["queryMode"] == "recent"
     assert active_memory["promptStyle"] == "balanced"
+    assert live_data["plugins"]["entries"]["novaspine-memory"]["config"]["sessionSnapshotMaxPerDay"] == 6
     assert config_path.read_text() != original_text
 
 
