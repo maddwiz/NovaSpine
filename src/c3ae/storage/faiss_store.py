@@ -50,28 +50,94 @@ class FAISSStore:
     def size(self) -> int:
         return self._index.ntotal
 
+    def _snapshot_rows(self) -> tuple[list[str], np.ndarray]:
+        count = min(len(self._id_map), self._index.ntotal)
+        if count <= 0:
+            return [], np.zeros((0, self.dims), dtype=np.float32)
+        vecs = np.zeros((count, self.dims), dtype=np.float32)
+        for i in range(count):
+            vecs[i] = self._index.reconstruct(i)
+        return list(self._id_map[:count]), vecs
+
+    def _dedupe_rows(
+        self, external_ids: list[str], vectors: np.ndarray
+    ) -> tuple[list[str], np.ndarray]:
+        if not external_ids:
+            return [], np.zeros((0, self.dims), dtype=np.float32)
+        last_pos: dict[str, int] = {}
+        for idx, external_id in enumerate(external_ids):
+            last_pos[external_id] = idx
+        keep_positions = sorted(last_pos.values())
+        keep_ids = [external_ids[i] for i in keep_positions]
+        keep_vecs = vectors[keep_positions] if len(keep_positions) > 0 else np.zeros(
+            (0, self.dims), dtype=np.float32
+        )
+        return keep_ids, keep_vecs
+
+    def _rebuild_index(self, vectors: np.ndarray, external_ids: list[str]) -> None:
+        self._index = faiss.IndexFlatIP(self.dims)
+        self._id_map = list(external_ids)
+        self._id_to_pos = {eid: i for i, eid in enumerate(self._id_map)}
+        if len(external_ids) == 0:
+            return
+        vecs = np.ascontiguousarray(vectors.astype(np.float32))
+        faiss.normalize_L2(vecs)
+        self._index.add(vecs)
+        self.maybe_upgrade_to_ivf()
+
+    def _repair_loaded_state(self) -> None:
+        row_count = min(len(self._id_map), self._index.ntotal)
+        duplicate_ids = len(set(self._id_map[:row_count])) != row_count
+        has_mismatch = self._index.ntotal != len(self._id_map)
+        if not duplicate_ids and not has_mismatch:
+            self._id_to_pos = {eid: i for i, eid in enumerate(self._id_map)}
+            return
+        ext_ids, vecs = self._snapshot_rows()
+        ext_ids, vecs = self._dedupe_rows(ext_ids, vecs)
+        self._rebuild_index(vecs, ext_ids)
+
     def add(self, vector: np.ndarray, external_id: str) -> int:
         """Add a single L2-normalized vector. Returns internal index."""
-        vec = np.ascontiguousarray(vector.reshape(1, -1).astype(np.float32))
-        faiss.normalize_L2(vec)
-        idx = self._index.ntotal
-        self._index.add(vec)
-        self._id_map.append(external_id)
-        self._id_to_pos[external_id] = idx
-        return idx
+        return self.add_batch(vector.reshape(1, -1), [external_id])[0]
 
     def add_batch(self, vectors: np.ndarray, external_ids: list[str]) -> list[int]:
         """Add multiple L2-normalized vectors."""
         if len(vectors) != len(external_ids):
             raise StorageError("vectors and external_ids length mismatch")
+        if len(external_ids) == 0:
+            return []
         vecs = np.ascontiguousarray(vectors.astype(np.float32))
         faiss.normalize_L2(vecs)
-        start_idx = self._index.ntotal
-        self._index.add(vecs)
-        self._id_map.extend(external_ids)
-        for offset, external_id in enumerate(external_ids):
-            self._id_to_pos[external_id] = start_idx + offset
-        return list(range(start_idx, start_idx + len(external_ids)))
+        incoming_ids, incoming_vecs = self._dedupe_rows(external_ids, vecs)
+        needs_rebuild = (
+            len(incoming_ids) != len(external_ids)
+            or any(external_id in self._id_to_pos for external_id in incoming_ids)
+            or self._index.ntotal != len(self._id_map)
+            or len(self._id_map) != len(self._id_to_pos)
+        )
+        if not needs_rebuild:
+            start_idx = self._index.ntotal
+            self._index.add(incoming_vecs)
+            self._id_map.extend(incoming_ids)
+            for offset, external_id in enumerate(incoming_ids):
+                self._id_to_pos[external_id] = start_idx + offset
+            return [self._id_to_pos[external_id] for external_id in incoming_ids]
+
+        keep_ids, keep_vecs = self._snapshot_rows()
+        incoming_set = set(incoming_ids)
+        filtered_positions = [i for i, external_id in enumerate(keep_ids) if external_id not in incoming_set]
+        filtered_ids = [keep_ids[i] for i in filtered_positions]
+        filtered_vecs = keep_vecs[filtered_positions] if filtered_positions else np.zeros(
+            (0, self.dims), dtype=np.float32
+        )
+        combined_ids = filtered_ids + incoming_ids
+        if len(filtered_ids) > 0:
+            combined_vecs = np.vstack([filtered_vecs, incoming_vecs])
+        else:
+            combined_vecs = incoming_vecs
+        combined_ids, combined_vecs = self._dedupe_rows(combined_ids, combined_vecs)
+        self._rebuild_index(combined_vecs, combined_ids)
+        return [self._id_to_pos[external_id] for external_id in incoming_ids]
 
     def search(self, query_vector: np.ndarray, top_k: int = 20) -> list[tuple[str, float]]:
         """Search for nearest neighbors. Returns [(external_id, score), ...]."""
@@ -112,25 +178,13 @@ class FAISSStore:
         """Remove by external ID. Rebuilds index (expensive)."""
         if external_id not in self._id_map:
             return False
-        idx = self._id_map.index(external_id)
-        # Reconstruct all vectors except the one to remove
-        n = self._index.ntotal
-        if n <= 1:
-            self._index = faiss.IndexFlatIP(self.dims)
-            self._id_map = []
-            self._id_to_pos = {}
-            return True
-        all_vecs = np.zeros((n, self.dims), dtype=np.float32)
-        for i in range(n):
-            all_vecs[i] = self._index.reconstruct(i)
-        keep_mask = list(range(n))
-        keep_mask.pop(idx)
-        keep_vecs = all_vecs[keep_mask]
-        self._id_map.pop(idx)
-        self._id_to_pos = {eid: i for i, eid in enumerate(self._id_map)}
-        self._index = faiss.IndexFlatIP(self.dims)
-        if len(keep_vecs) > 0:
-            self._index.add(keep_vecs)
+        keep_ids, keep_vecs = self._snapshot_rows()
+        filtered_positions = [i for i, eid in enumerate(keep_ids) if eid != external_id]
+        filtered_ids = [keep_ids[i] for i in filtered_positions]
+        filtered_vecs = keep_vecs[filtered_positions] if filtered_positions else np.zeros(
+            (0, self.dims), dtype=np.float32
+        )
+        self._rebuild_index(filtered_vecs, filtered_ids)
         return True
 
     def maybe_upgrade_to_ivf(self) -> bool:
@@ -157,16 +211,27 @@ class FAISSStore:
         """Persist index and ID map to disk."""
         if not self.faiss_dir:
             raise StorageError("No faiss_dir configured")
-        faiss.write_index(self._index, str(self.faiss_dir / "memory.index"))
-        with open(self.faiss_dir / "memory.idmap", "w") as f:
+        index_path = self.faiss_dir / "memory.index"
+        idmap_path = self.faiss_dir / "memory.idmap"
+        index_tmp = self.faiss_dir / "memory.index.tmp"
+        idmap_tmp = self.faiss_dir / "memory.idmap.tmp"
+        faiss.write_index(self._index, str(index_tmp))
+        with open(idmap_tmp, "w") as f:
             json.dump(self._id_map, f)
+        index_tmp.replace(index_path)
+        idmap_tmp.replace(idmap_path)
 
     def _try_load(self) -> None:
         """Load index from disk if files exist."""
         index_path = self.faiss_dir / "memory.index"
         idmap_path = self.faiss_dir / "memory.idmap"
         if index_path.exists() and idmap_path.exists():
-            self._index = faiss.read_index(str(index_path))
-            with open(idmap_path) as f:
-                self._id_map = json.load(f)
-            self._id_to_pos = {eid: i for i, eid in enumerate(self._id_map)}
+            try:
+                self._index = faiss.read_index(str(index_path))
+                with open(idmap_path) as f:
+                    self._id_map = json.load(f)
+                self._repair_loaded_state()
+            except Exception:
+                self._index = faiss.IndexFlatIP(self.dims)
+                self._id_map = []
+                self._id_to_pos = {}
