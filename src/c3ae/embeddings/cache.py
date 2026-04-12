@@ -16,9 +16,9 @@ class EmbeddingCache:
         self.store = store
         self.model = model
 
-    @staticmethod
-    def _hash(text: str) -> str:
-        return hashlib.sha256(text.encode()).hexdigest()
+    def _hash(self, text: str) -> str:
+        payload = f"{self.model}\0{text}"
+        return hashlib.sha256(payload.encode()).hexdigest()
 
     def get(self, text: str) -> np.ndarray | None:
         h = self._hash(text)

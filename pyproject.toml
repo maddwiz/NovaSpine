@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "novaspine"
-version = "0.3.1"
+version = "0.3.2"
 description = "NovaSpine — long-term memory for LLM agents with hybrid vector + keyword search"
 requires-python = ">=3.12"
 license = "MIT"

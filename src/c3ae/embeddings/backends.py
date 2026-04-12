@@ -82,11 +82,13 @@ class OllamaEmbedder:
         dims: int = 768,
         base_url: str = "http://127.0.0.1:11434",
         timeout: float = 30.0,
+        keep_alive: str = "30m",
     ) -> None:
         self.model = model
         self.dims = dims
         self.base_url = base_url
         self.timeout = timeout
+        self.keep_alive = keep_alive
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -98,9 +100,25 @@ class OllamaEmbedder:
         if not texts:
             return np.zeros((0, self.dims), dtype=np.float32)
         client = await self._get_client()
+        try:
+            resp = await client.post(
+                "/api/embed",
+                json={"model": self.model, "input": texts, "keep_alive": self.keep_alive},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embeddings = data.get("embeddings", [])
+            if len(embeddings) == len(texts):
+                return np.array(embeddings, dtype=np.float32)
+        except Exception:
+            pass
+
         out: list[list[float]] = []
         for text in texts:
-            resp = await client.post("/api/embeddings", json={"model": self.model, "prompt": text})
+            resp = await client.post(
+                "/api/embeddings",
+                json={"model": self.model, "prompt": text, "keep_alive": self.keep_alive},
+            )
             resp.raise_for_status()
             data = resp.json()
             out.append(data.get("embedding", []))

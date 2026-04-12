@@ -23,15 +23,30 @@ from c3ae.config import Config
 from c3ae.memory_spine.spine import MemorySpine
 
 
-async def backfill(batch_size: int = 32, delay: float = 0.5, limit: int = 0):
+def _normalize_text(text: str, max_chars: int) -> str:
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars]
+    return text
+
+
+async def _embed_batch(spine: MemorySpine, batch_ids: list[str], batch_texts: list[str]) -> int:
+    before_size = spine.faiss.size
+    await spine._embed_and_index(batch_ids, batch_texts)
+    return max(0, spine.faiss.size - before_size)
+
+
+async def backfill(batch_size: int = 32, delay: float = 0.5, limit: int = 0, max_chars: int = 0):
     config = Config()
     spine = MemorySpine(config)
+    provider = (config.venice.embedding_provider or "venice").strip().lower()
+    model = config.venice.embedding_model
+    dims = config.venice.embedding_dims
 
     # Get all chunk IDs from SQLite
     rows = spine.sqlite._conn.execute(
         "SELECT id, content FROM chunks ORDER BY rowid"
     ).fetchall()
-    all_chunk_ids = [(r["id"], r["content"]) for r in rows]
+    all_chunk_ids = [(r["id"], _normalize_text(r["content"], max_chars)) for r in rows]
     total_chunks = len(all_chunk_ids)
 
     # Get IDs already in FAISS
@@ -51,13 +66,11 @@ async def backfill(batch_size: int = 32, delay: float = 0.5, limit: int = 0):
         to_embed = to_embed[:limit]
         print(f"Limiting to first {limit} chunks")
 
-    # Verify Venice API key is set
-    if not config.venice.api_key:
-        print("ERROR: VENICE_API_KEY not set. Export it or set in environment.")
-        sys.exit(1)
-
     print(f"\nStarting backfill with batch_size={batch_size}, delay={delay}s")
-    print(f"Venice model: {config.venice.embedding_model}")
+    print(f"Embedding provider: {provider}")
+    print(f"Embedding model: {model}")
+    print(f"Embedding dims: {dims}")
+    print(f"Max chars per chunk: {max_chars or 'unbounded'}")
     print(f"FAISS dir: {config.faiss_dir}")
     print()
 
@@ -71,8 +84,19 @@ async def backfill(batch_size: int = 32, delay: float = 0.5, limit: int = 0):
         batch_texts = [content for _, content in batch]
 
         try:
-            await spine._embed_and_index(batch_ids, batch_texts)
-            embedded += len(batch)
+            inserted = await _embed_batch(spine, batch_ids, batch_texts)
+            if inserted == 0 and len(batch_ids) > 1:
+                for single_id, single_text in zip(batch_ids, batch_texts):
+                    try:
+                        inserted += await _embed_batch(spine, [single_id], [single_text])
+                    except Exception as single_exc:
+                        print(f"    skipped {single_id}: {single_exc}")
+            if inserted == 0:
+                raise RuntimeError(
+                    f"No vectors inserted for batch {i // batch_size} using provider={provider}; "
+                    "check embedding backend configuration."
+                )
+            embedded += inserted
 
             elapsed = time.time() - start_time
             rate = embedded / elapsed if elapsed > 0 else 0
@@ -110,9 +134,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32, help="Chunks per API call")
     parser.add_argument("--delay", type=float, default=0.5, help="Seconds between batches")
     parser.add_argument("--limit", type=int, default=0, help="Max chunks to embed (0=all)")
+    parser.add_argument("--max-chars", type=int, default=0, help="Truncate chunk text to this many chars before embedding (0=unbounded)")
     args = parser.parse_args()
 
-    asyncio.run(backfill(args.batch_size, args.delay, args.limit))
+    asyncio.run(backfill(args.batch_size, args.delay, args.limit, args.max_chars))
 
 
 if __name__ == "__main__":
