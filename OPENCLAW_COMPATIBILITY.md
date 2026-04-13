@@ -28,6 +28,8 @@ The truth is between those two.
 | `2026.4.7` | Supported | Verified installer/doctor flow |
 | `2026.4.9` | Supported | Verified in live NovaSpine-backed OpenClaw deployments |
 | `2026.4.10` | Supported | Verified in live NovaSpine-backed OpenClaw deployments; NovaSpine plugin carries Active Memory support |
+| `2026.4.11` | Supported | OpenClaw stable on 2026-04-12; stock `memory-core` Dreaming import/UI additions are not auto-ported when NovaSpine owns the memory slot |
+| `2026.4.12` | Supported | OpenClaw stable on 2026-04-13; NovaSpine carries the directly relevant memory-side fixes for unicode wiki slugs and nested daily-note recall |
 
 ## Upgrade Behavior Matrix
 

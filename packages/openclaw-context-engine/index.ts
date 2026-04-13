@@ -49,6 +49,8 @@ type PersistedState = {
   sessionFingerprints: Record<string, string>;
 };
 
+const DAILY_NOTE_FILENAME_RE = /^\d{4}-\d{2}-\d{2}\.md$/;
+
 const CONTEXT_ENGINE_GUIDANCE = [
   "NovaSpine context-engine mode is available.",
   "Treat the injected <nova-context-engine> envelope as a compacted working set, not as ground truth.",
@@ -257,6 +259,29 @@ function workspaceMemoryDir(api: OpenClawPluginApi): string {
   return api.resolvePath("~/.openclaw/workspace/memory");
 }
 
+async function collectWorkspaceMemoryFiles(
+  rootDir: string,
+  relativeDir = "",
+): Promise<Array<{ relativePath: string; mtimeMs: number }>> {
+  const currentDir = relativeDir ? `${rootDir}/${relativeDir}` : rootDir;
+  const entries = await readdir(currentDir, { withFileTypes: true });
+  const files: Array<{ relativePath: string; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (entry.name.toLowerCase() === "dreaming") continue;
+      files.push(...(await collectWorkspaceMemoryFiles(rootDir, relativePath)));
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    const isNested = relativePath.includes("/");
+    if (isNested && !DAILY_NOTE_FILENAME_RE.test(entry.name)) continue;
+    const info = await stat(`${rootDir}/${relativePath}`);
+    files.push({ relativePath, mtimeMs: info.mtimeMs });
+  }
+  return files;
+}
+
 async function loadWorkspaceMemoryHighlights(
   api: OpenClawPluginApi,
   recentFiles: number,
@@ -264,10 +289,9 @@ async function loadWorkspaceMemoryHighlights(
 ): Promise<Array<{ file: string; text: string }>> {
   const dir = workspaceMemoryDir(api);
   try {
-    const files = (await readdir(dir))
-      .filter((name) => name.endsWith(".md"))
-      .sort()
-      .reverse()
+    const files = (await collectWorkspaceMemoryFiles(dir))
+      .sort((left, right) => right.mtimeMs - left.mtimeMs || right.relativePath.localeCompare(left.relativePath))
+      .map((item) => item.relativePath)
       .slice(0, recentFiles);
     const perFileLimit = Math.max(180, Math.floor(budgetChars / Math.max(1, files.length)));
     const items: Array<{ file: string; text: string }> = [];

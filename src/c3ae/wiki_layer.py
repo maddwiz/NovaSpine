@@ -4,15 +4,53 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 from c3ae.utils import iso_str, utcnow
 
 
+SLUG_MAX_BYTES = 120
+
+
+def _trim_utf8_bytes(value: str, limit: int = SLUG_MAX_BYTES) -> str:
+    parts: list[str] = []
+    used = 0
+    for char in value:
+        encoded = char.encode("utf-8")
+        if used + len(encoded) > limit:
+            break
+        parts.append(char)
+        used += len(encoded)
+    return "".join(parts)
+
+
 def _slugify(value: str) -> str:
-    text = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower())
-    text = re.sub(r"-{2,}", "-", text).strip("-")
+    text = unicodedata.normalize("NFKC", (value or "").strip().lower())
+    slug_parts: list[str] = []
+    last_was_dash = False
+    for char in text:
+        category = unicodedata.category(char)
+        if category.startswith(("L", "N")):
+            slug_parts.append(char)
+            last_was_dash = False
+            continue
+        if category.startswith("M"):
+            if slug_parts and slug_parts[-1] != "-":
+                slug_parts.append(char)
+            continue
+        if char in {"-", "_"}:
+            if slug_parts and not last_was_dash:
+                slug_parts.append("-")
+                last_was_dash = True
+            continue
+        if slug_parts and not last_was_dash:
+            slug_parts.append("-")
+            last_was_dash = True
+    text = "".join(slug_parts).strip("-")
+    text = re.sub(r"-{2,}", "-", text)
+    text = _trim_utf8_bytes(text).strip("-")
     return text or "untitled"
 
 

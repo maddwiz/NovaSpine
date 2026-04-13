@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from c3ae.api import routes
 from c3ae.types import Chunk
+from c3ae.wiki_layer import SLUG_MAX_BYTES, _slugify
 
 
 def _seed_chunk(spine, chunk_id: str, content: str, *, source_id: str = "unit:test") -> str:
@@ -130,3 +131,10 @@ def test_fact_and_wiki_endpoints_compile_and_resolve_conflicts(tmp_path: Path, m
         conflicts_after = client.get("/api/v1/facts/conflicts")
         assert conflicts_after.status_code == 200
         assert conflicts_after.json()["count"] == 0
+
+
+def test_slugify_preserves_unicode_and_caps_utf8_bytes() -> None:
+    assert _slugify("Zoë 王") == "zoë-王"
+    slug = _slugify("王" * 200)
+    assert slug
+    assert len(slug.encode("utf-8")) <= SLUG_MAX_BYTES
