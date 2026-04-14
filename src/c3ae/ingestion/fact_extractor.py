@@ -20,7 +20,11 @@ _DATE_PATTERNS = (
     r"\b(19|20)\d{2}\b",
 )
 _RELATION_PATTERNS: list[tuple[str, str, float]] = [
-    (r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+moved from\s+(?P<value>[^.,;\n]{2,80})", "moved_from", 0.86),
+    (
+        r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+moved from\s+(?P<value>[^.,;\n]{2,80}?)(?:\s+to\s+[^.,;\n]{2,80})?(?:[.,;\n]|$)",
+        "moved_from",
+        0.86,
+    ),
     (r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+moved to\s+(?P<value>[^.,;\n]{2,80})", "moved_to", 0.86),
     (r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+painted\s+(?P<value>[^.,;\n]{2,80})", "painted", 0.84),
     (r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+bought\s+(?P<value>[^.,;\n]{2,80})", "bought", 0.82),
@@ -69,6 +73,61 @@ def _clean_value(value: str) -> str:
     return out
 
 
+def _clean_location_value(value: str) -> str:
+    out = _clean_value(value)
+    out = re.sub(
+        r"\s+(?:last|this|next)\s+(?:day|week|month|year|spring|summer|fall|autumn|winter)\b.*$",
+        "",
+        out,
+        flags=re.IGNORECASE,
+    ).strip()
+    out = re.sub(r"\s+(?:today|yesterday|recently|currently)\b.*$", "", out, flags=re.IGNORECASE).strip()
+    return out
+
+
+def _normalize_entity(entity: str) -> str:
+    raw = re.sub(r"\s+", " ", entity or "").strip()
+    if not raw:
+        return ""
+    if raw.lower() in {"i", "me", "my", "myself", "we", "us", "our", "ourselves", "user", "the user", "their", "they"}:
+        return "User"
+    return raw
+
+
+def _append_fact(
+    out: list[StructuredFact],
+    seen: set[tuple[str, str, str, str]],
+    *,
+    entity: str,
+    relation: str,
+    value: str,
+    date: str,
+    confidence: float,
+    source_span: str,
+    max_facts: int,
+) -> bool:
+    normalized_entity = _normalize_entity(entity)
+    normalized_relation = _normalize_relation(relation)
+    normalized_value = _clean_location_value(value) if normalized_relation == "location" else _clean_value(value)
+    if not normalized_entity or not normalized_relation or not normalized_value:
+        return False
+    key = (normalized_entity.lower(), normalized_relation, normalized_value.lower(), (date or "").lower())
+    if key in seen:
+        return False
+    seen.add(key)
+    out.append(
+        StructuredFact(
+            entity=normalized_entity,
+            relation=normalized_relation,
+            value=normalized_value,
+            date=date or "",
+            confidence=float(confidence),
+            source_span=source_span.strip()[:200],
+        )
+    )
+    return len(out) >= max(1, int(max_facts))
+
+
 def extract_facts(text: str, *, max_facts: int = 10) -> list[StructuredFact]:
     """High-precision heuristic structured fact extraction."""
     if not text.strip():
@@ -77,29 +136,95 @@ def extract_facts(text: str, *, max_facts: int = 10) -> list[StructuredFact]:
     seen: set[tuple[str, str, str, str]] = set()
     for sentence in _split_sentences(text):
         sentence_date = _extract_date_hint(sentence)
+        moved_match = re.search(
+            r"\b(?P<entity>(?:[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})|(?:I|We|User|The user))\s+moved from\s+"
+            r"(?P<old>[^.,;\n]{2,80}?)\s+to\s+(?P<new>[^.,;\n]{2,80}?)(?:[.,;\n]|$)",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if moved_match:
+            entity = moved_match.group("entity")
+            if _append_fact(
+                out,
+                seen,
+                entity=entity,
+                relation="moved_from",
+                value=moved_match.group("old"),
+                date=sentence_date,
+                confidence=0.92,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
+            if _append_fact(
+                out,
+                seen,
+                entity=entity,
+                relation="location",
+                value=moved_match.group("new"),
+                date=sentence_date,
+                confidence=0.94,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
+        current_location_patterns = [
+            (
+                r"\b(?P<value>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,3})\s+is now\s+(?:their|my|our|the user's)\s+"
+                r"(?:current\s+)?city(?:\s+of\s+residence)?\b",
+                "location",
+                0.94,
+            ),
+            (
+                r"\b(?:since\s+[^,]+,\s*)?(?:my|our)\s+home base has been\s+"
+                r"(?P<value>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,3})\b",
+                "location",
+                0.9,
+            ),
+            (
+                r"\b(?:i am|i'm|we are|we're|the user is)\s+(?:currently\s+)?based in\s+"
+                r"(?P<value>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,3})\b",
+                "location",
+                0.88,
+            ),
+            (
+                r"\b(?:i live in|i'm in|we live in|we're in|the user lives in)\s+"
+                r"(?P<value>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,3})\b",
+                "location",
+                0.86,
+            ),
+        ]
+        for pattern, relation, base_conf in current_location_patterns:
+            match = re.search(pattern, sentence, flags=re.IGNORECASE)
+            if not match:
+                continue
+            if _append_fact(
+                out,
+                seen,
+                entity="User",
+                relation=relation,
+                value=match.group("value"),
+                date=sentence_date,
+                confidence=base_conf,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
         for pattern, relation, base_conf in _RELATION_PATTERNS:
             m = re.search(pattern, sentence, flags=re.IGNORECASE)
             if not m:
                 continue
-            entity = re.sub(r"\s+", " ", m.group("entity")).strip()
-            value = _clean_value(m.group("value"))
-            if not entity or not value:
-                continue
-            key = (entity.lower(), relation, value.lower(), sentence_date.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(
-                StructuredFact(
-                    entity=entity,
-                    relation=_normalize_relation(relation),
-                    value=value,
-                    date=sentence_date,
-                    confidence=float(base_conf),
-                    source_span=sentence.strip()[:200],
-                )
-            )
-            if len(out) >= max(1, int(max_facts)):
+            if _append_fact(
+                out,
+                seen,
+                entity=m.group("entity"),
+                relation=relation,
+                value=m.group("value"),
+                date=sentence_date,
+                confidence=base_conf,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
                 return out
     return out
 
@@ -173,4 +298,3 @@ async def extract_facts_async(
     except Exception:
         pass
     return extract_facts(text, max_facts=max_facts)
-

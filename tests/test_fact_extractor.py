@@ -15,6 +15,19 @@ def test_extract_facts_pulls_entity_relation_value_and_date():
     rendered = {(f.entity, f.relation, f.value) for f in facts}
     assert ("Melanie", "painted", "sunset on July 12, 2023") in rendered or ("Melanie", "painted", "sunset on July 12") in rendered
     assert any(f.relation == "moved_from" for f in facts)
+    assert ("Caroline", "location", "Denver") in rendered
+
+
+def test_extract_facts_handles_first_person_current_location_updates():
+    text = (
+        "User moved from Denver to Santa Fe last month. "
+        "Santa Fe is now their current city of residence. "
+        "Since March, my home base has been Santa Fe."
+    )
+    facts = extract_facts(text, max_facts=8)
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "moved_from", "Denver") in rendered
+    assert ("User", "location", "Santa Fe") in rendered
 
 
 class _FakeResp:
@@ -41,4 +54,3 @@ async def test_extract_facts_async_llm_mode_parses_json_payload():
     assert facts[0].entity == "Caroline"
     assert facts[0].relation == "moved_from"
     assert facts[0].value == "Sweden"
-

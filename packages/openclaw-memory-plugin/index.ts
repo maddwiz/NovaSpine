@@ -1335,7 +1335,7 @@ const NOVASPINE_GUIDANCE = [
   "For prior-session recall, remembered phrases, stable preferences, or 'what did I tell you to remember?' questions, call novaspine_recall.",
   "If the user asks you to remember a stable preference or fact, call novaspine_store.",
   "For provenance or 'why did you remember that?' questions, call novaspine_explain.",
-  "For facts that may have changed over time, call novaspine_current_facts.",
+  "For facts that may have changed over time, call novaspine_current_facts first; if it returns no facts, fall back to novaspine_recall before saying you do not know.",
   "For conflicting current facts, call novaspine_resolution_prepare, ask the user which option should stay current, then call novaspine_resolution_apply after explicit approval.",
   "Prefer novaspine_recall over generic memory_search for cross-session conversational memory.",
   "For dreaming, reflection, or dream diary questions, call novaspine_dream_status or novaspine_dream_diary.",
