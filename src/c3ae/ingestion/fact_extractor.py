@@ -170,6 +170,13 @@ def extract_facts(text: str, *, max_facts: int = 10) -> list[StructuredFact]:
                 return out
         current_location_patterns = [
             (
+                r"\b(?:earlier(?:\s+in\s+the\s+year)?|before|previously|once)?\s*"
+                r"(?:i was|i'd been|we were|we'd been|the user was)\s+(?:still\s+)?based in\s+"
+                r"(?P<value>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,3})\b",
+                "location",
+                0.84,
+            ),
+            (
                 r"\b(?P<value>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,3})\s+is now\s+(?:their|my|our|the user's)\s+"
                 r"(?:current\s+)?city(?:\s+of\s+residence)?\b",
                 "location",

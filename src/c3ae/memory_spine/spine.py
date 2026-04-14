@@ -305,6 +305,7 @@ class MemorySpine:
     async def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         """Hybrid search across all memory tiers."""
         top_k = top_k or self.config.retrieval.default_top_k
+        query_profile = self.hybrid_search.analyze_query(query)
 
         # Try to get query embedding (may fail if no API key)
         query_vec = None
@@ -319,6 +320,12 @@ class MemorySpine:
             pass  # Fall back to keyword-only
 
         benchmark_case_query = bool(self._extract_benchmark_case_token(query))
+        if bool(self.config.ingestion.enable_fact_extraction) and not benchmark_case_query:
+            routed_structured = self._route_structured_query(query, query_profile, top_k=top_k)
+            if routed_structured:
+                self._record_access(routed_structured)
+                self.audit.log_search(query, len(routed_structured))
+                return routed_structured[:top_k]
         results = self.hybrid_search.search(
             query,
             query_vector=query_vec,
@@ -1349,7 +1356,198 @@ class MemorySpine:
             case_token = self._extract_benchmark_case_token(text) or self._extract_benchmark_case_token(source_id)
             if case_token:
                 merged["benchmark_case_token"] = case_token
+        if source_id and "source_id" not in merged:
+            merged["source_id"] = source_id
+        if "memory_scope" not in merged:
+            scope = self._infer_memory_scope(source_id, merged)
+            if scope:
+                merged["memory_scope"] = scope
         return merged
+
+    def _route_structured_query(
+        self,
+        query: str,
+        query_profile: Any,
+        *,
+        top_k: int,
+    ) -> list[SearchResult]:
+        if not bool(getattr(query_profile, "is_first_person", False)):
+            return []
+        if not bool(getattr(query_profile, "wants_current_state", False)):
+            return []
+        relation = self._infer_fact_relation_hint(query)
+        if bool(getattr(query_profile, "wants_history", False)):
+            groups = self.sqlite.list_structured_truth(
+                entity="User",
+                relation=relation,
+                limit=max(top_k * 3, 10),
+            )
+            if not groups:
+                groups = self.sqlite.list_structured_truth(limit=max(top_k * 4, 16))
+            return self._rank_structured_truth(query, groups, top_k=top_k)
+
+        facts = self.sqlite.list_current_structured_facts(
+            entity="User",
+            relation=relation,
+            limit=max(top_k * 4, 12),
+        )
+        if not facts:
+            facts = self.sqlite.list_current_structured_facts(limit=max(top_k * 5, 20))
+        return self._rank_current_facts(query, facts, top_k=top_k)
+
+    def _rank_current_facts(
+        self,
+        query: str,
+        facts: list[dict[str, Any]],
+        *,
+        top_k: int,
+    ) -> list[SearchResult]:
+        query_tokens = self._tokenize_query(query)
+        ranked: list[tuple[float, SearchResult]] = []
+        for fact in facts:
+            source_meta = self._fact_source_metadata(fact)
+            scope = str(source_meta.get("memory_scope") or self._infer_memory_scope("", source_meta)).lower()
+            entity = str(fact.get("entity") or "").strip()
+            relation = str(fact.get("relation") or "").strip()
+            value = str(fact.get("value") or "").strip()
+            if not value:
+                continue
+            text = f"{entity} {relation} {value}".strip()
+            overlap = self._overlap_score(query_tokens, text)
+            score = 3.0 + overlap + float(fact.get("confidence") or 0.0)
+            if entity.lower() == "user":
+                score += 1.0
+            if scope == "personal":
+                score += 0.8
+            elif scope == "shared":
+                score -= 0.4
+            result = SearchResult(
+                id=str(fact.get("id") or ""),
+                content=text,
+                score=score,
+                source="structured_fact_current",
+                metadata={
+                    **source_meta,
+                    "entity": entity,
+                    "relation": relation,
+                    "value": value,
+                    "_source_kind": "structured_fact_current",
+                },
+            )
+            ranked.append((score, result))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [result for _, result in ranked[:top_k]]
+
+    def _rank_structured_truth(
+        self,
+        query: str,
+        groups: list[dict[str, Any]],
+        *,
+        top_k: int,
+    ) -> list[SearchResult]:
+        query_tokens = self._tokenize_query(query)
+        ranked: list[tuple[float, SearchResult]] = []
+        for group in groups:
+            entity = str(group.get("entity") or "").strip()
+            relation = str(group.get("relation") or "").strip()
+            current = list(group.get("current_facts") or [])
+            historical = list(group.get("historical_facts") or [])
+            current_values = [str(item.get("value") or "").strip() for item in current if str(item.get("value") or "").strip()]
+            historical_values = [str(item.get("value") or "").strip() for item in historical if str(item.get("value") or "").strip()]
+            if not current_values and not historical_values:
+                continue
+            segments: list[str] = []
+            if current_values:
+                segments.append(f"current: {', '.join(current_values)}")
+            if historical_values:
+                segments.append(f"historical: {', '.join(historical_values[:3])}")
+            text = f"{entity} {relation} {'; '.join(segments)}".strip()
+            source_meta = self._fact_source_metadata(current[0] if current else historical[0])
+            scope = str(source_meta.get("memory_scope") or self._infer_memory_scope("", source_meta)).lower()
+            overlap = self._overlap_score(query_tokens, text)
+            score = 3.4 + overlap + (0.5 if entity.lower() == "user" else 0.0)
+            if current_values:
+                score += 0.2
+            if historical_values:
+                score += 0.2
+            if scope == "personal":
+                score += 0.8
+            elif scope == "shared":
+                score -= 0.4
+            result = SearchResult(
+                id=f"truth:{entity}:{relation}",
+                content=text,
+                score=score,
+                source="structured_truth",
+                metadata={
+                    **source_meta,
+                    "entity": entity,
+                    "relation": relation,
+                    "_source_kind": "structured_truth",
+                },
+            )
+            ranked.append((score, result))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [result for _, result in ranked[:top_k]]
+
+    @staticmethod
+    def _tokenize_query(raw: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9_\-]+", raw.lower()))
+
+    @classmethod
+    def _overlap_score(cls, query_tokens: set[str], text: str) -> float:
+        if not query_tokens:
+            return 0.0
+        result_tokens = cls._tokenize_query(text)
+        overlap = query_tokens & result_tokens
+        return float(len(overlap))
+
+    @staticmethod
+    def _fact_source_metadata(fact: dict[str, Any]) -> dict[str, Any]:
+        metadata = dict(fact.get("metadata") or {})
+        source_meta = metadata.get("source")
+        if isinstance(source_meta, dict):
+            merged = dict(source_meta)
+        else:
+            merged = {}
+        if "memory_scope" not in merged and isinstance(metadata.get("memory_scope"), str):
+            merged["memory_scope"] = metadata["memory_scope"]
+        return merged
+
+    def _infer_fact_relation_hint(self, query: str) -> str:
+        q = query.lower()
+        tokens = self._tokenize_query(query)
+        if (
+            {"where", "based", "base", "live", "living", "city", "location", "home"} & tokens
+            or any(phrase in q for phrase in ("home base", "based these days", "based now", "where am i"))
+        ):
+            return "location"
+        return ""
+
+    def _infer_memory_scope(
+        self,
+        source_id: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        direct_scope = str(metadata.get("memory_scope") or "").strip().lower()
+        if direct_scope in {"personal", "shared"}:
+            return direct_scope
+        pathish = " ".join(
+            filter(
+                None,
+                [
+                    source_id,
+                    str(metadata.get("path") or ""),
+                    str(metadata.get("session_id") or ""),
+                    str(metadata.get("source_id") or ""),
+                ],
+            )
+        ).lower()
+        if any(token in pathish for token in ("personal", "private", "/dm/", "dm-", "user", "direct")):
+            return "personal"
+        if any(token in pathish for token in ("team", "shared", "channel", "group")):
+            return "shared"
+        return ""
 
     @staticmethod
     def _extract_benchmark_case_token(raw: str) -> str:

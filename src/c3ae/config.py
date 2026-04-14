@@ -142,6 +142,15 @@ class RetrievalConfig(BaseModel):
     graph_weight: float = 0.2
     rrf_k: int = 30
     rrf_overlap_boost: float = 1.25
+    personal_memory_boost: float = Field(
+        default_factory=lambda: _env_float("C3AE_PERSONAL_MEMORY_BOOST", 1.45)
+    )
+    shared_memory_penalty: float = Field(
+        default_factory=lambda: _env_float("C3AE_SHARED_MEMORY_PENALTY", 0.92)
+    )
+    current_fact_boost: float = Field(
+        default_factory=lambda: _env_float("C3AE_CURRENT_FACT_BOOST", 1.15)
+    )
     enable_query_expansion: bool = Field(
         default_factory=lambda: _env_bool("C3AE_QUERY_EXPANSION", False)
     )

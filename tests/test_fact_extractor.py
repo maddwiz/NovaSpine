@@ -30,6 +30,16 @@ def test_extract_facts_handles_first_person_current_location_updates():
     assert ("User", "location", "Santa Fe") in rendered
 
 
+def test_extract_facts_handles_first_person_historical_location_statements():
+    facts = extract_facts(
+        "Earlier in the year I was still based in Denver. Since March, my home base has been Santa Fe.",
+        max_facts=8,
+    )
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "location", "Denver") in rendered
+    assert ("User", "location", "Santa Fe") in rendered
+
+
 class _FakeResp:
     def __init__(self, content: str) -> None:
         self.content = content

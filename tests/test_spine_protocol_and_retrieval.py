@@ -37,13 +37,18 @@ def _mk_result(
     score: float,
     hours_old: float,
     source_kind: str = "chunk",
+    metadata: dict[str, object] | None = None,
 ) -> SearchResult:
     return SearchResult(
         id=rid,
         content=f"content-{rid}",
         score=score,
         source="test",
-        metadata={"_created_at": _ts(hours_old), "_source_kind": source_kind},
+        metadata={
+            "_created_at": _ts(hours_old),
+            "_source_kind": source_kind,
+            **(metadata or {}),
+        },
     )
 
 
@@ -180,6 +185,35 @@ def test_hybrid_rrf_overlap_bonus_promotes_dual_source_hit():
     h_yes = HybridSearch(_KeywordStub(kw_results), _VectorStub(vec_results), config=cfg_boost)
     out_yes = h_yes.search("generic query", query_vector=object(), top_k=3)
     assert out_yes[0].id == "both"
+
+
+def test_hybrid_first_person_query_boosts_personal_scope():
+    cfg = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=False,
+        personal_memory_boost=1.8,
+        shared_memory_penalty=0.8,
+    )
+    team_hit = _mk_result(
+        "team-hit",
+        score=0.5,
+        hours_old=0.1,
+        metadata={"path": "memory/sessions/team/2026-01-01-team.md"},
+    )
+    personal_hit = _mk_result(
+        "personal-hit",
+        score=0.5,
+        hours_old=0.1,
+        metadata={"path": "memory/sessions/personal/2026-01-01-me.md", "session_id": "personal-01"},
+    )
+    kw = _KeywordStub([team_hit, personal_hit])
+    vec = _VectorStub([team_hit, personal_hit])
+    hybrid = HybridSearch(kw, vec, config=cfg)
+
+    merged = hybrid.search("What coffee do I usually order?", query_vector=object(), top_k=2)
+    assert [r.id for r in merged] == ["personal-hit", "team-hit"]
 
 
 def test_hash_embedder_is_deterministic_and_normalized():
@@ -445,3 +479,52 @@ def test_ingest_sync_skip_chunking_uses_single_chunk(tmp_path):
         assert len(single_ids) == 1
     finally:
         asyncio.run(spine.close())
+
+
+def test_search_routes_first_person_current_state_queries_to_structured_truth(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+        cfg.ingestion.enable_fact_extraction = True
+        cfg.ingestion.fact_extraction_mode = "heuristic"
+        cfg.venice = cfg.venice.model_copy(
+            update={
+                "embedding_provider": "hash",
+                "embedding_model": "hash-test",
+                "embedding_dims": 64,
+            }
+        )
+
+        spine = MemorySpine(cfg)
+        try:
+            await spine.ingest(
+                "Earlier in the year I was still based in Denver.",
+                source_id="memory/sessions/personal/2026-02-02-session-04.md",
+                metadata={"path": "memory/sessions/personal/2026-02-02-session-04.md", "session_id": "personal-04"},
+            )
+            await spine.ingest(
+                "Since March, my home base has been Santa Fe.",
+                source_id="memory/sessions/personal/2026-03-15-session-05.md",
+                metadata={"path": "memory/sessions/personal/2026-03-15-session-05.md", "session_id": "personal-05"},
+            )
+            await spine.ingest(
+                "Rowan usually works out of Phoenix.",
+                source_id="memory/sessions/team/2026-03-15-team-001.md",
+                metadata={"path": "memory/sessions/team/2026-03-15-team-001.md", "session_id": "team-001"},
+            )
+
+            rows = await spine.search("Where am I based these days?", top_k=3)
+            assert rows
+            assert rows[0].source == "structured_fact_current"
+            assert "santa fe" in rows[0].content.lower()
+
+            truth = await spine.search("Which city did I leave, and where am I now?", top_k=3)
+            assert truth
+            assert truth[0].source == "structured_truth"
+            assert "santa fe" in truth[0].content.lower()
+            assert "denver" in truth[0].content.lower()
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
