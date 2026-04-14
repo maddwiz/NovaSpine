@@ -1,6 +1,6 @@
 """C3/Ae Memory Stack — persistent cognitive memory system."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.3"
 
 from c3ae.protocol import (
     SpineClientV1,

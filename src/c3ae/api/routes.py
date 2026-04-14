@@ -520,7 +520,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     app = FastAPI(
         title="NovaSpine API",
-        version="0.3.0",
+        version="0.3.3",
     )
 
     # Bearer token auth middleware
