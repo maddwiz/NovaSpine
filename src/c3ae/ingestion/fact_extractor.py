@@ -208,11 +208,6 @@ def extract_facts(text: str, *, max_facts: int = 10) -> list[StructuredFact]:
                 0.9,
             ),
             (
-                r"\b(?:the\s+)?(?P<value>[A-Z][\w&\-]+(?:\s+[A-Z0-9][\w&\-]+){0,3})\s+notebook\b",
-                "notebook",
-                0.76,
-            ),
-            (
                 r"\b(?P<value>Field Notes(?:\s+[A-Za-z0-9&\-]+){0,2})\s+keep ending up in the airport kit\b",
                 "notebook",
                 0.72,

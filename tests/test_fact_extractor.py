@@ -97,6 +97,20 @@ def test_extract_facts_handles_profile_and_airport_summary_lines():
     assert ("User", "location", "Santa Fe") in rendered
 
 
+def test_extract_facts_does_not_turn_team_notebooks_into_user_facts():
+    facts = extract_facts(
+        "# Team Session: Dev\n"
+        "Dev moved from Phoenix to Madison, switched from the olive Evergoods CPL24 to the navy Aer City Pack, "
+        "orders black coffee, prefers the rear aisle seat, keeps a Midori notebook, carries a Anker Nano, "
+        "and usually buys gummy worms at the theater.\n",
+        max_facts=16,
+    )
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "notebook", "Midori") not in rendered
+    assert ("Dev", "moved_from", "Phoenix") in rendered
+    assert ("Dev", "location", "Madison") in rendered
+
+
 class _FakeResp:
     def __init__(self, content: str) -> None:
         self.content = content
