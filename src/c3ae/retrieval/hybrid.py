@@ -22,6 +22,14 @@ _CURRENT_STATE_TERMS = {"current", "currently", "today", "now", "present", "late
 _HISTORY_TERMS = {"before", "previous", "earlier", "formerly", "history", "changed", "change", "leave", "left"}
 _PERSONAL_SCOPE_TERMS = ("personal", "private", "dm", "user", "direct")
 _SHARED_SCOPE_TERMS = ("team", "shared", "channel", "group")
+_LOCATION_HINT_TERMS = {"where", "based", "base", "live", "living", "city", "location", "home"}
+_COFFEE_HINT_TERMS = {"coffee", "espresso", "latte", "cappuccino", "americano", "flat", "white", "milk"}
+_BAG_HINT_TERMS = {"bag", "bags", "pack", "backpack", "backpacks", "carry"}
+_NOTEBOOK_HINT_TERMS = {"notebook", "journal", "field", "notes", "moleskine"}
+_CHARGER_HINT_TERMS = {"charger", "charging", "battery", "power"}
+_SEAT_HINT_TERMS = {"seat", "aisle", "window", "middle", "plane", "planes", "flight", "boarding"}
+_SNACK_HINT_TERMS = {"movie", "movies", "theater", "theatre", "film", "films", "concession", "snack", "popcorn", "kettle", "corn"}
+_DRINK_HINT_TERMS = {"drink", "drinks", "water", "sparkling"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,7 @@ class QueryProfile:
     wants_current_state: bool = False
     wants_history: bool = False
     has_multiple_facets: bool = False
+    fact_relation_hints: tuple[str, ...] = ()
 
 
 class HybridSearch:
@@ -190,6 +199,7 @@ class HybridSearch:
         has_multiple_facets = len(tokens) >= 5 and (
             " and " in q or "," in q or " plus " in q
         )
+        fact_relation_hints = cls.infer_fact_relation_hints(query)
         return QueryProfile(
             intent=cls.classify_intent(query),
             tokens=tokens,
@@ -197,7 +207,36 @@ class HybridSearch:
             wants_current_state=wants_current_state,
             wants_history=wants_history,
             has_multiple_facets=has_multiple_facets,
+            fact_relation_hints=fact_relation_hints,
         )
+
+    @classmethod
+    def infer_fact_relation_hints(cls, query: str) -> tuple[str, ...]:
+        q = query.strip().lower()
+        tokens = set(re.findall(r"[a-z0-9_\-]+", q))
+        hints: list[str] = []
+
+        def add(relation: str) -> None:
+            if relation not in hints:
+                hints.append(relation)
+
+        if (tokens & _LOCATION_HINT_TERMS) or any(phrase in q for phrase in ("home base", "based these days", "based now", "where am i")):
+            add("location")
+        if (tokens & _COFFEE_HINT_TERMS) or any(phrase in q for phrase in ("coffee order", "espresso order", "espresso drink", "drink order")):
+            add("coffee_order")
+        if (tokens & _BAG_HINT_TERMS) or any(phrase in q for phrase in ("everyday carry", "workday bag")):
+            add("bag")
+        if (tokens & _NOTEBOOK_HINT_TERMS) or any(phrase in q for phrase in ("field notes", "paper notebook")):
+            add("notebook")
+        if (tokens & _CHARGER_HINT_TERMS) or "power bank" in q:
+            add("charger")
+        if (tokens & _SEAT_HINT_TERMS) or any(phrase in q for phrase in ("aisle seat", "window seat")):
+            add("flight_seat")
+        if (tokens & _SNACK_HINT_TERMS) or any(phrase in q for phrase in ("movie night", "theater snack", "theatre snack")):
+            add("movie_snack")
+        if ("movie_snack" in hints or (tokens & _SNACK_HINT_TERMS)) and ((tokens & _DRINK_HINT_TERMS) or "sparkling water" in q):
+            add("movie_drink")
+        return tuple(hints)
 
     @staticmethod
     def classify_intent(query: str) -> str:
@@ -308,10 +347,22 @@ class HybridSearch:
             entity = self._metadata_value(metadata, "entity").strip().lower()
             if entity == "user":
                 multiplier *= 1.10
-        if profile.wants_current_state:
-            source_kind = self._metadata_value(metadata, "_source_kind").strip().lower()
-            if source_kind in {"structured_fact", "structured_truth", "structured_fact_current"}:
+        source_kind = self._metadata_value(metadata, "_source_kind").strip().lower()
+        relation = self._metadata_value(metadata, "relation").strip().lower()
+        structured_kinds = {"structured_fact", "structured_truth", "structured_fact_current"}
+        if profile.wants_current_state and source_kind in structured_kinds:
+            if profile.fact_relation_hints:
+                if relation in profile.fact_relation_hints:
+                    multiplier *= float(self.config.current_fact_boost)
+                else:
+                    multiplier *= 0.78
+            else:
                 multiplier *= float(self.config.current_fact_boost)
+        elif profile.wants_history and source_kind in structured_kinds and profile.fact_relation_hints:
+            if relation in profile.fact_relation_hints:
+                multiplier *= 1.10
+            else:
+                multiplier *= 0.82
         return multiplier
 
     @classmethod

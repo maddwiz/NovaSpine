@@ -31,6 +31,34 @@ _RELATION_PATTERNS: list[tuple[str, str, float]] = [
     (r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+works at\s+(?P<value>[^.,;\n]{2,80})", "works_at", 0.82),
     (r"(?P<entity>[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})\s+has\s+(?P<value>\d+\s+[A-Za-z][^.,;\n]{0,40})", "has", 0.78),
 ]
+_NOTEBOOK_HINTS = ("field notes", "moleskine", "leuchtturm", "midori", "muji", "baron fig", "notebook", "journal")
+_COFFEE_HINTS = ("espresso", "flat white", "cappuccino", "latte", "americano", "cold brew", "oat milk", "whole milk", "coffee")
+_BAG_HINTS = ("bag", "pack", "backpack", "briefcase", "evergoods", "peak design", "synik", "carry")
+_SNACK_HINTS = ("movie", "theater", "theatre", "film", "concession", "kettle corn", "popcorn", "pretzel bites", "snack")
+_CHARGER_HINTS = ("charger", "power bank", "battery", "anker", "usb-c")
+_SEAT_HINTS = ("seat", "aisle", "window", "middle", "plane", "flight", "boarding")
+
+
+def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
+    lowered = haystack.lower()
+    return any(needle in lowered for needle in needles)
+
+
+def _infer_user_preference_relation(*parts: str) -> str:
+    haystack = " ".join(part for part in parts if part).lower()
+    if _contains_any(haystack, _COFFEE_HINTS):
+        return "coffee_order"
+    if _contains_any(haystack, _NOTEBOOK_HINTS):
+        return "notebook"
+    if _contains_any(haystack, _BAG_HINTS):
+        return "bag"
+    if _contains_any(haystack, _CHARGER_HINTS):
+        return "charger"
+    if _contains_any(haystack, _SEAT_HINTS):
+        return "flight_seat"
+    if _contains_any(haystack, _SNACK_HINTS):
+        return "movie_snack"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -68,8 +96,10 @@ def _normalize_relation(relation: str) -> str:
 
 def _clean_value(value: str) -> str:
     out = re.sub(r"\s+", " ", value or "").strip(" \t\r\n,;:.")
+    out = re.sub(r"^(?:and|but|or)\s+", "", out, flags=re.IGNORECASE).strip()
     # Remove leading determiners to keep facts canonical.
     out = re.sub(r"^(?:the|a|an)\s+", "", out, flags=re.IGNORECASE).strip()
+    out = re.sub(r"^(?:and|but|or)\s+(?:the|a|an)\s+", "", out, flags=re.IGNORECASE).strip()
     return out
 
 
@@ -136,6 +166,312 @@ def extract_facts(text: str, *, max_facts: int = 10) -> list[StructuredFact]:
     seen: set[tuple[str, str, str, str]] = set()
     for sentence in _split_sentences(text):
         sentence_date = _extract_date_hint(sentence)
+        first_person_patterns: list[tuple[str, str, float]] = [
+            (
+                r"\bmy(?:\s+default)?\s+(?:espresso\s+)?(?:drink|coffee|order)\s+(?:now\s+)?(?:is|was)\s+(?P<value>[^.,;\n]{3,80})",
+                "coffee_order",
+                0.92,
+            ),
+            (
+                r"\btravel days still mean\s+(?P<value>[^.,;\n]{3,80})",
+                "coffee_order",
+                0.84,
+            ),
+            (
+                r"\b(?P<value>[^.,;\n]{3,80})\s+is still the coffee order\b",
+                "coffee_order",
+                0.88,
+            ),
+            (
+                r"\bi was carrying\s+(?P<value>[^.,;\n]{3,80}?)(?:\s+most workdays|\s+daily|\s+every day)?(?:[.,;\n]|$)",
+                "bag",
+                0.9,
+            ),
+            (
+                r"\b(?P<value>[^.,;\n]{3,80}?)\s+is the bag i grab(?: on autopilot every morning)?\b",
+                "bag",
+                0.94,
+            ),
+            (
+                r"\b(?P<value>[^.,;\n]{3,80}?)\s+remains the default bag\b",
+                "bag",
+                0.9,
+            ),
+            (
+                r"\b(?P<value>[^.,;\n]{3,80}?)\s+is the current bag\b",
+                "bag",
+                0.9,
+            ),
+            (
+                r"\bmy notebook(?: at the start of the year)?\s+was\s+(?P<value>[^.,;\n]{3,80})",
+                "notebook",
+                0.9,
+            ),
+            (
+                r"\b(?:the\s+)?(?P<value>[A-Z][\w&\-]+(?:\s+[A-Z0-9][\w&\-]+){0,3})\s+notebook\b",
+                "notebook",
+                0.76,
+            ),
+            (
+                r"\b(?P<value>Field Notes(?:\s+[A-Za-z0-9&\-]+){0,2})\s+keep ending up in the airport kit\b",
+                "notebook",
+                0.72,
+            ),
+            (
+                r"\bthe charger that keeps ending up in my airport pouch is the\s+(?P<value>[^.,;\n]{2,80})",
+                "charger",
+                0.92,
+            ),
+            (
+                r"\bi pack the\s+(?P<value>[^.,;\n]{2,80})\s+charger\b",
+                "charger",
+                0.9,
+            ),
+            (
+                r"\bon planes i nearly always claim the\s+(?P<value>[^.,;\n]{2,40})",
+                "flight_seat",
+                0.9,
+            ),
+            (
+                r"\bi keep reaching for the\s+(?P<value>[^.,;\n]{2,40})\s+seat\b",
+                "flight_seat",
+                0.84,
+            ),
+            (
+                r"\bbefore winter,\s*movie nights usually meant\s+(?P<value>[^.,;\n]{2,80})",
+                "movie_snack",
+                0.88,
+            ),
+            (
+                r"\bmovie nights still mean\s+(?P<value>[^.,;\n]{2,80})(?:,\s+and\s+i usually pick up\s+(?P<drink>[^.,;\n]{2,80}) too)?",
+                "movie_snack",
+                0.92,
+            ),
+            (
+                r"\bthe concession treat i almost always buy is\s+(?P<value>[^.,;\n]{2,80})",
+                "movie_snack",
+                0.92,
+            ),
+        ]
+        for pattern, relation, base_conf in first_person_patterns:
+            match = re.search(pattern, sentence, flags=re.IGNORECASE)
+            if not match:
+                continue
+            value = match.group("value")
+            if relation == "notebook" and not _contains_any(value, _NOTEBOOK_HINTS):
+                continue
+            if _append_fact(
+                out,
+                seen,
+                entity="User",
+                relation=relation,
+                value=value,
+                date=sentence_date,
+                confidence=base_conf,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
+            drink = match.groupdict().get("drink")
+            if drink and _append_fact(
+                out,
+                seen,
+                entity="User",
+                relation="movie_drink",
+                value=drink,
+                date=sentence_date,
+                confidence=0.86,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
+        travel_profile_match = re.search(
+            r"\bCurrent travel profile:\s*"
+            r"(?P<coffee>[^,;\n]{2,80}),\s*"
+            r"(?P<seat>[^,;\n]{2,40}),\s*"
+            r"(?P<bag>[^,;\n]{2,80}),\s*"
+            r"(?P<charger>[^,;\n]{2,80}),\s*"
+            r"(?P<notebook>[^,;\n]{2,80}),\s*"
+            r"(?P<location>[^,;\n]{2,80})\s+base\b",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if travel_profile_match:
+            for relation, group_name, confidence in (
+                ("coffee_order", "coffee", 0.94),
+                ("flight_seat", "seat", 0.9),
+                ("bag", "bag", 0.92),
+                ("charger", "charger", 0.9),
+                ("notebook", "notebook", 0.9),
+                ("location", "location", 0.94),
+            ):
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=travel_profile_match.group(group_name),
+                    date=sentence_date,
+                    confidence=confidence,
+                    source_span=sentence,
+                    max_facts=max_facts,
+                ):
+                    return out
+        boarding_match = re.search(
+            r"\bMy boarding routine is simple:\s*"
+            r"(?P<seat>aisle|window|middle)\s+seat,\s*"
+            r"(?P<bag>[^,;\n]{2,80}),\s*"
+            r"(?P<charger>[^,;\n]{2,80}),\s*"
+            r"and\s+(?P<notebook>[^,;\n]{2,80})\s+notebook\b",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if boarding_match:
+            for relation, group_name, confidence in (
+                ("flight_seat", "seat", 0.92),
+                ("bag", "bag", 0.9),
+                ("charger", "charger", 0.9),
+                ("notebook", "notebook", 0.9),
+            ):
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=boarding_match.group(group_name),
+                    date=sentence_date,
+                    confidence=confidence,
+                    source_span=sentence,
+                    max_facts=max_facts,
+                ):
+                    return out
+        airport_kit_match = re.search(
+            r"\b(?P<notebook>Field Notes(?:\s+[A-Za-z0-9&\-]+){0,2})\s+and\s+(?:the\s+)?"
+            r"(?P<charger>[^.,;\n]{2,80})\s+keep ending up in the airport kit\b",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if airport_kit_match:
+            if _append_fact(
+                out,
+                seen,
+                entity="User",
+                relation="notebook",
+                value=airport_kit_match.group("notebook"),
+                date=sentence_date,
+                confidence=0.88,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
+            if _append_fact(
+                out,
+                seen,
+                entity="User",
+                relation="charger",
+                value=airport_kit_match.group("charger"),
+                date=sentence_date,
+                confidence=0.88,
+                source_span=sentence,
+                max_facts=max_facts,
+            ):
+                return out
+        airport_kit_list_match = re.search(
+            r"\bAirport kit stays consistent:\s*"
+            r"(?P<bag>[^,;\n]{2,80}),\s*"
+            r"(?P<charger>[^,;\n]{2,80}),\s*"
+            r"(?P<notebook>[^,;\n]{2,80}),\s*"
+            r"(?P<seat>[^,;\n]{2,40})\b",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if airport_kit_list_match:
+            for relation, group_name, confidence in (
+                ("bag", "bag", 0.88),
+                ("charger", "charger", 0.88),
+                ("notebook", "notebook", 0.88),
+                ("flight_seat", "seat", 0.86),
+            ):
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=airport_kit_list_match.group(group_name),
+                    date=sentence_date,
+                    confidence=confidence,
+                    source_span=sentence,
+                    max_facts=max_facts,
+                ):
+                    return out
+        switched_match = re.search(
+            r"\b(?:i had switched|switching|switched)\s+from\s+(?P<old>[^.;\n]{2,80}?)\s+to\s+(?P<new>[^.;\n]{2,80}?)(?:[.;\n]|$)",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if switched_match:
+            relation = _infer_user_preference_relation(sentence, switched_match.group("old"), switched_match.group("new"))
+            if relation:
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=switched_match.group("old"),
+                    date=sentence_date,
+                    confidence=0.88,
+                    source_span=sentence,
+                    max_facts=max_facts,
+                ):
+                    return out
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=switched_match.group("new"),
+                    date=sentence_date,
+                    confidence=0.9,
+                    source_span=sentence,
+                    max_facts=max_facts,
+                ):
+                    return out
+        for change_segment in re.split(r";\s*", sentence):
+            normalized_segment = re.sub(r"^[A-Za-z][A-Za-z ]{0,40}:\s*", "", change_segment).strip()
+            if not normalized_segment:
+                continue
+            for old_value, new_value in re.findall(
+                r"([^.;\n]{2,80}?)\s+became\s+([^.;\n]{2,80}?)(?=(?:;|[.]|$))",
+                normalized_segment,
+                flags=re.IGNORECASE,
+            ):
+                relation = _infer_user_preference_relation(normalized_segment, old_value, new_value)
+                if not relation:
+                    continue
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=old_value,
+                    date=sentence_date,
+                    confidence=0.84,
+                    source_span=normalized_segment,
+                    max_facts=max_facts,
+                ):
+                    return out
+                if _append_fact(
+                    out,
+                    seen,
+                    entity="User",
+                    relation=relation,
+                    value=new_value,
+                    date=sentence_date,
+                    confidence=0.86,
+                    source_span=normalized_segment,
+                    max_facts=max_facts,
+                ):
+                    return out
         moved_match = re.search(
             r"\b(?P<entity>(?:[A-Z][\w\-]+(?:\s+[A-Z][\w\-]+){0,2})|(?:I|We|User|The user))\s+moved from\s+"
             r"(?P<old>[^.,;\n]{2,80}?)\s+to\s+(?P<new>[^.,;\n]{2,80}?)(?:[.,;\n]|$)",

@@ -40,6 +40,63 @@ def test_extract_facts_handles_first_person_historical_location_statements():
     assert ("User", "location", "Santa Fe") in rendered
 
 
+def test_extract_facts_handles_first_person_preferences_and_changes():
+    text = (
+        "My espresso order now is a flat white made with oat milk. "
+        "Before spring, I was carrying an olive Evergoods CPL24 most workdays. "
+        "My notebook at the start of the year was a pocket Moleskine. "
+        "By April I had switched from the pocket Moleskine to a Field Notes three-pack. "
+        "Movie nights still mean kettle corn, and I usually pick up sparkling water too. "
+        "The charger that keeps ending up in my airport pouch is the Anker 737. "
+        "On planes I nearly always claim the aisle."
+    )
+    facts = extract_facts(text, max_facts=20)
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "coffee_order", "flat white made with oat milk") in rendered
+    assert ("User", "bag", "olive Evergoods CPL24") in rendered
+    assert ("User", "notebook", "pocket Moleskine") in rendered
+    assert ("User", "notebook", "Field Notes three-pack") in rendered
+    assert ("User", "movie_snack", "kettle corn") in rendered
+    assert ("User", "movie_drink", "sparkling water") in rendered
+    assert ("User", "charger", "Anker 737") in rendered
+    assert ("User", "flight_seat", "aisle") in rendered
+
+
+def test_extract_facts_handles_semicolon_change_log_sequences():
+    facts = extract_facts(
+        "Historical changes: cappuccino with whole milk became flat white with oat milk; "
+        "olive Evergoods CPL24 became Peak Design 20L; "
+        "pocket Moleskine became Field Notes; "
+        "Denver became Santa Fe.",
+        max_facts=20,
+    )
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "coffee_order", "cappuccino with whole milk") in rendered
+    assert ("User", "coffee_order", "flat white with oat milk") in rendered
+    assert ("User", "bag", "olive Evergoods CPL24") in rendered
+    assert ("User", "bag", "Peak Design 20L") in rendered
+    assert ("User", "notebook", "pocket Moleskine") in rendered
+    assert ("User", "notebook", "Field Notes") in rendered
+
+
+def test_extract_facts_handles_profile_and_airport_summary_lines():
+    facts = extract_facts(
+        "# Travel Profile\n"
+        "Current travel profile: flat white with oat milk, aisle seat, Peak Design 20L, Anker 737, Field Notes, Santa Fe base.\n"
+        "My boarding routine is simple: aisle seat, Peak Design 20L, Anker 737, and the Field Notes notebook.\n"
+        "Field Notes and the Anker 737 keep ending up in the airport kit.\n"
+        "Airport kit stays consistent: Peak Design 20L, Anker 737, Field Notes, aisle seat.\n",
+        max_facts=24,
+    )
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "coffee_order", "flat white with oat milk") in rendered
+    assert ("User", "flight_seat", "aisle seat") in rendered or ("User", "flight_seat", "aisle") in rendered
+    assert ("User", "bag", "Peak Design 20L") in rendered
+    assert ("User", "charger", "Anker 737") in rendered
+    assert ("User", "notebook", "Field Notes") in rendered
+    assert ("User", "location", "Santa Fe") in rendered
+
+
 class _FakeResp:
     def __init__(self, content: str) -> None:
         self.content = content

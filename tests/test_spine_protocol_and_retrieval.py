@@ -216,6 +216,83 @@ def test_hybrid_first_person_query_boosts_personal_scope():
     assert [r.id for r in merged] == ["personal-hit", "team-hit"]
 
 
+def test_query_profile_infers_relation_hints_for_current_state_questions():
+    profile = HybridSearch.analyze_query("What espresso order do I default to now?")
+    assert profile.is_first_person is True
+    assert profile.wants_current_state is True
+    assert profile.fact_relation_hints == ("coffee_order",)
+
+    multi = HybridSearch.analyze_query(
+        "What's my current travel profile in one short list: base city, coffee, seat, bag, charger, and notebook?"
+    )
+    assert set(multi.fact_relation_hints) >= {"location", "coffee_order", "flight_seat", "bag", "charger", "notebook"}
+
+
+def test_route_structured_query_requires_single_relation_hint(tmp_path, monkeypatch):
+    config = Config()
+    config.data_dir = tmp_path
+    config.ingestion.enable_fact_extraction = True
+    config.ensure_dirs()
+
+    spine = MemorySpine(config)
+    profile = spine.hybrid_search.analyze_query(
+        "What's my current travel profile in one short list: base city, coffee, seat, bag, charger, and notebook?"
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("structured current facts should not be queried for ambiguous multi-relation prompts")
+
+    monkeypatch.setattr(spine.sqlite, "list_current_structured_facts", _boom)
+    monkeypatch.setattr(spine.sqlite, "list_structured_truth", _boom)
+    assert spine._route_structured_query("travel profile", profile, top_k=5) == []
+
+
+def test_route_structured_query_uses_relation_hint_for_specific_queries(tmp_path, monkeypatch):
+    config = Config()
+    config.data_dir = tmp_path
+    config.ingestion.enable_fact_extraction = True
+    config.ensure_dirs()
+
+    spine = MemorySpine(config)
+    profile = spine.hybrid_search.analyze_query("What espresso order do I default to now?")
+    seen: dict[str, object] = {}
+
+    def _fake_current(*, entity: str = "", relation: str = "", limit: int = 0):
+        seen["entity"] = entity
+        seen["relation"] = relation
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(spine.sqlite, "list_current_structured_facts", _fake_current)
+    assert spine._route_structured_query("What espresso order do I default to now?", profile, top_k=4) == []
+    assert seen == {"entity": "User", "relation": "coffee_order", "limit": 16}
+
+
+def test_fact_source_metadata_hoists_nested_source_provenance(tmp_path):
+    config = Config()
+    config.data_dir = tmp_path
+    config.ensure_dirs()
+    spine = MemorySpine(config)
+    merged = spine._fact_source_metadata(
+        {
+            "source_chunk_id": "chunk-1",
+            "metadata": {
+                "source": {
+                    "path": "memory/sessions/personal/2026-01-01.md",
+                    "session_id": "personal-01",
+                    "source_id": "session:personal-01",
+                    "memory_scope": "personal",
+                }
+            },
+        }
+    )
+    assert merged["path"] == "memory/sessions/personal/2026-01-01.md"
+    assert merged["session_id"] == "personal-01"
+    assert merged["source_id"] == "session:personal-01"
+    assert merged["memory_scope"] == "personal"
+    assert merged["source_chunk_id"] == "chunk-1"
+
+
 def test_hash_embedder_is_deterministic_and_normalized():
     async def _run() -> None:
         emb = HashEmbedder(dims=64)

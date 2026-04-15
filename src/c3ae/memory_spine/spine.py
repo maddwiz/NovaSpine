@@ -1375,15 +1375,16 @@ class MemorySpine:
             return []
         if not bool(getattr(query_profile, "wants_current_state", False)):
             return []
-        relation = self._infer_fact_relation_hint(query)
+        relation_hints = tuple(getattr(query_profile, "fact_relation_hints", ()) or self._infer_fact_relation_hints(query))
+        if len(relation_hints) != 1:
+            return []
+        relation = relation_hints[0]
         if bool(getattr(query_profile, "wants_history", False)):
             groups = self.sqlite.list_structured_truth(
                 entity="User",
                 relation=relation,
                 limit=max(top_k * 3, 10),
             )
-            if not groups:
-                groups = self.sqlite.list_structured_truth(limit=max(top_k * 4, 16))
             return self._rank_structured_truth(query, groups, top_k=top_k)
 
         facts = self.sqlite.list_current_structured_facts(
@@ -1391,8 +1392,6 @@ class MemorySpine:
             relation=relation,
             limit=max(top_k * 4, 12),
         )
-        if not facts:
-            facts = self.sqlite.list_current_structured_facts(limit=max(top_k * 5, 20))
         return self._rank_current_facts(query, facts, top_k=top_k)
 
     def _rank_current_facts(
@@ -1510,19 +1509,23 @@ class MemorySpine:
             merged = dict(source_meta)
         else:
             merged = {}
-        if "memory_scope" not in merged and isinstance(metadata.get("memory_scope"), str):
-            merged["memory_scope"] = metadata["memory_scope"]
+        for key in ("memory_scope", "path", "source_id", "session_id", "role"):
+            if key not in merged and isinstance(metadata.get(key), str):
+                merged[key] = metadata[key]
+        if "source_chunk_id" not in merged and isinstance(fact.get("source_chunk_id"), str):
+            merged["source_chunk_id"] = fact["source_chunk_id"]
+        if "path" not in merged and isinstance(metadata.get("path"), str):
+            merged["path"] = metadata["path"]
+        if "source_id" not in merged and isinstance(metadata.get("source_id"), str):
+            merged["source_id"] = metadata["source_id"]
         return merged
 
     def _infer_fact_relation_hint(self, query: str) -> str:
-        q = query.lower()
-        tokens = self._tokenize_query(query)
-        if (
-            {"where", "based", "base", "live", "living", "city", "location", "home"} & tokens
-            or any(phrase in q for phrase in ("home base", "based these days", "based now", "where am i"))
-        ):
-            return "location"
-        return ""
+        hints = self._infer_fact_relation_hints(query)
+        return hints[0] if len(hints) == 1 else ""
+
+    def _infer_fact_relation_hints(self, query: str) -> tuple[str, ...]:
+        return tuple(self.hybrid_search.infer_fact_relation_hints(query))
 
     def _infer_memory_scope(
         self,
