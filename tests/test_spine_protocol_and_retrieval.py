@@ -222,13 +222,18 @@ def test_query_profile_infers_relation_hints_for_current_state_questions():
     assert profile.wants_current_state is True
     assert profile.fact_relation_hints == ("coffee_order",)
 
+    changed = HybridSearch.analyze_query("What espresso drink did I move on from, and what do I order now?")
+    assert changed.wants_current_state is True
+    assert changed.wants_history is True
+    assert changed.fact_relation_hints == ("coffee_order",)
+
     multi = HybridSearch.analyze_query(
         "What's my current travel profile in one short list: base city, coffee, seat, bag, charger, and notebook?"
     )
     assert set(multi.fact_relation_hints) >= {"location", "coffee_order", "flight_seat", "bag", "charger", "notebook"}
 
 
-def test_route_structured_query_requires_single_relation_hint(tmp_path, monkeypatch):
+def test_route_structured_query_fans_out_multi_relation_current_queries(tmp_path, monkeypatch):
     config = Config()
     config.data_dir = tmp_path
     config.ingestion.enable_fact_extraction = True
@@ -239,12 +244,19 @@ def test_route_structured_query_requires_single_relation_hint(tmp_path, monkeypa
         "What's my current travel profile in one short list: base city, coffee, seat, bag, charger, and notebook?"
     )
 
-    def _boom(*args, **kwargs):
-        raise AssertionError("structured current facts should not be queried for ambiguous multi-relation prompts")
+    seen: list[str] = []
 
-    monkeypatch.setattr(spine.sqlite, "list_current_structured_facts", _boom)
-    monkeypatch.setattr(spine.sqlite, "list_structured_truth", _boom)
-    assert spine._route_structured_query("travel profile", profile, top_k=5) == []
+    def _fake_current(*, entity: str = "", relation: str = "", limit: int = 0):
+        seen.append(relation)
+        return []
+
+    monkeypatch.setattr(spine.sqlite, "list_current_structured_facts", _fake_current)
+    assert spine._route_structured_query(
+        "What's my current travel profile in one short list: base city, coffee, seat, bag, charger, and notebook?",
+        profile,
+        top_k=5,
+    ) == []
+    assert set(seen) >= {"location", "coffee_order", "flight_seat", "bag", "charger", "notebook"}
 
 
 def test_route_structured_query_uses_relation_hint_for_specific_queries(tmp_path, monkeypatch):
@@ -454,6 +466,74 @@ def test_augment_overfetch_is_capped(tmp_path):
             await spine.close()
 
     asyncio.run(_run())
+
+
+def test_augment_keeps_structured_facts_without_conversation_role(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ensure_dirs()
+
+        spine = MemorySpine(cfg)
+        try:
+            async def _fake_search(query: str, top_k: int | None = None) -> list[SearchResult]:
+                return [
+                    SearchResult(
+                        id="fact-1",
+                        content="User notebook Field Notes",
+                        score=4.0,
+                        source="structured_fact_current",
+                        metadata={"_source_kind": "structured_fact_current"},
+                    ),
+                    SearchResult(
+                        id="unknown-1",
+                        content="Unknown role scratch",
+                        score=4.0,
+                        source="test",
+                        metadata={},
+                    ),
+                ]
+
+            spine.search = _fake_search  # type: ignore[method-assign]
+            context = await spine.augment("notebook", top_k=5, min_score=0.0)
+            assert "User notebook Field Notes" in context
+            assert "Unknown role scratch" not in context
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
+def test_structured_truth_history_excludes_duplicate_current_values(tmp_path):
+    cfg = Config()
+    cfg.data_dir = tmp_path
+    cfg.ensure_dirs()
+    spine = MemorySpine(cfg)
+    try:
+        rows = spine._rank_structured_truth(
+            "What bag did I move on from, and what bag replaced it?",
+            [
+                {
+                    "entity": "User",
+                    "relation": "bag",
+                    "current_facts": [{"value": "Peak Design 20L"}],
+                    "historical_facts": [
+                        {"value": "olive Evergoods CPL24"},
+                        {"value": "Peak Design 20L"},
+                        {"value": "Peak Design 20L"},
+                    ],
+                }
+            ],
+            top_k=1,
+        )
+        assert rows
+        content = rows[0].content
+        assert "current: Peak Design 20L" in content
+        assert "previous/historical: olive Evergoods CPL24" in content
+        assert content.index("previous/historical") < content.index("current:")
+        assert content.count("Peak Design 20L") == 1
+    finally:
+        asyncio.run(spine.close())
 
 
 def test_case_token_query_skips_graph_lookup(tmp_path):

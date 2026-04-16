@@ -62,6 +62,17 @@ def test_extract_facts_handles_first_person_preferences_and_changes():
     assert ("User", "flight_seat", "aisle") in rendered
 
 
+def test_extract_facts_handles_historical_espresso_default_wording():
+    facts = extract_facts(
+        "Back in November, my espresso default was a cappuccino with whole milk. "
+        "My espresso order now is a flat white made with oat milk.",
+        max_facts=8,
+    )
+    rendered = {(f.entity, f.relation, f.value) for f in facts}
+    assert ("User", "coffee_order", "cappuccino with whole milk") in rendered
+    assert ("User", "coffee_order", "flat white made with oat milk") in rendered
+
+
 def test_extract_facts_handles_semicolon_change_log_sequences():
     facts = extract_facts(
         "Historical changes: cappuccino with whole milk became flat white with oat milk; "

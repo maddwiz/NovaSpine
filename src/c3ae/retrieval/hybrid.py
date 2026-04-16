@@ -19,7 +19,25 @@ from c3ae.types import SearchResult
 
 _FIRST_PERSON_TERMS = {"i", "me", "my", "mine", "myself"}
 _CURRENT_STATE_TERMS = {"current", "currently", "today", "now", "present", "latest"}
-_HISTORY_TERMS = {"before", "previous", "earlier", "formerly", "history", "changed", "change", "leave", "left"}
+_HISTORY_TERMS = {
+    "before",
+    "previous",
+    "previously",
+    "earlier",
+    "formerly",
+    "history",
+    "historical",
+    "changed",
+    "change",
+    "changes",
+    "leave",
+    "left",
+    "old",
+    "older",
+    "replaced",
+    "replace",
+    "from",
+}
 _PERSONAL_SCOPE_TERMS = ("personal", "private", "dm", "user", "direct")
 _SHARED_SCOPE_TERMS = ("team", "shared", "channel", "group")
 _LOCATION_HINT_TERMS = {"where", "based", "base", "live", "living", "city", "location", "home"}
@@ -194,7 +212,24 @@ class HybridSearch:
         )
         wants_history = is_first_person and (
             bool(token_set & _HISTORY_TERMS)
-            or any(phrase in q for phrase in ("used to", "left behind", "moved from"))
+            or any(
+                phrase in q
+                for phrase in (
+                    "used to",
+                    "left behind",
+                    "moved from",
+                    "move on from",
+                    "moved on from",
+                    "move from",
+                    "old city",
+                    "old bag",
+                    "older city",
+                    "from winter to spring",
+                    "from spring to",
+                    "what changed",
+                    "what did i move",
+                )
+            )
         )
         has_multiple_facets = len(tokens) >= 5 and (
             " and " in q or "," in q or " plus " in q

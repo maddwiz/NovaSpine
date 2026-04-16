@@ -173,6 +173,11 @@ def extract_facts(text: str, *, max_facts: int = 10) -> list[StructuredFact]:
                 0.92,
             ),
             (
+                r"\bmy\s+espresso\s+default\s+(?:now\s+)?(?:is|was)\s+(?P<value>[^.,;\n]{3,80})",
+                "coffee_order",
+                0.92,
+            ),
+            (
                 r"\btravel days still mean\s+(?P<value>[^.,;\n]{3,80})",
                 "coffee_order",
                 0.84,

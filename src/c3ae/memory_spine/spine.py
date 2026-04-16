@@ -10,7 +10,7 @@ import re
 import threading
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -450,7 +450,8 @@ class MemorySpine:
         for row in recalled:
             meta = row.get("metadata") or {}
             role = str(meta.get("role", "unknown"))
-            if role not in allowed_roles:
+            source_kind = str(meta.get("_source_kind", ""))
+            if role not in allowed_roles and not source_kind.startswith("structured_"):
                 continue
             if float(row.get("score", 0.0)) < min_score:
                 continue
@@ -1373,26 +1374,53 @@ class MemorySpine:
     ) -> list[SearchResult]:
         if not bool(getattr(query_profile, "is_first_person", False)):
             return []
-        if not bool(getattr(query_profile, "wants_current_state", False)):
-            return []
         relation_hints = tuple(getattr(query_profile, "fact_relation_hints", ()) or self._infer_fact_relation_hints(query))
-        if len(relation_hints) != 1:
+        if not relation_hints:
             return []
-        relation = relation_hints[0]
         if bool(getattr(query_profile, "wants_history", False)):
-            groups = self.sqlite.list_structured_truth(
+            results: list[SearchResult] = []
+            for relation in relation_hints[:8]:
+                groups = self.sqlite.list_structured_truth(
+                    entity="User",
+                    relation=relation,
+                    limit=max(top_k * 3, 10),
+                )
+                results.extend(self._rank_structured_truth(query, groups, top_k=max(top_k, 4)))
+            return self._dedupe_structured_results(results, top_k=top_k)
+
+        if not bool(getattr(query_profile, "wants_current_state", False)) and not bool(
+            getattr(query_profile, "has_multiple_facets", False)
+        ):
+            return []
+
+        results = []
+        for relation in relation_hints[:8]:
+            facts = self.sqlite.list_current_structured_facts(
                 entity="User",
                 relation=relation,
-                limit=max(top_k * 3, 10),
+                limit=max(top_k * 4, 12),
             )
-            return self._rank_structured_truth(query, groups, top_k=top_k)
+            results.extend(self._rank_current_facts(query, facts, top_k=max(top_k, 4)))
+        return self._dedupe_structured_results(results, top_k=top_k)
 
-        facts = self.sqlite.list_current_structured_facts(
-            entity="User",
-            relation=relation,
-            limit=max(top_k * 4, 12),
-        )
-        return self._rank_current_facts(query, facts, top_k=top_k)
+    @staticmethod
+    def _dedupe_structured_results(results: list[SearchResult], *, top_k: int) -> list[SearchResult]:
+        seen: set[tuple[str, str, str]] = set()
+        out: list[SearchResult] = []
+        for result in sorted(results, key=lambda item: item.score, reverse=True):
+            meta = result.metadata or {}
+            key = (
+                str(meta.get("entity") or "").lower(),
+                str(meta.get("relation") or "").lower(),
+                result.content.strip().lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(result)
+            if len(out) >= top_k:
+                break
+        return out
 
     def _rank_current_facts(
         self,
@@ -1451,15 +1479,31 @@ class MemorySpine:
             relation = str(group.get("relation") or "").strip()
             current = list(group.get("current_facts") or [])
             historical = list(group.get("historical_facts") or [])
-            current_values = [str(item.get("value") or "").strip() for item in current if str(item.get("value") or "").strip()]
-            historical_values = [str(item.get("value") or "").strip() for item in historical if str(item.get("value") or "").strip()]
+            current_values = self._dedupe_fact_values(
+                str(item.get("value") or "").strip()
+                for item in current
+                if str(item.get("value") or "").strip()
+            )
+            current_norms = {self._normalize_fact_value(value) for value in current_values}
+            historical_values = [
+                value
+                for value in self._dedupe_fact_values(
+                    str(item.get("value") or "").strip()
+                    for item in historical
+                    if str(item.get("value") or "").strip()
+                )
+                if self._normalize_fact_value(value) not in current_norms
+            ]
             if not current_values and not historical_values:
                 continue
             segments: list[str] = []
+            history_first = self._query_wants_previous_values(query)
+            if history_first and historical_values:
+                segments.append(f"previous/historical: {', '.join(historical_values[:3])}")
             if current_values:
                 segments.append(f"current: {', '.join(current_values)}")
-            if historical_values:
-                segments.append(f"historical: {', '.join(historical_values[:3])}")
+            if not history_first and historical_values:
+                segments.append(f"previous/historical: {', '.join(historical_values[:3])}")
             text = f"{entity} {relation} {'; '.join(segments)}".strip()
             source_meta = self._fact_source_metadata(current[0] if current else historical[0])
             scope = str(source_meta.get("memory_scope") or self._infer_memory_scope("", source_meta)).lower()
@@ -1492,6 +1536,31 @@ class MemorySpine:
     @staticmethod
     def _tokenize_query(raw: str) -> set[str]:
         return set(re.findall(r"[a-z0-9_\-]+", raw.lower()))
+
+    @staticmethod
+    def _normalize_fact_value(value: str) -> str:
+        return re.sub(r"\s+", " ", value.strip().lower())
+
+    @classmethod
+    def _dedupe_fact_values(cls, values: Iterable[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for value in values:
+            normalized = cls._normalize_fact_value(value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(value)
+        return deduped
+
+    @staticmethod
+    def _query_wants_previous_values(query: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(old|older|previous|previously|historical|history|used to|from|moved?\s+on|changed?|replaced?|before|winter|spring)\b",
+                query.lower(),
+            )
+        )
 
     @classmethod
     def _overlap_score(cls, query_tokens: set[str], text: str) -> float:

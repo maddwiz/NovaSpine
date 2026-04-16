@@ -737,7 +737,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         for r in rows:
             meta = dict(r.get("metadata") or {})
             role = str(meta.get("role", "unknown"))
-            if role not in allowed_roles:
+            source_kind = str(meta.get("_source_kind", ""))
+            if role not in allowed_roles and not source_kind.startswith("structured_"):
                 continue
             if float(r.get("score", 0.0)) < req.min_score:
                 continue
