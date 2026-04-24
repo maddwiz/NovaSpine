@@ -48,6 +48,40 @@ _CHARGER_HINT_TERMS = {"charger", "charging", "battery", "power"}
 _SEAT_HINT_TERMS = {"seat", "aisle", "window", "middle", "plane", "planes", "flight", "boarding"}
 _SNACK_HINT_TERMS = {"movie", "movies", "theater", "theatre", "film", "films", "concession", "snack", "popcorn", "kettle", "corn"}
 _DRINK_HINT_TERMS = {"drink", "drinks", "water", "sparkling"}
+_LITERAL_RECALL_PHRASES = (
+    "remind me",
+    "previous chat",
+    "previous conversation",
+    "our previous conversation",
+    "our previous chat",
+    "last time",
+    "earlier",
+    "we discussed",
+    "we talked about",
+    "going back to our previous conversation",
+    "going back to our previous chat",
+)
+_ASSISTANT_REFERENCE_PHRASES = (
+    "you recommended",
+    "you provided",
+    "you suggested",
+    "you mentioned",
+    "you told me",
+    "you said",
+)
+_LIST_RECALL_TERMS = {
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "list",
+}
 
 
 @dataclass(frozen=True)
@@ -59,6 +93,8 @@ class QueryProfile:
     wants_history: bool = False
     has_multiple_facets: bool = False
     fact_relation_hints: tuple[str, ...] = ()
+    wants_literal_recall: bool = False
+    prefers_assistant_response: bool = False
 
 
 class HybridSearch:
@@ -95,7 +131,7 @@ class HybridSearch:
         fetch_k = max(top_k * 5, 100)
 
         kw_query = query
-        if self.config.enable_query_expansion:
+        if self.config.enable_query_expansion and not profile.wants_literal_recall:
             kw_query = maybe_expand_query(
                 query,
                 max_extra_terms=int(self.config.query_expansion_max_terms),
@@ -203,6 +239,8 @@ class HybridSearch:
         q = query.strip().lower()
         tokens = tuple(re.findall(r"[a-z0-9_\-]+", q))
         token_set = set(tokens)
+        wants_literal_recall = cls._wants_literal_recall(q, token_set)
+        prefers_assistant_response = wants_literal_recall and cls._prefers_assistant_response(q, token_set)
         is_first_person = bool(token_set & _FIRST_PERSON_TERMS) or bool(
             re.search(r"\b(am|was|were)\s+i\b", q)
         )
@@ -243,6 +281,40 @@ class HybridSearch:
             wants_history=wants_history,
             has_multiple_facets=has_multiple_facets,
             fact_relation_hints=fact_relation_hints,
+            wants_literal_recall=wants_literal_recall,
+            prefers_assistant_response=prefers_assistant_response,
+        )
+
+    @classmethod
+    def _wants_literal_recall(cls, q: str, token_set: set[str]) -> bool:
+        has_recall_marker = any(phrase in q for phrase in _LITERAL_RECALL_PHRASES) or bool(
+            re.search(r"\b(what was|what were|what did|which one|the one)\b", q)
+        )
+        if not has_recall_marker:
+            return False
+        assistant_or_chat_reference = (
+            "you" in token_set
+            or any(phrase in q for phrase in _ASSISTANT_REFERENCE_PHRASES)
+            or "chat" in token_set
+            or "conversation" in token_set
+            or "discussed" in token_set
+            or "talked" in token_set
+        )
+        has_list_or_specificity_marker = bool(
+            re.search(r"\b\d+(?:st|nd|rd|th)\b", q)
+        ) or bool(token_set & _LIST_RECALL_TERMS)
+        return assistant_or_chat_reference or has_list_or_specificity_marker
+
+    @staticmethod
+    def _prefers_assistant_response(q: str, token_set: set[str]) -> bool:
+        return (
+            "you" in token_set
+            or any(phrase in q for phrase in _ASSISTANT_REFERENCE_PHRASES)
+            or "recommended" in token_set
+            or "provided" in token_set
+            or "suggested" in token_set
+            or "said" in token_set
+            or "told" in token_set
         )
 
     @classmethod
@@ -373,6 +445,17 @@ class HybridSearch:
 
     def _scope_multiplier(self, metadata: dict[str, object], profile: QueryProfile) -> float:
         multiplier = 1.0
+        source_kind = self._metadata_value(metadata, "_source_kind").strip().lower()
+        role = self._metadata_value(metadata, "role").strip().lower()
+
+        if profile.wants_literal_recall:
+            if source_kind.startswith("structured_") or source_kind in {"graph", "graph_context"}:
+                multiplier *= 0.18
+            elif role == "assistant" and profile.prefers_assistant_response:
+                multiplier *= 1.45
+            elif role in {"assistant", "user"}:
+                multiplier *= 1.12
+
         if profile.is_first_person:
             scope = self._infer_scope(metadata)
             if scope == "personal":
@@ -382,7 +465,6 @@ class HybridSearch:
             entity = self._metadata_value(metadata, "entity").strip().lower()
             if entity == "user":
                 multiplier *= 1.10
-        source_kind = self._metadata_value(metadata, "_source_kind").strip().lower()
         relation = self._metadata_value(metadata, "relation").strip().lower()
         structured_kinds = {"structured_fact", "structured_truth", "structured_fact_current"}
         if profile.wants_current_state and source_kind in structured_kinds:

@@ -53,7 +53,7 @@ def test_ollama_embed_uses_batch_endpoint_when_available() -> None:
     ]
 
 
-def test_ollama_embed_falls_back_to_legacy_endpoint() -> None:
+def test_ollama_embed_falls_back_to_v1_then_legacy_endpoints() -> None:
     embedder = OllamaEmbedder(model="nomic-embed-text", dims=2)
 
     class _FallbackClient(_FakeClient):
@@ -66,6 +66,7 @@ def test_ollama_embed_falls_back_to_legacy_endpoint() -> None:
             return self.responses.pop(0)
 
     client = _FallbackClient([
+        _FakeResponse({"data": []}),
         _FakeResponse({"embedding": [1.0, 0.0]}),
         _FakeResponse({"embedding": [0.0, 1.0]}),
     ])
@@ -78,17 +79,19 @@ def test_ollama_embed_falls_back_to_legacy_endpoint() -> None:
     arr = asyncio.run(embedder.embed(["hello", "world"]))
 
     assert arr.shape == (2, 2)
-    assert client.calls == [
-        (
-            "/api/embed",
-            {"model": "nomic-embed-text", "input": ["hello", "world"], "keep_alive": "30m"},
-        ),
-        (
-            "/api/embeddings",
-            {"model": "nomic-embed-text", "prompt": "hello", "keep_alive": "30m"},
-        ),
-        (
-            "/api/embeddings",
-            {"model": "nomic-embed-text", "prompt": "world", "keep_alive": "30m"},
-        ),
-    ]
+    paths = [path for path, _ in client.calls]
+    assert paths.count("/api/embed") == embedder.max_retries * 3
+    assert paths.count("/v1/embeddings") == 1
+    assert paths.count("/api/embeddings") == 2
+    assert client.calls[3] == (
+        "/v1/embeddings",
+        {"model": "nomic-embed-text", "input": ["hello", "world"]},
+    )
+    assert client.calls[7] == (
+        "/api/embeddings",
+        {"model": "nomic-embed-text", "prompt": "hello", "keep_alive": "30m"},
+    )
+    assert client.calls[-1] == (
+        "/api/embeddings",
+        {"model": "nomic-embed-text", "prompt": "world", "keep_alive": "30m"},
+    )

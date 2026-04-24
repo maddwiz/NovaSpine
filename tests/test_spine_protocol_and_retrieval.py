@@ -233,6 +233,39 @@ def test_query_profile_infers_relation_hints_for_current_state_questions():
     assert set(multi.fact_relation_hints) >= {"location", "coffee_order", "flight_seat", "bag", "charger", "notebook"}
 
 
+def test_query_profile_detects_literal_assistant_recall_queries():
+    profile = HybridSearch.analyze_query(
+        "I think we discussed work from home jobs for seniors earlier. "
+        "Can you remind me what was the 7th job in the list you provided?"
+    )
+    assert profile.wants_literal_recall is True
+    assert profile.prefers_assistant_response is True
+
+
+def test_literal_recall_queries_penalize_structured_results_and_boost_assistant_turns():
+    cfg = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=False,
+    )
+    hybrid = HybridSearch(_KeywordStub([]), _VectorStub([]), config=cfg)
+    profile = HybridSearch.analyze_query(
+        "I'm going back to our previous conversation about DIY home decor. "
+        "Can you remind me what sealant you recommended last time?"
+    )
+
+    assistant_multiplier = hybrid._scope_multiplier({"role": "assistant"}, profile)
+    structured_multiplier = hybrid._scope_multiplier(
+        {"_source_kind": "structured_truth", "relation": "location"},
+        profile,
+    )
+
+    assert assistant_multiplier > 1.0
+    assert structured_multiplier < 1.0
+    assert assistant_multiplier > structured_multiplier
+
+
 def test_route_structured_query_fans_out_multi_relation_current_queries(tmp_path, monkeypatch):
     config = Config()
     config.data_dir = tmp_path
@@ -303,6 +336,22 @@ def test_fact_source_metadata_hoists_nested_source_provenance(tmp_path):
     assert merged["source_id"] == "session:personal-01"
     assert merged["memory_scope"] == "personal"
     assert merged["source_chunk_id"] == "chunk-1"
+
+
+def test_build_chunk_metadata_infers_role_from_transcript_content(tmp_path):
+    cfg = Config()
+    cfg.data_dir = tmp_path
+    cfg.ensure_dirs()
+    spine = MemorySpine(cfg)
+    try:
+        metadata = spine._build_chunk_metadata(
+            "Benchmark: longmemeval_m\n\nassistant: The seventh job was virtual bookkeeping.",
+            "bench:doc",
+            {},
+        )
+        assert metadata["role"] == "assistant"
+    finally:
+        asyncio.run(spine.close())
 
 
 def test_hash_embedder_is_deterministic_and_normalized():
@@ -563,6 +612,80 @@ def test_case_token_query_skips_graph_lookup(tmp_path):
     asyncio.run(_run())
 
 
+def test_literal_recall_query_skips_structured_shortcuts(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.ingestion.enable_fact_extraction = True
+        cfg.graph.enabled = True
+        cfg.ensure_dirs()
+        spine = MemorySpine(cfg)
+        try:
+            called = {"route": False, "graph": False, "facts": False}
+
+            async def _fake_embed_text(query: str):  # noqa: ANN202
+                return None
+
+            def _fake_route(query: str, profile, *, top_k: int):  # noqa: ANN001, ANN202
+                called["route"] = True
+                return [
+                    SearchResult(
+                        id="fact-1",
+                        content="User location previous/historical: New Orleans",
+                        score=9.0,
+                        source="structured_truth",
+                        metadata={"_source_kind": "structured_truth"},
+                    )
+                ]
+
+            def _fake_hybrid_search(query: str, query_vector=None, top_k: int | None = None, apply_decay: bool = True):  # noqa: ANN001, ANN202
+                return [
+                    SearchResult(
+                        id="assistant-1",
+                        content="assistant: Use Mod Podge acrylic sealer for the newspaper flower vase.",
+                        score=1.0,
+                        source="hybrid",
+                        metadata={"role": "assistant", "benchmark_doc_id": "answer_ultrachat_563222"},
+                    )
+                ]
+
+            def _fake_graph(query: str, limit: int = 0):  # noqa: ANN202
+                called["graph"] = True
+                return []
+
+            def _fake_facts(query: str, limit: int = 0):  # noqa: ANN202
+                called["facts"] = True
+                return [
+                    SearchResult(
+                        id="fact-1",
+                        content="User location previous/historical: New Orleans",
+                        score=9.0,
+                        source="structured_truth",
+                        metadata={"_source_kind": "structured_truth"},
+                    )
+                ]
+
+            spine._embed_text = _fake_embed_text  # type: ignore[method-assign]
+            spine._route_structured_query = _fake_route  # type: ignore[method-assign]
+            spine.hybrid_search.search = _fake_hybrid_search  # type: ignore[method-assign]
+            spine.sqlite.search_graph_context = _fake_graph  # type: ignore[method-assign]
+            spine.sqlite.search_structured_facts_fts = _fake_facts  # type: ignore[method-assign]
+            spine._record_access = lambda results: None  # type: ignore[method-assign]
+
+            rows = await spine.search(
+                "I'm going back to our previous conversation about DIY home decor projects. "
+                "Can you remind me what sealant you recommended for the newspaper flower vase?",
+                top_k=3,
+            )
+            assert rows
+            assert rows[0].id == "assistant-1"
+            assert called == {"route": False, "graph": False, "facts": False}
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
 def test_case_token_query_does_not_increment_access_counts(tmp_path):
     async def _run() -> None:
         cfg = Config()
@@ -619,7 +742,7 @@ def test_case_token_query_falls_back_when_tail_terms_miss(tmp_path):
     asyncio.run(_run())
 
 
-def test_ingest_sync_skip_chunking_uses_single_chunk(tmp_path):
+def test_ingest_sync_skip_chunking_still_applies_embedding_safety_splits(tmp_path):
     cfg = Config()
     cfg.data_dir = tmp_path
     cfg.ensure_dirs()
@@ -633,7 +756,8 @@ def test_ingest_sync_skip_chunking_uses_single_chunk(tmp_path):
             skip_chunking=True,
         )
         assert len(chunked_ids) > 1
-        assert len(single_ids) == 1
+        assert len(single_ids) >= 1
+        assert len(single_ids) < len(chunked_ids)
     finally:
         asyncio.run(spine.close())
 

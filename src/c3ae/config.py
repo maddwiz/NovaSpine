@@ -163,6 +163,12 @@ class IngestionConfig(BaseModel):
     enable_fact_extraction: bool = Field(
         default_factory=lambda: _env_bool("C3AE_FACT_EXTRACTION", False)
     )
+    embedding_max_tokens: int = Field(
+        default_factory=lambda: _env_int("C3AE_EMBEDDING_MAX_TOKENS", 384)
+    )
+    embedding_overlap_tokens: int = Field(
+        default_factory=lambda: _env_int("C3AE_EMBEDDING_OVERLAP_TOKENS", 48)
+    )
     fact_extraction_mode: str = Field(
         default_factory=lambda: _env_str("C3AE_FACT_EXTRACTION_MODE", "heuristic")
     )

@@ -13,6 +13,7 @@ import numpy as np
 
 from c3ae.config import VeniceConfig
 from c3ae.embeddings.venice import VeniceEmbedder
+from c3ae.utils import chunk_text_for_embedding, estimate_text_tokens
 
 
 @runtime_checkable
@@ -89,6 +90,9 @@ class OllamaEmbedder:
         self.base_url = base_url
         self.timeout = timeout
         self.keep_alive = keep_alive
+        self.max_retries = 3
+        self.safe_embed_tokens = 256
+        self.safe_embed_overlap = 32
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -96,33 +100,116 @@ class OllamaEmbedder:
             self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
         return self._client
 
-    async def embed(self, texts: list[str]) -> np.ndarray:
-        if not texts:
+    async def _reset_client(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+
+    async def _post_json(self, path: str, payload: dict[str, object]) -> dict:
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            client = await self._get_client()
+            try:
+                resp = await client.post(path, json=payload)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:
+                last_exc = exc
+                await self._reset_client()
+                if attempt < self.max_retries:
+                    await asyncio.sleep(min(1.5, 0.25 * attempt))
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"Ollama request failed for {path}")
+
+    def _fit_dims(self, arr: np.ndarray) -> np.ndarray:
+        if arr.size == 0:
             return np.zeros((0, self.dims), dtype=np.float32)
-        client = await self._get_client()
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.shape[1] == self.dims:
+            out = arr
+        elif arr.shape[1] > self.dims:
+            out = arr[:, : self.dims]
+        else:
+            pad = np.zeros((arr.shape[0], self.dims - arr.shape[1]), dtype=np.float32)
+            out = np.concatenate([arr, pad], axis=1)
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        return (out / norms).astype(np.float32, copy=False)
+
+    async def _embed_v1_batch(self, texts: list[str]) -> np.ndarray:
+        data = await self._post_json(
+            "/v1/embeddings",
+            {"model": self.model, "input": texts},
+        )
+        vecs = [row.get("embedding", []) for row in data.get("data", [])]
+        if len(vecs) != len(texts):
+            raise RuntimeError(f"ollama /v1/embeddings returned {len(vecs)} embeddings for {len(texts)} texts")
+        return self._fit_dims(np.array(vecs, dtype=np.float32))
+
+    async def _embed_single_remote(self, text: str) -> np.ndarray:
         try:
-            resp = await client.post(
+            data = await self._post_json(
                 "/api/embed",
-                json={"model": self.model, "input": texts, "keep_alive": self.keep_alive},
+                {"model": self.model, "input": [text], "keep_alive": self.keep_alive},
             )
-            resp.raise_for_status()
-            data = resp.json()
             embeddings = data.get("embeddings", [])
-            if len(embeddings) == len(texts):
-                return np.array(embeddings, dtype=np.float32)
+            if len(embeddings) == 1:
+                return self._fit_dims(np.array(embeddings, dtype=np.float32))[0]
         except Exception:
             pass
 
-        out: list[list[float]] = []
-        for text in texts:
-            resp = await client.post(
+        try:
+            data = await self._post_json(
                 "/api/embeddings",
-                json={"model": self.model, "prompt": text, "keep_alive": self.keep_alive},
+                {"model": self.model, "prompt": text, "keep_alive": self.keep_alive},
             )
-            resp.raise_for_status()
-            data = resp.json()
-            out.append(data.get("embedding", []))
-        return np.array(out, dtype=np.float32)
+            if data.get("embedding"):
+                return self._fit_dims(np.array([data.get("embedding", [])], dtype=np.float32))[0]
+        except Exception:
+            pass
+
+        return (await self._embed_v1_batch([text]))[0]
+
+    async def _embed_single_safe(self, text: str) -> np.ndarray:
+        try:
+            return await self._embed_single_remote(text)
+        except Exception:
+            parts = chunk_text_for_embedding(
+                text,
+                max_tokens=self.safe_embed_tokens,
+                overlap_tokens=self.safe_embed_overlap,
+            )
+            if len(parts) <= 1 or (len(parts) == 1 and parts[0].strip() == (text or "").strip()):
+                raise
+            sub_vecs = await self.embed(parts)
+            if len(sub_vecs) == 0:
+                raise RuntimeError("No sub-embeddings produced for safe split fallback")
+            pooled = np.mean(sub_vecs, axis=0, dtype=np.float32)
+            return self._fit_dims(np.asarray([pooled], dtype=np.float32))[0]
+
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dims), dtype=np.float32)
+        try:
+            data = await self._post_json(
+                "/api/embed",
+                {"model": self.model, "input": texts, "keep_alive": self.keep_alive},
+            )
+            embeddings = data.get("embeddings", [])
+            if len(embeddings) == len(texts):
+                return self._fit_dims(np.array(embeddings, dtype=np.float32))
+        except Exception:
+            pass
+
+        try:
+            return await self._embed_v1_batch(texts)
+        except Exception:
+            pass
+
+        out = [await self._embed_single_safe(text) for text in texts]
+        return self._fit_dims(np.asarray(out, dtype=np.float32))
 
     async def embed_single(self, text: str) -> np.ndarray:
         return (await self.embed([text]))[0]

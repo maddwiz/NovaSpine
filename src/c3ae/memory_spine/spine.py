@@ -43,6 +43,7 @@ from c3ae.types import (
 )
 from c3ae.utils import (
     chunk_text,
+    chunk_text_for_embedding,
     extract_benchmark_case_token,
     iso_str,
     parse_json_object,
@@ -116,7 +117,7 @@ class MemorySpine:
         skip_chunking: bool = False,
     ) -> list[str]:
         """Chunk text, embed, and index. Returns chunk IDs."""
-        chunks_text = [text] if skip_chunking else chunk_text(text)
+        chunks_text = self._prepare_embedding_chunks(text, skip_chunking=skip_chunking)
         base_meta = self._build_chunk_metadata(text, source_id, metadata)
         skip_graph_index = bool(base_meta.get("benchmark_case_token"))
         chunk_ids = []
@@ -146,7 +147,7 @@ class MemorySpine:
         in SQLite with full-text search but skips FAISS vector indexing.
         Use this for bulk ingestion where embedding API calls aren't practical.
         """
-        chunks_text = [text] if skip_chunking else chunk_text(text)
+        chunks_text = self._prepare_embedding_chunks(text, skip_chunking=skip_chunking)
         base_meta = self._build_chunk_metadata(text, source_id, metadata)
         skip_graph_index = bool(base_meta.get("benchmark_case_token"))
         chunk_ids = []
@@ -184,7 +185,7 @@ class MemorySpine:
             source_id = str(doc.get("source_id", ""))
             metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
 
-            chunks_text = [text] if skip_chunking else chunk_text(text)
+            chunks_text = self._prepare_embedding_chunks(text, skip_chunking=skip_chunking)
             base_meta = self._build_chunk_metadata(text, source_id, metadata)
             skip_graph_index = bool(base_meta.get("benchmark_case_token"))
 
@@ -214,6 +215,25 @@ class MemorySpine:
             f"ingested {ingested_chunks} chunks from {ingested_docs} docs (batch={bsz})",
         )
         return ingested_docs, ingested_chunks
+
+    def _prepare_embedding_chunks(self, text: str, *, skip_chunking: bool = False) -> list[str]:
+        """Apply normal chunking, then split large chunks into embedding-safe pieces."""
+        base_chunks = [text] if skip_chunking else chunk_text(text)
+        max_tokens = max(0, int(getattr(self.config.ingestion, "embedding_max_tokens", 0)))
+        overlap_tokens = max(0, int(getattr(self.config.ingestion, "embedding_overlap_tokens", 0)))
+        prepared: list[str] = []
+        for chunk in base_chunks:
+            if max_tokens > 0:
+                prepared.extend(
+                    chunk_text_for_embedding(
+                        chunk,
+                        max_tokens=max_tokens,
+                        overlap_tokens=overlap_tokens,
+                    )
+                )
+            else:
+                prepared.append((chunk or "").strip())
+        return [chunk for chunk in prepared if chunk]
 
     def ingest_session(self, session_path: Path) -> dict:
         """Parse and ingest an agent session file into searchable memory.
@@ -306,6 +326,7 @@ class MemorySpine:
         """Hybrid search across all memory tiers."""
         top_k = top_k or self.config.retrieval.default_top_k
         query_profile = self.hybrid_search.analyze_query(query)
+        exact_recall_query = bool(getattr(query_profile, "wants_literal_recall", False))
 
         # Try to get query embedding (may fail if no API key)
         query_vec = None
@@ -320,7 +341,7 @@ class MemorySpine:
             pass  # Fall back to keyword-only
 
         benchmark_case_query = bool(self._extract_benchmark_case_token(query))
-        if bool(self.config.ingestion.enable_fact_extraction) and not benchmark_case_query:
+        if bool(self.config.ingestion.enable_fact_extraction) and not benchmark_case_query and not exact_recall_query:
             routed_structured = self._route_structured_query(query, query_profile, top_k=top_k)
             if routed_structured:
                 self._record_access(routed_structured)
@@ -332,11 +353,11 @@ class MemorySpine:
             top_k=top_k,
             apply_decay=not benchmark_case_query,
         )
-        if self.config.graph.enabled and not benchmark_case_query:
+        if self.config.graph.enabled and not benchmark_case_query and not exact_recall_query:
             graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
             if graph_results:
                 results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
-        if bool(self.config.ingestion.enable_fact_extraction):
+        if bool(self.config.ingestion.enable_fact_extraction) and not exact_recall_query:
             fact_results = self.sqlite.search_structured_facts_fts(query, limit=max(top_k, 5))
             if fact_results:
                 results = self._merge_with_structured(query, results, fact_results, top_k=top_k)
@@ -1363,7 +1384,16 @@ class MemorySpine:
             scope = self._infer_memory_scope(source_id, merged)
             if scope:
                 merged["memory_scope"] = scope
+        if "role" not in merged:
+            role = self._infer_conversation_role(text)
+            if role:
+                merged["role"] = role
         return merged
+
+    @staticmethod
+    def _infer_conversation_role(text: str) -> str:
+        match = re.search(r"(?:^|\n)\s*(user|assistant|system)\s*:", text, flags=re.IGNORECASE)
+        return match.group(1).strip().lower() if match else ""
 
     def _route_structured_query(
         self,
@@ -2233,25 +2263,57 @@ class MemorySpine:
         self.embed_cache.put(text, vec)
         return vec
 
+    async def _embed_batch_with_split(self, texts: list[str]) -> list[np.ndarray | None]:
+        """Embed a batch, recursively isolating provider failures to single chunks."""
+        if not texts:
+            return []
+        try:
+            vectors = await self.embedder.embed(texts)
+            if len(vectors) != len(texts):
+                raise ValueError(f"embedding count mismatch: got {len(vectors)} for {len(texts)} texts")
+            return [np.asarray(vec, dtype=np.float32) for vec in vectors]
+        except Exception as exc:
+            if len(texts) <= 1:
+                logger.warning("Embedding failed for one chunk; skipping vector index for that chunk", exc_info=True)
+                return [None]
+
+            mid = max(1, len(texts) // 2)
+            logger.warning(
+                "Embedding batch failed; splitting %d chunks into %d+%d: %s",
+                len(texts),
+                mid,
+                len(texts) - mid,
+                exc,
+            )
+            left = await self._embed_batch_with_split(texts[:mid])
+            right = await self._embed_batch_with_split(texts[mid:])
+            return left + right
+
     async def _embed_and_index(self, chunk_ids: list[str], texts: list[str]) -> None:
         """Embed texts with caching and add to FAISS index."""
         results, miss_indices = self.embed_cache.get_batch(texts)
 
         if miss_indices:
             miss_texts = [texts[i] for i in miss_indices]
-            try:
-                new_vecs = await self.embedder.embed(miss_texts)
-                self.embed_cache.put_batch(miss_texts, new_vecs)
-                for j, mi in enumerate(miss_indices):
-                    results[mi] = new_vecs[j]
-            except Exception:
+            new_vecs = await self._embed_batch_with_split(miss_texts)
+            cache_texts: list[str] = []
+            cache_vecs: list[np.ndarray] = []
+            skipped = 0
+            for j, vec in enumerate(new_vecs):
+                if vec is None:
+                    skipped += 1
+                    continue
+                cache_texts.append(miss_texts[j])
+                cache_vecs.append(vec)
+                results[miss_indices[j]] = vec
+            if cache_texts:
+                self.embed_cache.put_batch(cache_texts, np.asarray(cache_vecs, dtype=np.float32))
+            if skipped:
                 logger.warning(
-                    "Embedding batch failed, skipping vector indexing for %d chunks",
+                    "Embedding failed for %d/%d chunks; indexing successful embeddings only",
+                    skipped,
                     len(miss_texts),
-                    exc_info=True,
                 )
-                # If embedding fails, skip vector indexing
-                return
 
         # Index all successfully embedded chunks
         for cid, vec in zip(chunk_ids, results):
