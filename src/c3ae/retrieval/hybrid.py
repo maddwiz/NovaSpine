@@ -5,14 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
 import numpy as np
 
 from c3ae.config import RetrievalConfig
+from c3ae.retrieval.features import CandidateFeatures, extract_candidate_features
 from c3ae.retrieval.keyword import KeywordSearch
 from c3ae.retrieval.query_expansion import maybe_expand_query
+from c3ae.retrieval.trace import RetrievalTrace
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.types import SearchResult
 
@@ -113,6 +116,8 @@ class HybridSearch:
         self.config = config or RetrievalConfig()
         self._access_count_getter = access_count_getter
         self._access_counts_getter = access_counts_getter
+        self.last_trace = RetrievalTrace()
+        self.last_candidate_features: list[CandidateFeatures] = []
 
     def search(
         self,
@@ -125,6 +130,9 @@ class HybridSearch:
 
         If query_vector is None, falls back to keyword-only search.
         """
+        total_start = time.perf_counter()
+        trace = RetrievalTrace()
+        self.last_candidate_features = []
         top_k = top_k or self.config.default_top_k
         profile = self.analyze_query(query)
         # Over-fetch aggressively to reduce false negatives before fusion.
@@ -138,26 +146,77 @@ class HybridSearch:
             )
 
         # Keyword results
+        stage_start = time.perf_counter()
         kw_results = self.keyword.search_all(kw_query, limit=fetch_k)
+        trace.add_timing("keyword_search_ms", (time.perf_counter() - stage_start) * 1000.0)
+        trace.add_counter("keyword_results", len(kw_results))
 
         # Vector results (if we have an embedding)
         vec_results: list[SearchResult] = []
         if query_vector is not None:
+            stage_start = time.perf_counter()
             vec_results = self.vector.search(query_vector, top_k=fetch_k)
+            trace.add_timing("vector_search_ms", (time.perf_counter() - stage_start) * 1000.0)
+        else:
+            trace.add_timing("vector_search_ms", 0.0)
+        trace.add_counter("vector_results", len(vec_results))
 
         if not vec_results:
+            stage_start = time.perf_counter()
             if not apply_decay:
-                return kw_results[:top_k]
-            return self._rerank_with_decay(kw_results, top_k=top_k, profile=profile)
+                out = kw_results[:top_k]
+            else:
+                out = self._rerank_with_decay(kw_results, top_k=top_k, profile=profile)
+            trace.add_timing("rerank_ms", (time.perf_counter() - stage_start) * 1000.0)
+            trace.add_timing("fusion_ms", 0.0)
+            self._finalize_trace(trace, total_start, out, query)
+            return out
         if not kw_results:
+            stage_start = time.perf_counter()
             if not apply_decay:
-                return vec_results[:top_k]
-            return self._rerank_with_decay(vec_results, top_k=top_k, profile=profile)
+                out = vec_results[:top_k]
+            else:
+                out = self._rerank_with_decay(vec_results, top_k=top_k, profile=profile)
+            trace.add_timing("rerank_ms", (time.perf_counter() - stage_start) * 1000.0)
+            trace.add_timing("fusion_ms", 0.0)
+            self._finalize_trace(trace, total_start, out, query)
+            return out
 
+        stage_start = time.perf_counter()
         merged = self._merge(kw_results, vec_results, query=query, top_k=fetch_k)
+        trace.add_timing("fusion_ms", (time.perf_counter() - stage_start) * 1000.0)
         if not apply_decay:
-            return merged[:top_k]
-        return self._rerank_with_decay(merged, top_k=top_k, profile=profile)
+            out = merged[:top_k]
+            trace.add_timing("rerank_ms", 0.0)
+        else:
+            stage_start = time.perf_counter()
+            out = self._rerank_with_decay(merged, top_k=top_k, profile=profile)
+            trace.add_timing("rerank_ms", (time.perf_counter() - stage_start) * 1000.0)
+        self._finalize_trace(trace, total_start, out, query)
+        return out
+
+    def _finalize_trace(
+        self,
+        trace: RetrievalTrace,
+        total_start: float,
+        results: list[SearchResult],
+        query: str,
+    ) -> None:
+        trace.add_counter("final_results", len(results))
+        trace.add_timing("total_ms", (time.perf_counter() - total_start) * 1000.0)
+        self.last_trace = trace
+        if bool(self.config.capture_candidate_features):
+            access_counts: dict[str, int] = {}
+            if self._access_counts_getter is not None:
+                try:
+                    access_counts = self._access_counts_getter([r.id for r in results])
+                except Exception:
+                    access_counts = {}
+            self.last_candidate_features = extract_candidate_features(
+                query,
+                results,
+                access_counts=access_counts,
+            )
 
     def _merge(
         self,

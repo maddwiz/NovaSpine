@@ -407,6 +407,7 @@ def doctor_cmd(
     spine = _get_spine(ctx.obj.get("data_dir"))
     try:
         status = spine.status()
+        index_consistency = spine.check_index_consistency()
     finally:
         spine.sqlite.close()
 
@@ -416,6 +417,23 @@ def doctor_cmd(
         "memory-core",
         "ok",
         f"chunks={status.get('chunks', 0)} consolidated={status.get('consolidated_memories', 0)} graph_entities={((status.get('graph') or {}).get('entities', 0))}",
+    ))
+    missing_vectors = len(index_consistency.get("chunks_missing_vectors", []))
+    extra_vectors = len(index_consistency.get("vectors_missing_chunks", []))
+    missing_reasoning_vectors = len(index_consistency.get("active_reasoning_entries_missing_vectors", []))
+    dimension_mismatch = bool(index_consistency.get("embedding_dimension_mismatch", False))
+    index_level = "ok" if not (missing_vectors or extra_vectors or missing_reasoning_vectors or dimension_mismatch) else "warn"
+    checks.append(_doctor_check(
+        "index-consistency",
+        index_level,
+        (
+            f"sqlite_chunks={index_consistency.get('sqlite_chunk_count', 0)} "
+            f"faiss_vectors={index_consistency.get('faiss_vector_count', 0)} "
+            f"missing_vectors={missing_vectors} "
+            f"extra_vectors={extra_vectors} "
+            f"active_reasoning_missing_vectors={missing_reasoning_vectors} "
+            f"dimension_mismatch={dimension_mismatch}"
+        ),
     ))
 
     required_install_paths = [
@@ -502,6 +520,7 @@ def doctor_cmd(
         "install_root": str(install_root_path),
         "openclaw_config": str(openclaw_config_path),
         "memory_status": status,
+        "index_consistency": index_consistency,
         "checks": checks,
         "summary": counts,
     }

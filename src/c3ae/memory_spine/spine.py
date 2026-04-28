@@ -8,6 +8,7 @@ import hashlib
 import logging
 import re
 import threading
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -29,6 +30,7 @@ from c3ae.reasoning_bank.evidence import EvidenceManager
 from c3ae.reasoning_bank.manager import MemoryWriteManager
 from c3ae.retrieval.hybrid import HybridSearch
 from c3ae.retrieval.keyword import KeywordSearch
+from c3ae.retrieval.trace import RetrievalTrace
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.skill_capsules.registry import SkillRegistry
 from c3ae.storage.faiss_store import FAISSStore
@@ -106,6 +108,7 @@ class MemorySpine:
         self._graph_chat = None
         self._consolidation_chat = None
         self._fact_chat = None
+        self.last_retrieval_trace = RetrievalTrace()
 
     # --- Ingest ---
 
@@ -324,6 +327,8 @@ class MemorySpine:
 
     async def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         """Hybrid search across all memory tiers."""
+        total_start = time.perf_counter()
+        trace = RetrievalTrace()
         top_k = top_k or self.config.retrieval.default_top_k
         query_profile = self.hybrid_search.analyze_query(query)
         exact_recall_query = bool(getattr(query_profile, "wants_literal_recall", False))
@@ -331,8 +336,12 @@ class MemorySpine:
         # Try to get query embedding (may fail if no API key)
         query_vec = None
         try:
+            stage_start = time.perf_counter()
             query_vec = await self._embed_text(query)
+            trace.add_timing("query_embedding_ms", (time.perf_counter() - stage_start) * 1000.0)
         except Exception:
+            trace.add_timing("query_embedding_ms", 0.0)
+            trace.notes.append("query_embedding_failed")
             logger.warning(
                 "Embedding failed for query, falling back to keyword-only: %s",
                 query,
@@ -342,28 +351,47 @@ class MemorySpine:
 
         benchmark_case_query = bool(self._extract_benchmark_case_token(query))
         if bool(self.config.ingestion.enable_fact_extraction) and not benchmark_case_query and not exact_recall_query:
+            stage_start = time.perf_counter()
             routed_structured = self._route_structured_query(query, query_profile, top_k=top_k)
+            trace.add_timing("structured_fact_lookup_ms", (time.perf_counter() - stage_start) * 1000.0)
             if routed_structured:
                 self._record_access(routed_structured)
                 self.audit.log_search(query, len(routed_structured))
+                trace.add_counter("final_results", len(routed_structured[:top_k]))
+                trace.add_timing("total_ms", (time.perf_counter() - total_start) * 1000.0)
+                self.last_retrieval_trace = trace
                 return routed_structured[:top_k]
+        else:
+            trace.add_timing("structured_fact_lookup_ms", 0.0)
         results = self.hybrid_search.search(
             query,
             query_vector=query_vec,
             top_k=top_k,
             apply_decay=not benchmark_case_query,
         )
+        trace.merge(self.hybrid_search.last_trace)
         if self.config.graph.enabled and not benchmark_case_query and not exact_recall_query:
+            stage_start = time.perf_counter()
             graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
+            trace.add_timing("graph_lookup_ms", (time.perf_counter() - stage_start) * 1000.0)
             if graph_results:
                 results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
+                trace.add_counter("graph_results", len(graph_results))
+        else:
+            trace.add_timing("graph_lookup_ms", 0.0)
         if bool(self.config.ingestion.enable_fact_extraction) and not exact_recall_query:
+            stage_start = time.perf_counter()
             fact_results = self.sqlite.search_structured_facts_fts(query, limit=max(top_k, 5))
+            trace.add_timing("structured_fact_lookup_ms", (time.perf_counter() - stage_start) * 1000.0)
             if fact_results:
                 results = self._merge_with_structured(query, results, fact_results, top_k=top_k)
+                trace.add_counter("structured_fact_results", len(fact_results))
         if not benchmark_case_query:
             self._record_access(results)
         self.audit.log_search(query, len(results))
+        trace.add_counter("final_results", len(results))
+        trace.add_timing("total_ms", (time.perf_counter() - total_start) * 1000.0)
+        self.last_retrieval_trace = trace
         return results
 
     def search_keyword(self, query: str, top_k: int = 20) -> list[SearchResult]:
@@ -452,6 +480,10 @@ class MemorySpine:
             order_by_date_desc=order_by_date_desc,
             limit=limit,
         )
+
+    def get_last_retrieval_trace(self) -> dict[str, object]:
+        """Return diagnostics for the most recent retrieval call."""
+        return self.last_retrieval_trace.to_dict()
 
     async def augment(
         self,
@@ -548,7 +580,7 @@ class MemorySpine:
                     raise GovernanceError(f"Write blocked: {'; '.join(issues)}")
                 if warnings:
                     self.audit.log("warning", "reasoning_entry", entry.id, "; ".join(warnings))
-            superseded = self.supersede_knowledge(
+            superseded = await self.supersede_knowledge_async(
                 decision.target_id,
                 new_title=title,
                 new_content=content,
@@ -583,6 +615,7 @@ class MemorySpine:
             metadata={
                 "type": "reasoning_entry",
                 "reasoning_entry_id": entry.id,
+                "entry_status": "active",
             },
         )
         self.sqlite.insert_chunk(chunk)
@@ -593,21 +626,52 @@ class MemorySpine:
         self.audit.log_write("reasoning_entry", entry.id, title)
         return entry
 
-    def supersede_knowledge(self, old_id: str, new_title: str, new_content: str,
-                            tags: list[str] | None = None,
-                            evidence_ids: list[str] | None = None) -> ReasoningEntry:
+    async def supersede_knowledge_async(
+        self,
+        old_id: str,
+        new_title: str,
+        new_content: str,
+        tags: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> ReasoningEntry:
+        """Supersede a reasoning entry and index its replacement everywhere."""
         entry = self.bank.supersede(old_id, new_title, new_content, tags, evidence_ids)
+        self.sqlite.mark_reasoning_chunks_superseded(old_id, entry.id)
         combined = f"{new_title}. {new_content}"
         chunk = Chunk(
             content=combined,
             source_id=entry.id,
-            metadata={"type": "reasoning_entry", "reasoning_entry_id": entry.id},
+            metadata={
+                "type": "reasoning_entry",
+                "reasoning_entry_id": entry.id,
+                "entry_status": "active",
+                "supersedes": old_id,
+            },
         )
         self.sqlite.insert_chunk(chunk)
-        self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
-        self._index_structured_facts(chunk.id, chunk.content, chunk.metadata)
+        await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+        await self._index_structured_facts_async(chunk.id, chunk.content, chunk.metadata)
+        await self._embed_and_index([chunk.id], [combined])
         self.audit.log_write("reasoning_entry", entry.id, f"supersedes {old_id}")
         return entry
+
+    def supersede_knowledge(
+        self,
+        old_id: str,
+        new_title: str,
+        new_content: str,
+        tags: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> ReasoningEntry:
+        return self._run_async_sync(
+            self.supersede_knowledge_async(
+                old_id,
+                new_title,
+                new_content,
+                tags=tags,
+                evidence_ids=evidence_ids,
+            )
+        )
 
     # --- Evidence ---
 
@@ -1330,6 +1394,48 @@ class MemorySpine:
             motifs = self._temporal_tracker.detected_motifs()
             status["temporal"] = {"motifs_detected": len(motifs)}
         return status
+
+    def check_index_consistency(self) -> dict[str, Any]:
+        """Report SQLite/FAISS drift without mutating either store."""
+        chunk_rows = self.sqlite.list_chunk_ids(limit=1_000_000)
+        chunk_ids = {row["id"] for row in chunk_rows}
+        vector_ids = set(self.faiss.external_ids())
+
+        reasoning_entries = self.sqlite.list_reasoning_entries_any_status(limit=1_000_000)
+        reasoning_chunk_rows = self.sqlite.list_reasoning_chunk_links(limit=1_000_000)
+        reasoning_to_chunks: dict[str, list[str]] = {}
+        for row in reasoning_chunk_rows:
+            reasoning_id = str(row.get("reasoning_entry_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            if reasoning_id and chunk_id:
+                reasoning_to_chunks.setdefault(reasoning_id, []).append(chunk_id)
+
+        active_entry_ids = {entry.id for entry in reasoning_entries if entry.status.value == "active"}
+        reasoning_entries_missing_chunks = sorted(
+            entry_id for entry_id in active_entry_ids if not reasoning_to_chunks.get(entry_id)
+        )
+        active_reasoning_entries_missing_vectors: list[str] = []
+        for entry_id in active_entry_ids:
+            linked_chunks = reasoning_to_chunks.get(entry_id, [])
+            if linked_chunks and not any(chunk_id in vector_ids for chunk_id in linked_chunks):
+                active_reasoning_entries_missing_vectors.append(entry_id)
+
+        expected_dims = int(self.config.venice.embedding_dims)
+        faiss_dims = int(getattr(self.faiss, "dims", expected_dims))
+        return {
+            "sqlite_chunk_count": len(chunk_ids),
+            "faiss_vector_count": int(self.faiss.size),
+            "faiss_idmap_count": len(vector_ids),
+            "chunks_missing_vectors": sorted(chunk_ids - vector_ids),
+            "vectors_missing_chunks": sorted(vector_ids - chunk_ids),
+            "reasoning_entries_missing_chunks": reasoning_entries_missing_chunks,
+            "active_reasoning_entries_missing_vectors": sorted(active_reasoning_entries_missing_vectors),
+            "embedding_dimension_mismatch": faiss_dims != expected_dims,
+            "embedding_dimensions": {
+                "config": expected_dims,
+                "faiss": faiss_dims,
+            },
+        }
 
     @staticmethod
     def _render_augmented_context(memories: list[dict[str, str]], format: str = "xml") -> str:

@@ -534,6 +534,13 @@ class SQLiteStore:
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return row[0]
 
+    def list_chunk_ids(self, limit: int = 1_000_000) -> list[dict[str, str]]:
+        rows = self._conn.execute(
+            "SELECT id FROM chunks ORDER BY created_at DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [{"id": str(r["id"])} for r in rows]
+
     def list_chunks(
         self,
         limit: int = 200,
@@ -992,6 +999,49 @@ class SQLiteStore:
             (status, limit),
         ).fetchall()
         return [self._row_to_reasoning_entry(r) for r in rows]
+
+    def list_reasoning_entries_any_status(self, limit: int = 1_000_000) -> list[ReasoningEntry]:
+        rows = self._conn.execute(
+            "SELECT * FROM reasoning_bank ORDER BY created_at DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [self._row_to_reasoning_entry(r) for r in rows]
+
+    def list_reasoning_chunk_links(self, limit: int = 1_000_000) -> list[dict[str, str]]:
+        rows = self._conn.execute(
+            """SELECT id, json_extract(metadata, '$.reasoning_entry_id') AS reasoning_entry_id
+               FROM chunks
+               WHERE json_extract(metadata, '$.type') = 'reasoning_entry'
+               LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [
+            {
+                "chunk_id": str(r["id"]),
+                "reasoning_entry_id": str(r["reasoning_entry_id"] or ""),
+            }
+            for r in rows
+        ]
+
+    def mark_reasoning_chunks_superseded(self, reasoning_entry_id: str, superseded_by: str) -> int:
+        rows = self._conn.execute(
+            """SELECT id, metadata FROM chunks
+               WHERE json_extract(metadata, '$.reasoning_entry_id') = ?""",
+            (reasoning_entry_id,),
+        ).fetchall()
+        if not rows:
+            return 0
+        with self._write_lock:
+            for row in rows:
+                metadata = json_loads(row["metadata"])
+                metadata["entry_status"] = "superseded"
+                metadata["superseded_by"] = superseded_by
+                self._conn.execute(
+                    "UPDATE chunks SET metadata=? WHERE id=?",
+                    (json_dumps(metadata), row["id"]),
+                )
+            self._commit_locked()
+        return len(rows)
 
     def search_reasoning_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
         fts_query = _sanitize_fts_query(query)

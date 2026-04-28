@@ -157,6 +157,12 @@ class RetrievalConfig(BaseModel):
     query_expansion_max_terms: int = Field(
         default_factory=lambda: _env_int("C3AE_QUERY_EXPANSION_MAX_TERMS", 4)
     )
+    enable_tracing: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_RETRIEVAL_TRACING", False)
+    )
+    capture_candidate_features: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_RETRIEVAL_CANDIDATE_FEATURES", False)
+    )
 
 
 class IngestionConfig(BaseModel):
