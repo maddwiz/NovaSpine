@@ -55,3 +55,36 @@ def test_extractive_answer_finds_numeric_answer():
     recalled = [{"content": "I had been preparing for 7 days before the meeting."}]
     pred = extractive_answer("How many days before the meeting was I preparing?", recalled)
     assert pred.lower() == "7 days"
+
+
+def test_extractive_answer_uses_typed_reader_for_crosstab_tables():
+    recalled = [
+        {
+            "id": "rotation-table",
+            "content": "\n".join(
+                [
+                    "|  | 8 am - 4 pm (Day Shift) | 12 pm - 8 pm (Afternoon Shift) |",
+                    "| --- | --- | --- |",
+                    "| Sunday | Admon | Magdy |",
+                ]
+            ),
+        }
+    ]
+
+    pred = extractive_answer("What was the rotation for Admon on a Sunday?", recalled)
+
+    assert pred == "8 am - 4 pm (Day Shift)"
+
+
+def test_extractive_answer_uses_typed_reader_for_relative_dates():
+    recalled = [
+        {
+            "id": "pottery",
+            "content": "Melanie: I just signed up for a pottery class yesterday.",
+            "metadata": {"session_date": "2023-07-03T13:36:00Z"},
+        }
+    ]
+
+    pred = extractive_answer("When did Melanie sign up for a pottery class?", recalled)
+
+    assert pred == "2 July 2023"

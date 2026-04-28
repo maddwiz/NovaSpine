@@ -23,6 +23,39 @@ def test_normalizes_relative_day_with_session_date():
     assert "resolved_yesterday" in out.steps
 
 
+def test_normalizes_relative_day_with_locomo_session_date_string():
+    out = normalize_answer(
+        "yesterday",
+        "date",
+        {"session_date": "1:36 pm on 3 July, 2023"},
+    )
+
+    assert out.answer == "2 July 2023"
+
+
+def test_session_date_takes_priority_over_storage_created_at():
+    out = normalize_answer(
+        "yesterday",
+        "date",
+        {
+            "session_date": "1:36 pm on 3 July, 2023",
+            "_created_at": "2026-04-28T20:00:00Z",
+        },
+    )
+
+    assert out.answer == "2 July 2023"
+
+
+def test_normalizes_relative_day_with_longmem_session_date_string():
+    out = normalize_answer(
+        "yesterday",
+        "date",
+        {"session_date": "2023/05/20 (Sat) 09:05"},
+    )
+
+    assert out.answer == "19 May 2023"
+
+
 def test_normalizes_counts_and_match_text():
     assert normalize_answer("two projects", "count").answer == "2"
     assert normalize_for_match("The Two Projects!") == "2 projects"

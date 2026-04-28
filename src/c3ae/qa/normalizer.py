@@ -123,7 +123,7 @@ def infer_answer_type(question: str) -> str:
 def _parse_reference_datetime(metadata: dict[str, Any] | None) -> datetime | None:
     if not metadata:
         return None
-    for key in ("reference_date", "timestamp", "created_at", "_created_at", "date", "session_date", "question_date"):
+    for key in ("reference_date", "session_date", "question_date", "date", "timestamp", "created_at", "_created_at"):
         raw = metadata.get(key)
         if not isinstance(raw, str) or not raw.strip():
             continue
@@ -133,13 +133,36 @@ def _parse_reference_datetime(metadata: dict[str, Any] | None) -> datetime | Non
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
-            try:
-                parsed = datetime.strptime(value[:10], "%Y-%m-%d")
-            except ValueError:
+            parsed = _parse_loose_reference_datetime(value)
+            if parsed is None:
                 continue
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _parse_loose_reference_datetime(value: str) -> datetime | None:
+    candidates = [value.strip()]
+    on_match = re.search(r"\bon\s+(\d{1,2}\s+[A-Za-z]+,?\s+\d{4})\b", value, re.IGNORECASE)
+    if on_match:
+        candidates.append(on_match.group(1))
+    slash_match = re.search(r"\b((?:19|20)\d{2}/\d{1,2}/\d{1,2})\b", value)
+    if slash_match:
+        candidates.append(slash_match.group(1))
+    iso_match = re.search(r"\b((?:19|20)\d{2}-\d{1,2}-\d{1,2})\b", value)
+    if iso_match:
+        candidates.append(iso_match.group(1))
+    month_match = re.search(r"\b(\d{1,2}\s+[A-Za-z]+,?\s+\d{4})\b", value)
+    if month_match:
+        candidates.append(month_match.group(1))
+    for candidate in candidates:
+        cleaned = candidate.replace(",", "").strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d %B %Y", "%d %b %Y"):
+            try:
+                return datetime.strptime(cleaned, fmt)
+            except ValueError:
+                continue
     return None
 
 

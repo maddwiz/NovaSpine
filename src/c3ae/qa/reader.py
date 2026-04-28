@@ -256,6 +256,29 @@ def _table_candidates(question: str, row: Any) -> list[tuple[float, str, str, st
             row_tokens = _tokens(row_span)
             if q_tokens and not (q_tokens & row_tokens):
                 continue
+            # Crosstab schedule style: first column is the row label/day, column
+            # headers are the answer, and cells contain the queried entity.
+            row_label_tokens = _tokens(cells[0]) if cells else set()
+            row_label_match = not row_label_tokens or bool(q_tokens & row_label_tokens)
+            generic_cell_terms = {
+                "shift", "shifts", "day", "days", "am", "pm", "morning",
+                "afternoon", "evening", "night", "current", "previous",
+            }
+            for cell_index, cell in enumerate(cells[1:], start=1):
+                if cell_index >= len(headers) or not cell:
+                    continue
+                header = headers[cell_index]
+                if not header:
+                    continue
+                cell_overlap = (q_tokens & _tokens(cell)) - generic_cell_terms
+                if not row_label_match or not cell_overlap:
+                    continue
+                header_tokens = _tokens(header)
+                if header_tokens & identity_headers:
+                    continue
+                span = f"{cells[0]} {cell}: {header}".strip()
+                score = 2.0 + len(q_tokens & _tokens(span))
+                candidates.append((score, header, citation, span, metadata))
             for header, cell in zip(headers, cells, strict=True):
                 if not cell:
                     continue
@@ -326,8 +349,9 @@ def _extract_structured_candidate(
         if listed is not None:
             raw, citation, span, metadata = listed
             candidates.append((row_bias + 1.0 + _temporal_score(question, span, metadata), raw, citation, span, metadata))
-        for score, raw, citation, span, metadata in _labeled_span_candidates(question, row):
-            candidates.append((score + row_bias, raw, citation, span, metadata))
+        if answer_type not in {"date", "year", "count", "number"}:
+            for score, raw, citation, span, metadata in _labeled_span_candidates(question, row):
+                candidates.append((score + row_bias, raw, citation, span, metadata))
     if not candidates:
         return "", [], [], {}
     candidates.sort(key=lambda item: item[0], reverse=True)

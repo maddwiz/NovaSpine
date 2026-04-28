@@ -199,6 +199,27 @@ def test_reader_extracts_shift_cell_from_schedule_table():
     assert answer.verifier_status == "supported"
 
 
+def test_reader_extracts_shift_header_from_crosstab_schedule():
+    answer = answer_from_memory(
+        "What was the rotation for Admon on a Sunday?",
+        [
+            _row(
+                "\n".join(
+                    [
+                        "|  | 8 am - 4 pm (Day Shift) | 12 pm - 8 pm (Afternoon Shift) |",
+                        "| --- | --- | --- |",
+                        "| Sunday | Admon | Magdy |",
+                    ]
+                ),
+                "rotation-table",
+            )
+        ],
+    )
+
+    assert answer.answer == "8 am - 4 pm (Day Shift)"
+    assert answer.citations == ["rotation-table"]
+
+
 def test_reader_resolves_yesterday_with_session_date():
     answer = answer_from_memory(
         "When was the pottery class?",
@@ -207,6 +228,24 @@ def test_reader_resolves_yesterday_with_session_date():
 
     assert answer.answer == "2 July 2023"
     assert answer.verifier_status == "supported"
+
+
+def test_reader_does_not_treat_speaker_prefix_as_date_answer():
+    answer = answer_from_memory(
+        "When did Melanie sign up for a pottery class?",
+        [
+            _row(
+                (
+                    "Melanie: Wow, Caroline! That's great! "
+                    "I just signed up for a pottery class yesterday."
+                ),
+                "pottery",
+                session_date="1:36 pm on 3 July, 2023",
+            )
+        ],
+    )
+
+    assert answer.answer == "2 July 2023"
 
 
 def test_reader_aggregates_list_items_across_rows():
