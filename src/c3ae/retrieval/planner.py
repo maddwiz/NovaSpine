@@ -1,8 +1,8 @@
 """Lightweight query planning for memory retrieval.
 
-The planner is intentionally deterministic and side-effect free.  It does not
-change ranking by itself; callers can attach the plan to benchmark rows or use
-it later to route retrieval through table, list, graph, or temporal readers.
+The planner is intentionally deterministic and side-effect free.  Retrieval and
+benchmark callers can attach the plan to rows or use it to select conservative
+table, list, graph, temporal, or multi-session routes.
 """
 
 from __future__ import annotations
@@ -169,4 +169,3 @@ def plan_memory_query(question: str) -> QueryPlan:
         confidence=confidence,
         notes=notes,
     )
-

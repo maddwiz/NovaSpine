@@ -618,6 +618,24 @@ class SQLiteStore:
         if not source_chunk_id or not entity_clean or not relation_clean or not value_clean:
             raise ValueError("structured fact requires source_chunk_id/entity/relation/value")
         now = iso_str(utcnow())
+        fact_date_clean = str(fact_date or "").strip()
+        fact_metadata = dict(metadata or {})
+        observed_at = str(
+            fact_metadata.get("observed_at")
+            or fact_metadata.get("recorded_at")
+            or fact_metadata.get("ingested_at")
+            or now
+        )
+        fact_metadata.setdefault("observed_at", observed_at)
+        fact_metadata.setdefault("recorded_at", now)
+        fact_metadata.setdefault("ingested_at", now)
+        fact_metadata.setdefault("transaction_from", now)
+        fact_metadata.setdefault("valid_from", fact_date_clean or observed_at)
+        fact_metadata.setdefault("valid_to", "")
+        fact_metadata.setdefault(
+            "provenance",
+            {"source_chunk_id": source_chunk_id, "store": "structured_facts"},
+        )
 
         # Upsert-by-content for idempotent re-ingestion.
         with self._write_lock:
@@ -629,7 +647,7 @@ class SQLiteStore:
                     entity_clean,
                     relation_clean,
                     value_clean,
-                    fact_date.strip(),
+                    fact_date_clean,
                 ),
             ).fetchone()
             if row:
@@ -640,7 +658,7 @@ class SQLiteStore:
                        WHERE id=?""",
                     (
                         float(confidence),
-                        json_dumps(metadata or {}),
+                        json_dumps(fact_metadata),
                         now,
                         fact_id,
                     ),
@@ -659,9 +677,9 @@ class SQLiteStore:
                     entity_clean,
                     relation_clean,
                     value_clean,
-                    fact_date.strip(),
+                    fact_date_clean,
                     float(confidence),
-                    json_dumps(metadata or {}),
+                    json_dumps(fact_metadata),
                     now,
                 ),
             )
@@ -698,20 +716,42 @@ class SQLiteStore:
                 LIMIT ?""",
             (*params, max(1, int(limit))),
         ).fetchall()
-        return [
-            {
-                "id": str(r["id"]),
-                "source_chunk_id": str(r["source_chunk_id"]),
-                "entity": str(r["entity"]),
-                "relation": str(r["relation"]),
-                "value": str(r["value"]),
-                "date": str(r["fact_date"]),
-                "confidence": float(r["confidence"]),
-                "metadata": json_loads(r["metadata"]),
-                "created_at": str(r["created_at"]),
-            }
-            for r in rows
-        ]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            metadata = json_loads(r["metadata"])
+            created_at = str(r["created_at"])
+            fact_date_value = str(r["fact_date"])
+            out.append(
+                {
+                    "id": str(r["id"]),
+                    "source_chunk_id": str(r["source_chunk_id"]),
+                    "entity": str(r["entity"]),
+                    "relation": str(r["relation"]),
+                    "value": str(r["value"]),
+                    "date": fact_date_value,
+                    "confidence": float(r["confidence"]),
+                    "metadata": metadata,
+                    "created_at": created_at,
+                    **self._fact_temporal_fields(metadata, fact_date_value, created_at),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _fact_temporal_fields(
+        metadata: dict[str, Any],
+        fact_date: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        return {
+            "valid_from": str(metadata.get("valid_from") or fact_date or metadata.get("observed_at") or ""),
+            "valid_to": str(metadata.get("valid_to") or ""),
+            "observed_at": str(metadata.get("observed_at") or metadata.get("recorded_at") or created_at or ""),
+            "recorded_at": str(metadata.get("recorded_at") or created_at or ""),
+            "transaction_from": str(metadata.get("transaction_from") or created_at or ""),
+            "transaction_to": str(metadata.get("transaction_to") or ""),
+            "provenance": metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {},
+        }
 
     @staticmethod
     def _fact_status(fact: dict[str, Any]) -> str:
@@ -754,16 +794,20 @@ class SQLiteStore:
         ).fetchone()
         if not row:
             return None
+        metadata = json_loads(row["metadata"])
+        created_at = str(row["created_at"])
+        fact_date_value = str(row["fact_date"])
         return {
             "id": str(row["id"]),
             "source_chunk_id": str(row["source_chunk_id"]),
             "entity": str(row["entity"]),
             "relation": str(row["relation"]),
             "value": str(row["value"]),
-            "date": str(row["fact_date"]),
+            "date": fact_date_value,
             "confidence": float(row["confidence"]),
-            "metadata": json_loads(row["metadata"]),
-            "created_at": str(row["created_at"]),
+            "metadata": metadata,
+            "created_at": created_at,
+            **self._fact_temporal_fields(metadata, fact_date_value, created_at),
         }
 
     def update_structured_fact_metadata(self, fact_id: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -783,15 +827,18 @@ class SQLiteStore:
     ) -> list[dict[str, Any]]:
         current: list[dict[str, Any]] = []
         for facts in self._facts_by_group(entity=entity, relation=relation, limit=max(limit * 4, 200)).values():
-            explicit_current = [fact for fact in facts if self._fact_status(fact) == "current"]
+            eligible = [fact for fact in facts if self._fact_status(fact) != "historical"]
+            if not eligible:
+                eligible = facts
+            explicit_current = [fact for fact in eligible if self._fact_status(fact) == "current"]
             if explicit_current:
                 winners = explicit_current
             else:
-                latest_date = next((str(fact.get("date") or "") for fact in facts if str(fact.get("date") or "")), "")
+                latest_date = next((str(fact.get("date") or "") for fact in eligible if str(fact.get("date") or "")), "")
                 if latest_date:
-                    winners = [fact for fact in facts if str(fact.get("date") or "") == latest_date]
+                    winners = [fact for fact in eligible if str(fact.get("date") or "") == latest_date]
                 else:
-                    winners = [sorted(facts, key=self._fact_sort_key, reverse=True)[0]]
+                    winners = [sorted(eligible, key=self._fact_sort_key, reverse=True)[0]]
             current.extend(sorted(winners, key=self._fact_sort_key, reverse=True))
         current.sort(key=self._fact_sort_key, reverse=True)
         return current[: max(1, limit)]
@@ -1418,9 +1465,20 @@ class SQLiteStore:
         confidence: float = 0.5,
         metadata: dict[str, Any] | None = None,
         invalidate_existing_relation: bool = False,
+        valid_from: str = "",
+        valid_to: str = "",
+        provenance: dict[str, Any] | None = None,
     ) -> str:
         now = iso_str(utcnow())
         relation_norm = relation.strip().lower().replace(" ", "_")
+        edge_metadata = dict(metadata or {})
+        if provenance is not None:
+            edge_metadata.setdefault("provenance", provenance)
+        edge_metadata.setdefault("observed_at", now)
+        edge_metadata.setdefault("recorded_at", now)
+        edge_metadata.setdefault("transaction_from", now)
+        edge_metadata.setdefault("valid_from", valid_from or now)
+        edge_metadata.setdefault("valid_to", valid_to or "")
         with self._write_lock:
             if invalidate_existing_relation:
                 self._conn.execute(
@@ -1434,16 +1492,17 @@ class SQLiteStore:
                 """INSERT INTO edges(
                     id, src_entity_id, relation, dst_entity_id, source_chunk_id,
                     valid_from, valid_to, confidence, status, metadata, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
                 (
                     edge_id,
                     src_entity_id,
                     relation_norm,
                     dst_entity_id,
                     source_chunk_id,
-                    now,
+                    valid_from or now,
+                    valid_to or None,
                     float(confidence),
-                    json_dumps(metadata or {}),
+                    json_dumps(edge_metadata),
                     now,
                 ),
             )

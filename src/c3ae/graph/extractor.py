@@ -31,6 +31,7 @@ class ExtractedGraph:
     relations: list[tuple[str, str, str]] = field(default_factory=list)  # src, relation, dst
     entity_confidence: dict[str, float] = field(default_factory=dict)
     relation_confidence: dict[tuple[str, str, str], float] = field(default_factory=dict)
+    relation_metadata: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     mode: str = "heuristic"
 
 
@@ -137,7 +138,8 @@ async def _extract_graph_facts_llm(
         "Schema:\n"
         "{"
         "\"entities\":[{\"name\":\"...\",\"confidence\":0.0-1.0}],"
-        "\"relations\":[{\"src\":\"...\",\"relation\":\"...\",\"dst\":\"...\",\"confidence\":0.0-1.0}]"
+        "\"relations\":[{\"src\":\"...\",\"relation\":\"...\",\"dst\":\"...\",\"confidence\":0.0-1.0,"
+        "\"valid_from\":\"...\",\"valid_to\":\"...\",\"observed_at\":\"...\"}]"
         "}\n"
         "Rules:\n"
         "- Keep entity names concise.\n"
@@ -162,6 +164,7 @@ async def _extract_graph_facts_llm(
     relations: list[tuple[str, str, str]] = []
     entity_conf: dict[str, float] = {}
     relation_conf: dict[tuple[str, str, str], float] = {}
+    relation_metadata: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     if isinstance(entity_rows, list):
         for row in entity_rows:
@@ -193,6 +196,16 @@ async def _extract_graph_facts_llm(
                 relations.append(tup)
             conf = _clamp_confidence(_coerce_float(row.get("confidence"), 0.74))
             relation_conf[tup] = max(relation_conf.get(tup, 0.0), conf)
+            rel_meta = {
+                key: str(row.get(key, "")).strip()
+                for key in ("valid_from", "valid_to", "observed_at", "source_span")
+                if str(row.get(key, "")).strip()
+            }
+            provenance = row.get("provenance")
+            if isinstance(provenance, dict):
+                rel_meta["provenance"] = provenance
+            if rel_meta:
+                relation_metadata[tup] = rel_meta
             if len(relations) >= max_relations:
                 break
 
@@ -201,6 +214,7 @@ async def _extract_graph_facts_llm(
         relations=relations[:max_relations],
         entity_confidence=entity_conf,
         relation_confidence=relation_conf,
+        relation_metadata=relation_metadata,
         mode="llm",
     )
 
@@ -272,4 +286,3 @@ def _coerce_float(value: Any, default: float) -> float:
 
 def _clamp_confidence(value: float) -> float:
     return max(0.05, min(0.99, float(value)))
-

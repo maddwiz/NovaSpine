@@ -1,18 +1,18 @@
 # NovaSpine Memory Roadmap, 2026
 
-This note captures the next architecture moves after the typed reader and
-diagnostics pass. It is deliberately implementation-oriented: each idea maps to
-repo work that improves either answer quality, memory consistency, latency, or
-multi-agent safety.
+This note captures the memory architecture direction after the typed reader,
+diagnostics, and first "god-tier memory" hardening pass. It is deliberately
+implementation-oriented: each idea maps to repo work that improves answer
+quality, memory consistency, latency, or multi-agent safety.
 
 ## Current Signal
 
-The active LongMemEval-M run shows NovaSpine already has stronger evidence
-retrieval than stock OpenClaw, but answer F1 lags because the system often
-retrieves the right session and then returns the wrong span. The largest
-remaining buckets are evidence-present answer selection, multi-session
-reasoning, location/person/count extraction, and embedding-provider 400s that
-leave chunks without vectors.
+The active LongMemEval-M run shows the main gap is no longer just retrieval. The
+hard failures cluster around end-to-end answer construction: row routing,
+current-vs-stale truth, multi-session reconstruction, exact span selection, and
+typed normalization. The current branch adds deterministic infrastructure around
+those failure points so future benchmark runs can say whether a miss came from
+retrieval, rerank, reading, verification, or memory drift.
 
 ## Research-Aligned Upgrades
 
@@ -20,41 +20,44 @@ leave chunks without vectors.
 
    Recent systems such as MemMachine route queries among direct retrieval,
    parallel decomposition, and iterative chain-of-query retrieval instead of
-   sending every question through one vector/keyword path. NovaSpine should
-   promote the new deterministic `QueryPlan` into a route executor that chooses
-   table lookup, list lookup, current-state, historical, temporal math, or
-   multi-session reconstruction.
+   sending every question through one vector/keyword path. NovaSpine now uses
+   `QueryPlan` in retrieval traces, benchmark rows, keyword-variant execution,
+   multi-session benchmark recall, and typed reader metadata. Next: add a true
+   multi-tool route executor for table lookup, temporal math, graph traversal,
+   and episodic expansion.
 
 2. Bitemporal property graph
 
    APEX-MEM and MAGMA-style systems separate semantic, temporal, causal, and
-   entity structure. NovaSpine already has graph and fact extraction; the next
-   step is adding `valid_from`, `valid_to`, `observed_at`, `supersedes`,
-   `contradicts`, and `same_as` semantics to facts and edges so current-state
-   questions stop competing with stale facts.
+   entity structure. NovaSpine now stores `valid_from`, `valid_to`,
+   `observed_at`, transaction fields, provenance, and supersession metadata on
+   structured facts and graph edges. Next: add first-class `contradicts`,
+   `same_as`, and causal edge families plus query-time temporal filters.
 
 3. Ground-truth-preserving episodic memory
 
    MemMachine's useful idea is not compressing everything into facts; it keeps
    full episodes available and expands nucleus matches with neighboring turns.
-   NovaSpine should keep compact facts for fast lookup, but answer readers need
-   an episodic expansion path when a question depends on adjacent turns.
+   NovaSpine should keep compact facts for fast lookup, but the next answer
+   reader upgrade should pull neighbor turns around the highest-confidence chunk
+   before asking the typed reader or LLM to answer.
 
 4. Self-repair loop
 
    MemMA-style systems synthesize probe QA pairs during memory construction,
    test whether the memory can answer them, and repair failed memory before
-   finalizing. NovaSpine can implement this locally: dream/consolidation emits
-   probes, runs the typed reader against fresh memory, and creates missing
-   links/facts when verification fails.
+   finalizing. NovaSpine now has a dry-run self-repair probe report in dream
+   consolidation, with repair writes disabled by default. Next: generate richer
+   probes from benchmark failure taxonomy and only write repairs when verifier
+   support is strong.
 
 5. Memory manager policy
 
    MemFactory/Memory-R1-style work points toward learned or policy-driven memory
-   actions. Start deterministic: every proposed fact gets provenance,
-   confidence, timestamp, utility, scope, and action (`ADD`, `UPDATE`, `NOOP`,
-   `DELETE`). Later, train the manager from NovaSpine's failure taxonomy and
-   traces.
+   actions. NovaSpine now has a deterministic write-admission manager for
+   facts/edges with `ALLOW`, `DENY`, `NOOP`, and `SUPERSEDE`. Next: train a
+   learned manager from row-level failure taxonomy, candidate features, and
+   self-repair outcomes.
 
 6. Hierarchical shared memory
 
@@ -63,23 +66,43 @@ leave chunks without vectors.
    pages, durable user/project facts, and compressed archives, with ACLs and
    consistency rules before it becomes shared Claw3D agent memory.
 
+7. Read-time verifier and citation contract
+
+   LongMemEval frames long-term memory as indexing, retrieval, and reading. The
+   live results show NovaSpine needs to win the reading stage, not just recall.
+   The typed answer object, verifier status, citations, and normalized answer
+   fields are now in place. Next: make all benchmark answer modes record typed
+   reader/verifier details, even when the final answer comes from an LLM.
+
+8. Benchmark-honest optimization
+
+   Recent benchmark commentary shows some memory results are inflated by short
+   contexts, answer leakage, or judge quirks. NovaSpine should keep official
+   rows machine-readable, preserve evidence IDs, log timeouts separately from
+   wrong answers, and avoid benchmark-specific hidden shortcuts.
+
 ## Implementation Order
 
 1. Reader v2 and embedding no-drop fallback: done in this branch.
 2. QueryPlan row output and planner tests: done in this branch.
-3. Promote QueryPlan into route execution for benchmark mode.
-4. Add bitemporal fields to facts/graph edges and current-vs-historical tests.
-5. Add dream/self-repair probes backed by the failure taxonomy.
-6. Add shared-memory scopes and write admission policy.
+3. Conservative QueryPlan route execution for keyword variants and multi-session benchmark recall: done in this branch.
+4. Bitemporal fields for facts/graph edges and current-vs-historical tests: done in this branch.
+5. Dream/self-repair probe report: done in this branch.
+6. Deterministic write admission policy for facts/edges: done in this branch.
+7. Next: neighbor-turn episodic expansion for answer context.
+8. Next: learned memory manager/reranker training from benchmark rows.
+9. Next: richer contradiction/same-as graph semantics.
+10. Next: benchmark report grouping by failure kind, route, latency stage, and self-repair outcome.
 
 ## Sources Reviewed
 
 - MemMachine: https://arxiv.org/abs/2604.04853
 - APEX-MEM: https://arxiv.org/abs/2604.14362
 - MemFactory: https://arxiv.org/abs/2603.29493
-- Memori: https://arxiv.org/abs/2603.19935
+- Memory-R1: https://arxiv.org/abs/2508.19828
 - MAGMA: https://arxiv.org/abs/2601.03236
 - MemMA: https://arxiv.org/abs/2603.18718
 - A-MEM: https://arxiv.org/abs/2502.12110
+- MemoryOS: https://arxiv.org/abs/2506.06326
+- LongMemEval: https://proceedings.iclr.cc/paper_files/paper/2025/file/d813d324dbf0598bbdc9c8e79740ed01-Paper-Conference.pdf
 - LLM Agent Memory Survey: https://openreview.net/forum?id=KPs1EgGKcT
-

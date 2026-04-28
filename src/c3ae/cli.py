@@ -54,6 +54,19 @@ def _find_plugin_entry(entries: object, plugin_id: str) -> dict | None:
     return None
 
 
+def _openclaw_plugin_id(path: Path) -> str:
+    plugin_json = path / "openclaw.plugin.json"
+    if not plugin_json.exists():
+        return ""
+    try:
+        payload = json.loads(plugin_json.read_text())
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("id") or payload.get("name") or "").strip()
+
+
 def _probe_json(url: str, timeout: float = 2.0) -> tuple[bool, str]:
     try:
         with urlopen(url, timeout=timeout) as response:
@@ -440,9 +453,14 @@ def doctor_cmd(
         install_root_path / "packages" / "openclaw-memory-plugin",
         install_root_path / "packages" / "openclaw-context-engine",
         install_root_path / "packages" / "openclaw-consciousness",
-        install_root_path / "scripts" / "run-memory-maintenance.sh",
-        install_root_path / "scripts" / "run-consciousness-suite.sh",
     ]
+    memory_maintenance_script = install_root_path / "scripts" / "run-memory-maintenance.sh"
+    consciousness_script = install_root_path / "scripts" / "run-consciousness-suite.sh"
+    if not memory_maintenance_script.exists():
+        memory_maintenance_script = install_root_path / "integrations" / "openclaw" / "scripts" / "run-memory-maintenance.sh"
+    if not consciousness_script.exists():
+        consciousness_script = install_root_path / "integrations" / "openclaw" / "scripts" / "run-consciousness-suite.sh"
+    required_install_paths.extend([memory_maintenance_script, consciousness_script])
     missing_install_paths = [str(path) for path in required_install_paths if not path.exists()]
     checks.append(_doctor_check(
         "openclaw-install-root",
@@ -470,15 +488,18 @@ def doctor_cmd(
 
             expected_plugin_ids = ("novaspine-memory", "novaspine-context", "nova-consciousness")
             missing_allow = [plugin_id for plugin_id in expected_plugin_ids if plugin_id not in allow]
+            configured_paths = [Path(str(path)).expanduser() for path in paths]
+            configured_plugin_ids = {
+                plugin_id
+                for path in configured_paths
+                if path.exists()
+                for plugin_id in [_openclaw_plugin_id(path)]
+                if plugin_id
+            }
             missing_paths = [
-                str(candidate)
-                for candidate in [
-                    install_root_path / "packages" / "openclaw-memory-plugin",
-                    install_root_path / "packages" / "openclaw-context-engine",
-                    install_root_path / "packages" / "openclaw-consciousness",
-                ]
-                if str(candidate) not in paths
+                plugin_id for plugin_id in expected_plugin_ids if plugin_id not in configured_plugin_ids
             ]
+            missing_configured_paths = [str(path) for path in configured_paths if not path.exists()]
             bad_slots = []
             if slots.get("memory") != "novaspine-memory":
                 bad_slots.append(f"memory={slots.get('memory')!r}")
@@ -500,7 +521,9 @@ def doctor_cmd(
             if missing_allow:
                 detail_parts.append(f"allow missing {missing_allow}")
             if missing_paths:
-                detail_parts.append(f"paths missing {missing_paths}")
+                detail_parts.append(f"plugin paths missing ids {missing_paths}")
+            if missing_configured_paths:
+                detail_parts.append(f"configured paths missing {missing_configured_paths}")
             if bad_slots:
                 detail_parts.append(f"slots {'; '.join(bad_slots)}")
             detail_parts.append(", ".join(entry_notes))

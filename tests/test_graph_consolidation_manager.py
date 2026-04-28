@@ -185,6 +185,41 @@ def test_dream_consolidate_reports_contradictions_and_skills(tmp_path):
     asyncio.run(_run())
 
 
+def test_self_repair_probes_report_supported_structured_facts(tmp_path):
+    async def _run() -> None:
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        cfg.venice.embedding_provider = "hash"
+        cfg.venice.embedding_dims = 64
+        cfg.consolidation.self_repair_max_probes = 3
+        cfg.ensure_dirs()
+        spine = MemorySpine(cfg)
+        try:
+            await spine.ingest_text(
+                "Desmond prefers matcha for afternoon focus.",
+                source_id="test:self-repair",
+                skip_chunking=True,
+            )
+            chunk_id = spine.sqlite.list_chunks(limit=1)[0].id
+            spine.sqlite.insert_structured_fact(
+                source_chunk_id=chunk_id,
+                entity="Desmond",
+                relation="prefers",
+                value="matcha",
+                confidence=0.9,
+            )
+
+            report = await spine.self_repair_probes_async(limit=1)
+            assert report["enabled"] is True
+            assert report["probes"]
+            assert report["passed"] == 1
+            assert report["failed"] == 0
+        finally:
+            await spine.close()
+
+    asyncio.run(_run())
+
+
 def test_memory_write_manager_noop_on_duplicate(tmp_path):
     async def _run() -> None:
         cfg = Config()

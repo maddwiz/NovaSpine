@@ -69,6 +69,10 @@ class StructuredFact:
     date: str = ""
     confidence: float = 0.0
     source_span: str = ""
+    valid_from: str = ""
+    valid_to: str = ""
+    observed_at: str = ""
+    provenance: dict[str, Any] | None = None
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -592,6 +596,7 @@ async def extract_facts_async(
             "Extract high-precision structured memory facts from text.\n"
             "Return strict JSON with key 'facts' as a list of objects:\n"
             "{\"facts\":[{\"entity\":\"...\",\"relation\":\"...\",\"value\":\"...\",\"date\":\"...\",\"confidence\":0.0}]}\n"
+            "Optional fields: valid_from, valid_to, observed_at, source_span, provenance.\n"
             f"- Keep relation in snake_case.\n"
             f"- At most {max(1, int(max_facts))} facts.\n"
             "Text:\n"
@@ -617,6 +622,10 @@ async def extract_facts_async(
                 relation = _normalize_relation(str(row.get("relation", "")))
                 value = _clean_value(str(row.get("value", "")))
                 fact_date = str(row.get("date", "")).strip()
+                valid_from = str(row.get("valid_from", fact_date)).strip()
+                valid_to = str(row.get("valid_to", "")).strip()
+                observed_at = str(row.get("observed_at", "")).strip()
+                provenance = row.get("provenance") if isinstance(row.get("provenance"), dict) else None
                 conf_raw = row.get("confidence", 0.75)
                 try:
                     conf = float(conf_raw)
@@ -631,7 +640,11 @@ async def extract_facts_async(
                         value=value,
                         date=fact_date,
                         confidence=max(0.05, min(0.99, conf)),
-                        source_span="",
+                        source_span=str(row.get("source_span", "")).strip(),
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        observed_at=observed_at,
+                        provenance=provenance,
                     )
                 )
                 if len(out) >= max(1, int(max_facts)):

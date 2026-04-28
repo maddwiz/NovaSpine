@@ -29,6 +29,27 @@ class _Vector:
         ]
 
 
+class _PlannedKeyword:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def search_all(self, query, limit=20):  # noqa: ANN001
+        self.queries.append(str(query))
+        if query.startswith("In the schedule table"):
+            return []
+        if "sarah" in str(query).lower() and "schedule" in str(query).lower():
+            return [
+                SearchResult(
+                    id="schedule-hit",
+                    content="| Person | Shift |\n| Sarah | Thursday morning |",
+                    score=1.0,
+                    source="fts5",
+                    metadata={"role": "user"},
+                )
+            ]
+        return []
+
+
 def test_hybrid_search_records_trace_when_enabled():
     search = HybridSearch(_Keyword(), _Vector())
     search.config.enable_tracing = True
@@ -38,6 +59,21 @@ def test_hybrid_search_records_trace_when_enabled():
     assert rows
     assert "keyword_search_ms" in search.last_trace.timings_ms
     assert "total_ms" in search.last_trace.timings_ms
+
+
+def test_hybrid_uses_query_plan_keyword_variants_for_table_lookup():
+    keyword = _PlannedKeyword()
+    search = HybridSearch(keyword, _Vector())
+
+    rows = search.search(
+        "In the schedule table, which shift is Sarah assigned?",
+        query_vector=None,
+        top_k=1,
+    )
+
+    assert rows and rows[0].id == "schedule-hit"
+    assert search.last_trace.counters["keyword_variants"] > 1
+    assert any(q != "In the schedule table, which shift is Sarah assigned?" for q in keyword.queries)
 
 
 def test_candidate_feature_extractor_keeps_ranking_data_separate():

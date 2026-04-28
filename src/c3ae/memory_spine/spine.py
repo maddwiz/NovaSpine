@@ -9,6 +9,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -25,11 +26,15 @@ from c3ae.ingestion.fact_extractor import extract_facts, extract_facts_async
 from c3ae.governance.audit import AuditLog
 from c3ae.governance.guardian import Guardian
 from c3ae.llm import create_chat_backend
+from c3ae.memory_manager import MemoryWriteAdmissionManager
+from c3ae.qa.normalizer import normalize_for_match
+from c3ae.qa.reader import answer_from_memory
 from c3ae.reasoning_bank.bank import ReasoningBank
 from c3ae.reasoning_bank.evidence import EvidenceManager
 from c3ae.reasoning_bank.manager import MemoryWriteManager
 from c3ae.retrieval.hybrid import HybridSearch
 from c3ae.retrieval.keyword import KeywordSearch
+from c3ae.retrieval.planner import plan_memory_query
 from c3ae.retrieval.trace import RetrievalTrace
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.skill_capsules.registry import SkillRegistry
@@ -57,6 +62,30 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of candidates fetched during recall/augment over-fetch passes.
 _RECALL_OVERFETCH_CAP = 200
+
+
+@dataclass(frozen=True)
+class SelfRepairProbe:
+    question: str
+    expected_answer: str
+    answer_type: str
+    source_kind: str
+    source_id: str
+    source_chunk_id: str = ""
+    entity: str = ""
+    relation: str = ""
+    basis: str = ""
+
+
+@dataclass(frozen=True)
+class SelfRepairProbeResult:
+    probe: SelfRepairProbe
+    passed: bool
+    repaired: bool
+    answer: str
+    verifier_status: str
+    citations: list[str]
+    reason: str = ""
 
 
 class MemorySpine:
@@ -90,6 +119,7 @@ class MemorySpine:
         self.cos = COSManager(self.sqlite, self.config.cos)
         self.bank = ReasoningBank(self.sqlite)
         self.write_manager = MemoryWriteManager(self.bank, self.config.memory_manager)
+        self.write_admission = MemoryWriteAdmissionManager(self.config.memory_manager)
         self.evidence = EvidenceManager(self.sqlite)
         self.skills = SkillRegistry(self.sqlite)
         self.guardian = Guardian(
@@ -331,6 +361,9 @@ class MemorySpine:
         trace = RetrievalTrace()
         top_k = top_k or self.config.retrieval.default_top_k
         query_profile = self.hybrid_search.analyze_query(query)
+        query_plan = plan_memory_query(query)
+        trace.notes.append(f"query_plan={query_plan.route}")
+        trace.add_counter(f"query_plan_{query_plan.route}", 1)
         exact_recall_query = bool(getattr(query_profile, "wants_literal_recall", False))
 
         # Try to get query embedding (may fail if no API key)
@@ -1150,6 +1183,7 @@ class MemorySpine:
         skill_candidates = self._propose_skill_candidates(limit=10)
         recompression_preview = self._dream_recompression_preview(limit=200)
         novelty = self._dream_novelty_estimate(limit=200)
+        self_repair = await self.self_repair_probes_async()
         report = {
             "consolidation": consolidation,
             "forgetting_preview": forgetting,
@@ -1157,6 +1191,7 @@ class MemorySpine:
             "skill_candidates": skill_candidates,
             "recompression_preview": recompression_preview,
             "novelty": novelty,
+            "self_repair": self_repair,
         }
         self.audit.log(
             "dream_consolidation",
@@ -1191,7 +1226,147 @@ class MemorySpine:
             "skill_candidates": self._propose_skill_candidates(limit=10),
             "recompression_preview": self._dream_recompression_preview(limit=200),
             "novelty": self._dream_novelty_estimate(limit=200),
+            "self_repair": self.self_repair_probes(),
         }
+
+    async def self_repair_probes_async(self, limit: int | None = None) -> dict[str, Any]:
+        """Run deterministic memory QA probes and optionally write safe repairs."""
+        if not bool(self.config.consolidation.self_repair_enabled):
+            return {"enabled": False, "probes": [], "passed": 0, "failed": 0, "repaired": 0}
+        probes = self._generate_self_repair_probes(limit=limit)
+        results: list[SelfRepairProbeResult] = []
+        for probe in probes:
+            results.append(await self.self_repair_probe_async(probe))
+        passed = sum(1 for item in results if item.passed)
+        repaired = sum(1 for item in results if item.repaired)
+        return {
+            "enabled": True,
+            "write_repairs": bool(self.config.consolidation.self_repair_write_repairs),
+            "probes": [asdict(item) for item in results],
+            "passed": passed,
+            "failed": len(results) - passed,
+            "repaired": repaired,
+        }
+
+    def self_repair_probes(self, limit: int | None = None) -> dict[str, Any]:
+        return self._run_async_sync(self.self_repair_probes_async(limit=limit))
+
+    async def self_repair_probe_async(self, probe: SelfRepairProbe) -> SelfRepairProbeResult:
+        rows = await self.search(probe.question, top_k=max(5, self.config.retrieval.default_top_k))
+        answer = answer_from_memory(probe.question, rows)
+        expected_norm = normalize_for_match(probe.expected_answer)
+        answer_norm = normalize_for_match(answer.answer)
+        passed = bool(expected_norm) and (
+            expected_norm == answer_norm
+            or expected_norm in answer_norm
+            or answer_norm in expected_norm
+        )
+        repaired = False
+        reason = "passed" if passed else "answer_mismatch"
+        if not passed and bool(self.config.consolidation.self_repair_write_repairs):
+            repaired = self._write_self_repair_fact(probe)
+            reason = "repaired" if repaired else reason
+        return SelfRepairProbeResult(
+            probe=probe,
+            passed=passed,
+            repaired=repaired,
+            answer=answer.answer,
+            verifier_status=answer.verifier_status,
+            citations=list(answer.citations),
+            reason=reason,
+        )
+
+    def self_repair_probe(self, probe: SelfRepairProbe) -> SelfRepairProbeResult:
+        return self._run_async_sync(self.self_repair_probe_async(probe))
+
+    def _generate_self_repair_probes(self, limit: int | None = None) -> list[SelfRepairProbe]:
+        max_probes = max(1, int(limit or self.config.consolidation.self_repair_max_probes))
+        probes: list[SelfRepairProbe] = []
+        for fact in self.sqlite.list_current_structured_facts(limit=max_probes * 2):
+            entity = str(fact.get("entity") or "").strip()
+            relation = str(fact.get("relation") or "").strip()
+            value = str(fact.get("value") or "").strip()
+            if not entity or not relation or not value:
+                continue
+            probes.append(
+                SelfRepairProbe(
+                    question=self._probe_question(entity, relation),
+                    expected_answer=value,
+                    answer_type="free_text",
+                    source_kind="structured_fact",
+                    source_id=str(fact.get("id") or ""),
+                    source_chunk_id=str(fact.get("source_chunk_id") or ""),
+                    entity=entity,
+                    relation=relation,
+                    basis=str((fact.get("metadata") or {}).get("source_span") or ""),
+                )
+            )
+            if len(probes) >= max_probes:
+                return probes
+
+        for entry in self.bank.list_active(limit=max_probes):
+            probe = self._probe_from_reasoning_entry(entry)
+            if probe is not None:
+                probes.append(probe)
+            if len(probes) >= max_probes:
+                break
+        return probes
+
+    @staticmethod
+    def _probe_question(entity: str, relation: str) -> str:
+        relation_words = relation.replace("_", " ")
+        if relation_words in {"prefers", "likes"}:
+            return f"What does {entity} prefer?"
+        if relation_words in {"location", "lives in", "based in"}:
+            return f"Where is {entity} currently located?"
+        if relation_words in {"owns", "has"}:
+            return f"What does {entity} own?"
+        return f"What is {entity}'s {relation_words}?"
+
+    def _probe_from_reasoning_entry(self, entry: ReasoningEntry) -> SelfRepairProbe | None:
+        title = (entry.title or "").strip()
+        content = (entry.content or "").strip()
+        if not title or not content:
+            return None
+        answer = content.splitlines()[0].strip()
+        if len(answer) > 160:
+            answer = answer[:157].rstrip() + "..."
+        return SelfRepairProbe(
+            question=f"What memory is stored under {title}?",
+            expected_answer=answer,
+            answer_type="free_text",
+            source_kind="reasoning_entry",
+            source_id=entry.id,
+            source_chunk_id=self._reasoning_source_chunk_id(entry.id),
+            basis=title,
+        )
+
+    def _reasoning_source_chunk_id(self, entry_id: str) -> str:
+        for link in self.sqlite.list_reasoning_chunk_links(limit=1_000_000):
+            if str(link.get("reasoning_entry_id") or "") == entry_id:
+                return str(link.get("chunk_id") or "")
+        return ""
+
+    def _write_self_repair_fact(self, probe: SelfRepairProbe) -> bool:
+        if probe.source_kind != "structured_fact" or not probe.entity or not probe.relation:
+            return False
+        try:
+            self.sqlite.insert_structured_fact(
+                source_chunk_id=probe.source_chunk_id or probe.source_id,
+                entity=probe.entity,
+                relation=probe.relation,
+                value=probe.expected_answer,
+                confidence=0.5,
+                metadata={
+                    "source_span": probe.basis,
+                    "repair_probe": asdict(probe),
+                    "provenance": {"repair": "self_repair_probe", "source_id": probe.source_id},
+                },
+            )
+            return True
+        except Exception:
+            logger.debug("Self-repair write failed for probe %s", probe.source_id, exc_info=True)
+            return False
 
     def _list_recent_chunks_for_consolidation(
         self,
@@ -1910,19 +2085,39 @@ class MemorySpine:
             conf = float(getattr(fact, "confidence", 0.0))
             if conf < min_conf:
                 continue
+            entity = str(getattr(fact, "entity", "")).strip()
+            relation = str(getattr(fact, "relation", "")).strip()
+            value = str(getattr(fact, "value", "")).strip()
+            fact_date = str(getattr(fact, "date", "")).strip()
+            fact_metadata = self._structured_fact_metadata(fact, source_metadata=metadata)
+            decision = self.write_admission.decide_structured_fact(
+                self.sqlite,
+                source_chunk_id=chunk_id,
+                entity=entity,
+                relation=relation,
+                value=value,
+                fact_date=fact_date,
+                confidence=conf,
+                metadata=fact_metadata,
+            )
+            if decision.action in {"DENY", "NOOP"}:
+                continue
+            supersedes_ids = list(decision.metadata.get("supersedes_fact_ids", []))
+            fact_metadata.setdefault("admission", asdict(decision))
+            if decision.action == "SUPERSEDE" and supersedes_ids:
+                fact_metadata.setdefault("supersedes", supersedes_ids)
             try:
-                self.sqlite.insert_structured_fact(
+                fact_id = self.sqlite.insert_structured_fact(
                     source_chunk_id=chunk_id,
-                    entity=str(getattr(fact, "entity", "")).strip(),
-                    relation=str(getattr(fact, "relation", "")).strip(),
-                    value=str(getattr(fact, "value", "")).strip(),
-                    fact_date=str(getattr(fact, "date", "")).strip(),
+                    entity=entity,
+                    relation=relation,
+                    value=value,
+                    fact_date=fact_date,
                     confidence=conf,
-                    metadata={
-                        "source_span": str(getattr(fact, "source_span", "")).strip(),
-                        "source": metadata or {},
-                    },
+                    metadata=fact_metadata,
                 )
+                if supersedes_ids:
+                    self._mark_structured_facts_superseded(supersedes_ids, superseded_by=fact_id)
             except Exception:
                 logger.warning(
                     "Failed to persist fact for chunk %s, continuing",
@@ -1930,6 +2125,44 @@ class MemorySpine:
                     exc_info=True,
                 )
                 continue
+
+    @staticmethod
+    def _structured_fact_metadata(fact: Any, *, source_metadata: dict[str, Any] | None) -> dict[str, Any]:
+        provenance = getattr(fact, "provenance", None)
+        metadata: dict[str, Any] = {
+            "source_span": str(getattr(fact, "source_span", "")).strip(),
+            "source": source_metadata or {},
+        }
+        if isinstance(provenance, dict):
+            metadata["provenance"] = dict(provenance)
+        valid_from = str(getattr(fact, "valid_from", "") or getattr(fact, "date", "") or "").strip()
+        valid_to = str(getattr(fact, "valid_to", "") or "").strip()
+        observed_at = str(getattr(fact, "observed_at", "") or "").strip()
+        if valid_from:
+            metadata["valid_from"] = valid_from
+        if valid_to:
+            metadata["valid_to"] = valid_to
+        if observed_at:
+            metadata["observed_at"] = observed_at
+        return metadata
+
+    def _mark_structured_facts_superseded(self, fact_ids: list[str], *, superseded_by: str) -> None:
+        for fact_id in fact_ids:
+            current = self.sqlite.get_structured_fact(str(fact_id))
+            if not current:
+                continue
+            metadata = dict(current.get("metadata") or {})
+            now = iso_str(utcnow())
+            metadata["fact_status"] = "historical"
+            metadata["superseded_by"] = superseded_by
+            if not metadata.get("valid_to"):
+                metadata["valid_to"] = now
+            if not metadata.get("transaction_to"):
+                metadata["transaction_to"] = now
+            try:
+                self.sqlite.update_structured_fact_metadata(str(fact_id), metadata)
+            except Exception:
+                logger.debug("Failed to mark fact %s superseded", fact_id, exc_info=True)
 
     def _get_chat_backend(
         self,
@@ -2054,7 +2287,6 @@ class MemorySpine:
         for src_name, relation, dst_name in extracted.relations:
             src_id = entity_ids.get(src_name) or self.sqlite.upsert_entity(src_name)
             dst_id = entity_ids.get(dst_name) or self.sqlite.upsert_entity(dst_name)
-            invalidate = relation in {"is", "prefers", "owns"}
             rel_key = (src_name, relation, dst_name)
             base_edge_conf = extracted.relation_confidence.get(
                 rel_key,
@@ -2065,6 +2297,24 @@ class MemorySpine:
                 metadata=metadata,
                 kind="edge",
             )
+            rel_metadata = dict(getattr(extracted, "relation_metadata", {}).get(rel_key, {}))
+            decision = self.write_admission.decide_graph_edge(
+                self.sqlite,
+                src_entity_id=src_id,
+                relation=relation,
+                dst_entity_id=dst_id,
+                confidence=edge_conf,
+                metadata=rel_metadata,
+            )
+            if decision.action in {"DENY", "NOOP"}:
+                continue
+            invalidate = decision.action == "SUPERSEDE" or relation in {"is", "prefers", "owns"}
+            provenance = {
+                "source_chunk_id": chunk_id,
+                "src_name": src_name,
+                "dst_name": dst_name,
+                "extract_mode": extracted.mode,
+            }
             self.sqlite.add_edge(
                 src_id,
                 relation=relation,
@@ -2074,8 +2324,13 @@ class MemorySpine:
                 metadata={
                     "source": metadata or {},
                     "extract_mode": extracted.mode,
+                    "admission": asdict(decision),
+                    **rel_metadata,
                 },
                 invalidate_existing_relation=invalidate,
+                valid_from=str(rel_metadata.get("valid_from") or rel_metadata.get("observed_at") or ""),
+                valid_to=str(rel_metadata.get("valid_to") or ""),
+                provenance=provenance,
             )
 
     def _calibrate_graph_confidence(

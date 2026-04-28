@@ -2310,6 +2310,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if not query or not answers:
                 skipped += 1
                 continue
+            query_plan = plan_memory_query(query)
 
             expected_doc_ids = {str(x) for x in row.get("expected_doc_ids", []) if str(x)}
             fetch_k = max(args.top_k, max(1, int(args.rerank_candidates)))
@@ -2320,7 +2321,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if args.cross_encoder_top_n > 0:
                 fetch_k = max(fetch_k, max(1, int(args.cross_encoder_top_n)))
 
-            if args.chained_recall:
+            if args.chained_recall or (query_plan.route == "multi_session" and not use_recall_variants):
                 recalled = await chained_recall(
                     spine=spine,
                     query=query,
@@ -2468,7 +2469,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             f1 = best_f1(pred, answers)
             verifier_status = typed_answer.verifier_status if typed_answer is not None else "unchecked"
             answer_type = typed_answer.answer_type if typed_answer is not None else infer_answer_type(query)
-            query_plan = plan_memory_query(query)
             normalized_gold = normalize_answer(answers[0], answer_type).answer if answers else ""
             normalized_pred = normalize_answer(pred, answer_type).answer if pred else ""
             classification = classify_qa_failure(

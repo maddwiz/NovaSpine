@@ -384,7 +384,12 @@ def _extract_candidate(
 
 
 def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
+    from c3ae.retrieval.planner import plan_memory_query
+
+    query_plan = plan_memory_query(question)
     answer_type = _question_answer_type(question)
+    if query_plan.route == "list_lookup" and answer_type == "free_text":
+        answer_type = "list"
     ranked = _rank_sentences(question, rows)
     if not ranked:
         return MemoryAnswer(
@@ -393,7 +398,7 @@ def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
             confidence=0.0,
             abstain=True,
             verifier_status="abstained",
-            metadata={"reason": "no_candidate_sentences"},
+            metadata={"reason": "no_candidate_sentences", "query_plan": query_plan.to_dict()},
         )
 
     raw, citations, spans, metadata = _extract_structured_candidate(question, answer_type, rows)
@@ -406,7 +411,7 @@ def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
             confidence=0.0,
             abstain=True,
             verifier_status="abstained",
-            metadata={"reason": "no_supported_candidate"},
+            metadata={"reason": "no_supported_candidate", "query_plan": query_plan.to_dict()},
         )
 
     normalized = normalize_answer(raw, answer_type, metadata)
@@ -426,7 +431,7 @@ def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
             abstain=True,
             normalization_steps=normalized.steps,
             verifier_status=verification.status,
-            metadata={"reason": verification.reason},
+            metadata={"reason": verification.reason, "query_plan": query_plan.to_dict()},
         )
 
     confidence = verification.confidence
@@ -441,5 +446,5 @@ def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
         abstain=False,
         normalization_steps=normalized.steps,
         verifier_status=verification.status,
-        metadata={"reason": verification.reason},
+        metadata={"reason": verification.reason, "query_plan": query_plan.to_dict()},
     )
