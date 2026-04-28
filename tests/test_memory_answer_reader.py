@@ -88,3 +88,89 @@ def test_reader_can_answer_historical_question_from_old_memory():
     )
 
     assert answer.answer == "Denver"
+
+
+def test_reader_extracts_current_preference_from_markdown_table():
+    answer = answer_from_memory(
+        "What drink does the user currently prefer?",
+        [
+            _row(
+                "\n".join(
+                    [
+                        "| Person | Previous drink | Current drink |",
+                        "| --- | --- | --- |",
+                        "| user | drip coffee | iced matcha |",
+                    ]
+                ),
+                "prefs-table",
+                entry_status="active",
+            )
+        ],
+    )
+
+    assert answer.answer == "iced matcha"
+    assert answer.citations == ["prefs-table"]
+    assert answer.verifier_status == "supported"
+
+
+def test_reader_extracts_labeled_bullet_list_answer():
+    answer = answer_from_memory(
+        "Which allergies does the user have?",
+        [
+            _row(
+                "\n".join(
+                    [
+                        "- Current city: Boulder",
+                        "- Allergies: peanuts, shellfish, and latex",
+                    ]
+                ),
+                "profile-list",
+            )
+        ],
+    )
+
+    assert answer.answer == "peanuts, shellfish, latex"
+    assert answer.answer_type == "list"
+    assert answer.citations == ["profile-list"]
+
+
+def test_reader_prefers_current_table_column_over_historical_column():
+    answer = answer_from_memory(
+        "What notebook does the user currently use?",
+        [
+            _row(
+                "\n".join(
+                    [
+                        "| Item | Old notebook | Current notebook |",
+                        "| --- | --- | --- |",
+                        "| user | Moleskine | Leuchtturm1917 |",
+                    ]
+                ),
+                "notebook-table",
+            )
+        ],
+    )
+
+    assert answer.answer == "Leuchtturm1917"
+    assert answer.citations == ["notebook-table"]
+
+
+def test_reader_can_select_historical_table_column():
+    answer = answer_from_memory(
+        "What drink did the user previously prefer?",
+        [
+            _row(
+                "\n".join(
+                    [
+                        "| Person | Previous drink | Current drink |",
+                        "| --- | --- | --- |",
+                        "| user | drip coffee | iced matcha |",
+                    ]
+                ),
+                "prefs-table",
+            )
+        ],
+    )
+
+    assert answer.answer == "drip coffee"
+    assert answer.citations == ["prefs-table"]

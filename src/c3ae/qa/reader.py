@@ -56,6 +56,64 @@ def _split_sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text or "") if s and s.strip()]
 
 
+def _question_answer_type(question: str) -> str:
+    answer_type = infer_answer_type(question)
+    q = normalize_for_match(question)
+    q_tokens = _tokens(q)
+    asks_plural_which = q.startswith("which ") and any(tok.endswith("s") and len(tok) > 3 for tok in q_tokens)
+    if (
+        answer_type == "free_text"
+        and (
+            q.startswith("what are ")
+            or asks_plural_which
+            or " list " in f" {q} "
+            or " all " in f" {q} "
+        )
+    ):
+        return "list"
+    return answer_type
+
+
+def _temporal_intent(question: str) -> tuple[bool, bool]:
+    q_norm = normalize_for_match(question)
+    q_parts = q_norm.split()
+    wants_current = any(term in q_parts for term in ("current", "currently", "now", "present", "latest"))
+    wants_history = "used to" in q_norm or any(
+        term in q_parts for term in ("previous", "previously", "former", "formerly", "old", "past")
+    )
+    return wants_current, wants_history
+
+
+def _temporal_score(question: str, text: str, metadata: dict[str, Any]) -> float:
+    wants_current, wants_history = _temporal_intent(question)
+    if not wants_current and not wants_history:
+        return 0.0
+
+    status = str(metadata.get("entry_status", metadata.get("status", ""))).lower()
+    text_norm = normalize_for_match(text)
+    score = 0.0
+    historical = (
+        "used to" in text_norm
+        or any(term in text_norm.split() for term in ("previous", "previously", "former", "formerly", "old", "past"))
+        or status == "superseded"
+    )
+    current = (
+        any(term in text_norm.split() for term in ("current", "currently", "now", "present", "latest"))
+        or status == "active"
+    )
+    if wants_current:
+        if historical:
+            score -= 0.65
+        if current:
+            score += 0.45
+    if wants_history:
+        if historical:
+            score += 0.45
+        if current and not historical:
+            score -= 0.25
+    return score
+
+
 def _subject_terms(question: str) -> set[str]:
     q = normalize_for_match(question)
     important = _tokens(q)
@@ -67,8 +125,7 @@ def _rank_sentences(question: str, rows: list[Any]) -> list[tuple[float, str, st
     q_tokens = _tokens(question)
     subjects = _subject_terms(question)
     q_norm = normalize_for_match(question)
-    wants_current = any(term in q_norm.split() for term in ("current", "currently", "now", "present"))
-    wants_history = "used to" in q_norm or any(term in q_norm.split() for term in ("previous", "previously", "former", "formerly", "old"))
+    wants_current, wants_history = _temporal_intent(question)
     ranked: list[tuple[float, str, str, dict[str, Any]]] = []
     for index, row in enumerate(rows):
         content = _row_content(row)
@@ -83,6 +140,7 @@ def _rank_sentences(question: str, rows: list[Any]) -> list[tuple[float, str, st
             status = str(metadata.get("entry_status", metadata.get("status", ""))).lower()
             if status == "active":
                 score += 0.05
+            score += _temporal_score(question, sentence, metadata)
             s_norm = normalize_for_match(sentence)
             if wants_current:
                 if "used to" in s_norm or status == "superseded":
@@ -158,6 +216,121 @@ def _extract_preference(sentence: str) -> str:
     return ""
 
 
+def _split_table_cells(line: str) -> list[str]:
+    return [clean_answer(cell) for cell in line.strip().strip("|").split("|")]
+
+
+def _is_table_separator(line: str) -> bool:
+    return bool(re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", line.strip()))
+
+
+def _table_candidates(question: str, row: Any) -> list[tuple[float, str, str, str, dict[str, Any]]]:
+    content = _row_content(row)
+    citation = _row_id(row)
+    metadata = _row_metadata(row)
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    q_tokens = _tokens(question)
+    q_norm = normalize_for_match(question)
+    candidates: list[tuple[float, str, str, str, dict[str, Any]]] = []
+    identity_headers = {"name", "person", "people", "user", "subject", "who"}
+
+    for index in range(len(lines) - 1):
+        if "|" not in lines[index] or not _is_table_separator(lines[index + 1]):
+            continue
+        headers = _split_table_cells(lines[index])
+        if len(headers) < 2:
+            continue
+        for data_line in lines[index + 2 :]:
+            if "|" not in data_line or _is_table_separator(data_line):
+                break
+            cells = _split_table_cells(data_line)
+            if len(cells) != len(headers):
+                continue
+            row_span = "; ".join(
+                f"{header}: {cell}" for header, cell in zip(headers, cells, strict=True) if header and cell
+            )
+            row_tokens = _tokens(row_span)
+            if q_tokens and not (q_tokens & row_tokens):
+                continue
+            for header, cell in zip(headers, cells, strict=True):
+                if not cell:
+                    continue
+                header_tokens = _tokens(header)
+                if header_tokens & identity_headers:
+                    continue
+                header_norm = normalize_for_match(header)
+                score = len(q_tokens & header_tokens) + (0.15 * len(q_tokens & row_tokens))
+                if "prefer" in q_norm and any(tok in header_norm for tok in ("prefer", "favorite", "favourite")):
+                    score += 1.0
+                if any(tok in q_norm for tok in ("drink", "order", "coffee")) and any(
+                    tok in header_norm for tok in ("drink", "order", "coffee")
+                ):
+                    score += 1.0
+                score += _temporal_score(question, f"{header}: {cell}", metadata)
+                if score > 0:
+                    candidates.append((score, cell, citation, row_span, metadata))
+    return candidates
+
+
+def _labeled_span_candidates(question: str, row: Any) -> list[tuple[float, str, str, str, dict[str, Any]]]:
+    content = _row_content(row)
+    citation = _row_id(row)
+    metadata = _row_metadata(row)
+    q_tokens = _tokens(question)
+    candidates: list[tuple[float, str, str, str, dict[str, Any]]] = []
+    for span in _split_sentences(content) or [content]:
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", span).strip()
+        if "|" in line and _is_table_separator(line):
+            continue
+        m = re.match(r"(?P<label>[A-Za-z][A-Za-z0-9 _/'().-]{1,80})\s*(?::|=|--?|->)\s*(?P<value>.+)$", line)
+        if not m:
+            continue
+        label = clean_answer(m.group("label"))
+        value = clean_answer(m.group("value"))
+        if not value:
+            continue
+        label_tokens = _tokens(label)
+        score = len(q_tokens & label_tokens) + _temporal_score(question, label, metadata)
+        if score > 0:
+            candidates.append((score, value, citation, f"{label}: {value}", metadata))
+    return candidates
+
+
+def _extract_list_from_span(question: str, answer_type: str, row: Any) -> tuple[str, str, str, dict[str, Any]] | None:
+    if answer_type != "list":
+        return None
+    candidates = _labeled_span_candidates(question, row)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, value, citation, span, metadata = candidates[0]
+    return value, citation, span, metadata
+
+
+def _extract_structured_candidate(
+    question: str,
+    answer_type: str,
+    rows: list[Any],
+) -> tuple[str, list[str], list[str], dict[str, Any]]:
+    candidates: list[tuple[float, str, str, str, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        row_bias = max(0.0, 1.0 - (index * 0.02))
+        for candidate in _table_candidates(question, row):
+            score, raw, citation, span, metadata = candidate
+            candidates.append((score + row_bias, raw, citation, span, metadata))
+        listed = _extract_list_from_span(question, answer_type, row)
+        if listed is not None:
+            raw, citation, span, metadata = listed
+            candidates.append((row_bias + 1.0 + _temporal_score(question, span, metadata), raw, citation, span, metadata))
+        for score, raw, citation, span, metadata in _labeled_span_candidates(question, row):
+            candidates.append((score + row_bias, raw, citation, span, metadata))
+    if not candidates:
+        return "", [], [], {}
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, raw, citation, span, metadata = candidates[0]
+    return raw, [citation], [span], metadata
+
+
 def _extract_free_text(question: str, sentence: str) -> str:
     q = normalize_for_match(question)
     if "research" in q:
@@ -199,6 +372,8 @@ def _extract_candidate(
             raw = m.group(1) if m else ""
         elif answer_type == "preference":
             raw = _extract_preference(sentence)
+        elif answer_type == "list":
+            raw = _extract_free_text(question, sentence)
         elif answer_type == "yes_no":
             raw = "yes"
         else:
@@ -209,7 +384,7 @@ def _extract_candidate(
 
 
 def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
-    answer_type = infer_answer_type(question)
+    answer_type = _question_answer_type(question)
     ranked = _rank_sentences(question, rows)
     if not ranked:
         return MemoryAnswer(
@@ -221,7 +396,9 @@ def answer_from_memory(question: str, rows: list[Any]) -> MemoryAnswer:
             metadata={"reason": "no_candidate_sentences"},
         )
 
-    raw, citations, spans, metadata = _extract_candidate(question, answer_type, ranked)
+    raw, citations, spans, metadata = _extract_structured_candidate(question, answer_type, rows)
+    if not raw:
+        raw, citations, spans, metadata = _extract_candidate(question, answer_type, ranked)
     if not raw:
         return MemoryAnswer(
             answer="not enough information",

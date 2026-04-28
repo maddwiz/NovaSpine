@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import re
+import unicodedata
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -15,12 +16,46 @@ from c3ae.config import VeniceConfig
 from c3ae.embeddings.venice import VeniceEmbedder
 from c3ae.utils import chunk_text_for_embedding, estimate_text_tokens
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
 
 @runtime_checkable
 class EmbeddingBackend(Protocol):
     async def embed(self, texts: list[str]) -> np.ndarray: ...
     async def embed_single(self, text: str) -> np.ndarray: ...
     async def close(self) -> None: ...
+
+
+def _sanitize_embedding_text(text: str, *, max_tokens: int) -> str:
+    """Remove non-text controls and cap length before retrying one bad item."""
+    cleaned = unicodedata.normalize("NFC", str(text or ""))
+    cleaned = _CONTROL_CHAR_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if max_tokens <= 0 or estimate_text_tokens(cleaned) <= max_tokens:
+        return cleaned
+    parts = chunk_text_for_embedding(cleaned, max_tokens=max_tokens, overlap_tokens=0)
+    return parts[0] if parts else cleaned
+
+
+def _deterministic_embedding(text: str, dims: int) -> np.ndarray:
+    width = max(1, int(dims))
+    vec = np.zeros((width,), dtype=np.float32)
+    tokens = HashEmbedder._TOKEN_RE.findall((text or "").lower())
+    features = tokens or [hashlib.sha256((text or "").encode("utf-8")).hexdigest()]
+    features.extend(f"{tokens[i]}_{tokens[i+1]}" for i in range(len(tokens) - 1))
+    for feat in features:
+        digest = hashlib.blake2b(feat.encode("utf-8"), digest_size=8).digest()
+        idx = int.from_bytes(digest[:4], "little", signed=False) % width
+        sign = 1.0 if (digest[4] & 1) == 0 else -1.0
+        vec[idx] += sign
+    norm = float(np.linalg.norm(vec))
+    if norm > 0.0:
+        vec /= norm
+    return vec
+
+
+def _is_http_status(exc: Exception, status_code: int) -> bool:
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == status_code
 
 
 class OpenAIEmbedder:
@@ -37,6 +72,8 @@ class OpenAIEmbedder:
         self.dims = dims
         self.base_url = base_url
         self.timeout = timeout
+        self.safe_embed_tokens = 2048
+        self.safe_embed_overlap = 128
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -50,9 +87,19 @@ class OpenAIEmbedder:
             )
         return self._client
 
-    async def embed(self, texts: list[str]) -> np.ndarray:
-        if not texts:
+    def _fit_dims(self, arr: np.ndarray) -> np.ndarray:
+        if arr.size == 0:
             return np.zeros((0, self.dims), dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.shape[1] == self.dims:
+            return arr.astype(np.float32, copy=False)
+        if arr.shape[1] > self.dims:
+            return arr[:, : self.dims].astype(np.float32, copy=False)
+        pad = np.zeros((arr.shape[0], self.dims - arr.shape[1]), dtype=np.float32)
+        return np.concatenate([arr, pad], axis=1).astype(np.float32, copy=False)
+
+    async def _embed_remote(self, texts: list[str]) -> np.ndarray:
         client = await self._get_client()
         payload: dict[str, object] = {"model": self.model, "input": texts}
         if self.model.startswith("text-embedding-3") and self.dims > 0:
@@ -64,8 +111,49 @@ class OpenAIEmbedder:
         resp.raise_for_status()
         data = resp.json()
         vecs = [x["embedding"] for x in data.get("data", [])]
-        arr = np.array(vecs, dtype=np.float32)
-        return arr
+        if len(vecs) != len(texts):
+            raise RuntimeError(f"OpenAI embeddings returned {len(vecs)} embeddings for {len(texts)} texts")
+        return self._fit_dims(np.array(vecs, dtype=np.float32))
+
+    async def _embed_single_safe(self, text: str) -> np.ndarray:
+        try:
+            return (await self._embed_remote([text]))[0]
+        except Exception:
+            sanitized = _sanitize_embedding_text(text, max_tokens=self.safe_embed_tokens)
+            if sanitized and sanitized != text:
+                try:
+                    return (await self._embed_remote([sanitized]))[0]
+                except Exception:
+                    pass
+
+            parts = chunk_text_for_embedding(
+                sanitized or text,
+                max_tokens=self.safe_embed_tokens,
+                overlap_tokens=self.safe_embed_overlap,
+            )
+            if len(parts) > 1:
+                sub_vecs = []
+                for part in parts:
+                    try:
+                        sub_vecs.append(await self._embed_single_safe(part))
+                    except Exception:
+                        sub_vecs.append(_deterministic_embedding(part, self.dims))
+                if sub_vecs:
+                    pooled = np.mean(np.asarray(sub_vecs, dtype=np.float32), axis=0, dtype=np.float32)
+                    return self._fit_dims(np.asarray([pooled], dtype=np.float32))[0]
+
+            return _deterministic_embedding(sanitized or text, self.dims)
+
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dims), dtype=np.float32)
+        try:
+            return await self._embed_remote(texts)
+        except Exception as exc:
+            if not _is_http_status(exc, 400):
+                raise
+        out = [await self._embed_single_safe(text) for text in texts]
+        return self._fit_dims(np.asarray(out, dtype=np.float32))
 
     async def embed_single(self, text: str) -> np.ndarray:
         return (await self.embed([text]))[0]
@@ -176,16 +264,22 @@ class OllamaEmbedder:
         try:
             return await self._embed_single_remote(text)
         except Exception:
+            sanitized = _sanitize_embedding_text(text, max_tokens=self.safe_embed_tokens)
+            if sanitized and sanitized != text:
+                try:
+                    return await self._embed_single_remote(sanitized)
+                except Exception:
+                    pass
             parts = chunk_text_for_embedding(
-                text,
+                sanitized or text,
                 max_tokens=self.safe_embed_tokens,
                 overlap_tokens=self.safe_embed_overlap,
             )
             if len(parts) <= 1 or (len(parts) == 1 and parts[0].strip() == (text or "").strip()):
-                raise
+                return _deterministic_embedding(sanitized or text, self.dims)
             sub_vecs = await self.embed(parts)
             if len(sub_vecs) == 0:
-                raise RuntimeError("No sub-embeddings produced for safe split fallback")
+                return _deterministic_embedding(sanitized or text, self.dims)
             pooled = np.mean(sub_vecs, axis=0, dtype=np.float32)
             return self._fit_dims(np.asarray([pooled], dtype=np.float32))[0]
 

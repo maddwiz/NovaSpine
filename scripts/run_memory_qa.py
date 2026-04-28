@@ -34,6 +34,7 @@ from c3ae.qa.normalizer import infer_answer_type, normalize_answer
 from c3ae.qa.reader import answer_from_memory
 from c3ae.retrieval.chained import chained_recall
 from c3ae.retrieval.cross_encoder import CrossEncoderReranker
+from c3ae.retrieval.planner import plan_memory_query
 from c3ae.retrieval.verify import verify_answer_with_llm
 from c3ae.utils import extract_benchmark_case_token, parse_json_object, strip_benchmark_case_tokens
 
@@ -2467,6 +2468,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             f1 = best_f1(pred, answers)
             verifier_status = typed_answer.verifier_status if typed_answer is not None else "unchecked"
             answer_type = typed_answer.answer_type if typed_answer is not None else infer_answer_type(query)
+            query_plan = plan_memory_query(query)
             normalized_gold = normalize_answer(answers[0], answer_type).answer if answers else ""
             normalized_pred = normalize_answer(pred, answer_type).answer if pred else ""
             classification = classify_qa_failure(
@@ -2511,6 +2513,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "final_context_evidence_ids": [doc for doc in docs if doc],
                     "failure_kind": classification.failure_kind,
                     "answer_type": answer_type,
+                    "query_plan": query_plan.to_dict(),
                     "verifier_status": verifier_status,
                     "doc_hit": bool(hit),
                     "exact_match": em,
