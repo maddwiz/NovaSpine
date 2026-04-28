@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
-from c3ae.qa.normalizer import clean_answer, infer_answer_type, normalize_answer, normalize_for_match
+from c3ae.qa.normalizer import clean_answer, clean_cell, infer_answer_type, normalize_answer, normalize_for_match
 from c3ae.qa.types import MemoryAnswer
 from c3ae.qa.verifier import verify_answer_support
 
@@ -160,6 +161,9 @@ def _extract_year_or_date(sentence: str, answer_type: str) -> str:
     if answer_type == "year":
         m = re.search(r"\b(19|20)\d{2}\b", sentence)
         return m.group(0) if m else ""
+    m = re.search(r"\b(?:yesterday|today|tomorrow|last week|next week)\b", sentence, re.IGNORECASE)
+    if m:
+        return m.group(0)
     for pattern in (
         rf"\b{_MONTH_RE}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*(?:19|20)\d{{2}})?\b",
         rf"\b{_MONTH_RE}\s+(?:19|20)\d{{2}}\b",
@@ -217,7 +221,7 @@ def _extract_preference(sentence: str) -> str:
 
 
 def _split_table_cells(line: str) -> list[str]:
-    return [clean_answer(cell) for cell in line.strip().strip("|").split("|")]
+    return [clean_cell(cell) for cell in line.strip().strip("|").split("|")]
 
 
 def _is_table_separator(line: str) -> bool:
@@ -327,8 +331,93 @@ def _extract_structured_candidate(
     if not candidates:
         return "", [], [], {}
     candidates.sort(key=lambda item: item[0], reverse=True)
+    if answer_type == "list":
+        values: list[str] = []
+        citations: list[str] = []
+        spans: list[str] = []
+        seen_values: set[str] = set()
+        for score, raw, citation, span, metadata in candidates[:12]:
+            if score <= 0:
+                continue
+            normalized = normalize_answer(raw, "list", metadata).answer
+            parts = [clean_answer(part) for part in normalized.split(",") if clean_answer(part)]
+            for part in parts or [clean_answer(raw)]:
+                key = normalize_for_match(part)
+                if not key or key in seen_values:
+                    continue
+                seen_values.add(key)
+                values.append(part)
+            if citation not in citations:
+                citations.append(citation)
+            if span not in spans:
+                spans.append(span)
+            if len(values) >= 10:
+                break
+        if values:
+            return ", ".join(values), citations, spans, candidates[0][4]
     _, raw, citation, span, metadata = candidates[0]
     return raw, [citation], [span], metadata
+
+
+def _parse_normalized_date(value: str) -> datetime | None:
+    value = clean_answer(value)
+    for fmt in ("%d %B %Y", "%B %d %Y", "%B %d, %Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _date_values_from_text(text: str, metadata: dict[str, Any]) -> list[datetime]:
+    values: list[datetime] = []
+    patterns = [
+        r"\b(?:yesterday|today|tomorrow|last week|next week)\b",
+        rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH_RE}\s*(?:19|20)\d{{2}}\b",
+        rf"\b{_MONTH_RE}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*(?:19|20)\d{{2}})?\b",
+        r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b",
+    ]
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            raw = match.group(0)
+            normalized = normalize_answer(raw, "date", metadata)
+            parsed = _parse_normalized_date(normalized.answer)
+            if parsed is None:
+                continue
+            key = parsed.strftime("%Y-%m-%d")
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(parsed)
+    return values
+
+
+def _extract_temporal_delta(
+    question: str,
+    ranked: list[tuple[float, str, str, dict[str, Any]]],
+) -> tuple[str, list[str], list[str], dict[str, Any]]:
+    q_norm = normalize_for_match(question)
+    if "how many days" not in q_norm and "how long" not in q_norm:
+        return "", [], [], {}
+
+    candidates: list[tuple[datetime, str, str, dict[str, Any]]] = []
+    for _, citation, sentence, metadata in ranked[:24]:
+        for value in _date_values_from_text(sentence, metadata):
+            candidates.append((value, citation, sentence, metadata))
+    question_dates = _date_values_from_text(question, {})
+    for value in question_dates:
+        candidates.append((value, "", question, {}))
+    if len(candidates) < 2:
+        return "", [], [], {}
+
+    candidates.sort(key=lambda item: item[0])
+    days = abs((candidates[-1][0] - candidates[0][0]).days)
+    citations = [citation for _, citation, _, _ in candidates if citation]
+    spans = [span for _, _, span, _ in candidates if span != question]
+    metadata = dict(candidates[0][3] or {})
+    metadata["computed_temporal_delta_days"] = days
+    return str(days), citations, spans, metadata
 
 
 def _extract_free_text(question: str, sentence: str) -> str:
@@ -357,6 +446,9 @@ def _extract_candidate(
     ranked: list[tuple[float, str, str, dict[str, Any]]],
 ) -> tuple[str, list[str], list[str], dict[str, Any]]:
     if answer_type in {"count", "number"}:
+        temporal_delta = _extract_temporal_delta(question, ranked)
+        if temporal_delta[0]:
+            return temporal_delta
         return _extract_count(question, ranked)
     for _, citation, sentence, metadata in ranked[:24]:
         if answer_type in {"date", "year"}:

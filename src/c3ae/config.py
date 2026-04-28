@@ -163,6 +163,15 @@ class RetrievalConfig(BaseModel):
     capture_candidate_features: bool = Field(
         default_factory=lambda: _env_bool("C3AE_RETRIEVAL_CANDIDATE_FEATURES", False)
     )
+    episodic_expansion_enabled: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_EPISODIC_EXPANSION", True)
+    )
+    episodic_expansion_window: int = Field(
+        default_factory=lambda: _env_int("C3AE_EPISODIC_EXPANSION_WINDOW", 1)
+    )
+    episodic_expansion_max_chars: int = Field(
+        default_factory=lambda: _env_int("C3AE_EPISODIC_EXPANSION_MAX_CHARS", 3600)
+    )
 
 
 class IngestionConfig(BaseModel):

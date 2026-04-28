@@ -36,6 +36,8 @@ def verify_answer_support(
             return VerificationResult(status="supported", confidence=0.86, reason="relative_date_supported_by_metadata")
 
     if answer_type in {"count", "number"}:
+        if bool((metadata or {}).get("computed_temporal_delta_days")):
+            return VerificationResult(status="supported", confidence=0.82, reason="temporal_delta_computed_from_dates")
         try:
             count = int(float(answer_norm))
         except ValueError:

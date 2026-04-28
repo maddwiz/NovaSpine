@@ -50,10 +50,13 @@ def test_ingest_session_runs_vector_indexing(tmp_path: Path, monkeypatch):
     try:
         monkeypatch.setattr(spine, "_embed_and_index", fake_embed_and_index)
         result = spine.ingest_session(session_path)
+        chunks = spine.sqlite.list_chunks(limit=10, session_id=session_path.stem)
     finally:
         spine.sqlite.close()
 
     assert result["chunks_ingested"] == 2
+    assert {chunk.metadata["turn_index"] for chunk in chunks} == {0, 1}
+    assert {chunk.metadata["turn_part"] for chunk in chunks} == {0}
     assert len(calls) == 1
     assert len(calls[0][0]) == 2
     assert calls[0][1] == [

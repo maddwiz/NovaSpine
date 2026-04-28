@@ -38,9 +38,11 @@ retrieval, rerank, reading, verification, or memory drift.
 
    MemMachine's useful idea is not compressing everything into facts; it keeps
    full episodes available and expands nucleus matches with neighboring turns.
-   NovaSpine should keep compact facts for fast lookup, but the next answer
-   reader upgrade should pull neighbor turns around the highest-confidence chunk
-   before asking the typed reader or LLM to answer.
+   NovaSpine keeps compact facts for fast lookup and now adds conservative
+   same-session neighbor-turn expansion for table, list, temporal, and
+   multi-session routes. Next: make the typed reader explicitly reason over the
+   expanded episode block and record whether the answer came from the nucleus
+   chunk or neighboring context.
 
 4. Self-repair loop
 
@@ -55,9 +57,10 @@ retrieval, rerank, reading, verification, or memory drift.
 
    MemFactory/Memory-R1-style work points toward learned or policy-driven memory
    actions. NovaSpine now has a deterministic write-admission manager for
-   facts/edges with `ALLOW`, `DENY`, `NOOP`, and `SUPERSEDE`. Next: train a
-   learned manager from row-level failure taxonomy, candidate features, and
-   self-repair outcomes.
+   facts/edges with `ALLOW`, `DENY`, `NOOP`, and `SUPERSEDE`, plus an offline
+   reranker trainer that consumes benchmark `candidate_features` rows. Next:
+   collect enough verified rows to train/evaluate learned reranking before any
+   runtime config is allowed to load a learned artifact.
 
 6. Hierarchical shared memory
 
@@ -71,8 +74,10 @@ retrieval, rerank, reading, verification, or memory drift.
    LongMemEval frames long-term memory as indexing, retrieval, and reading. The
    live results show NovaSpine needs to win the reading stage, not just recall.
    The typed answer object, verifier status, citations, and normalized answer
-   fields are now in place. Next: make all benchmark answer modes record typed
-   reader/verifier details, even when the final answer comes from an LLM.
+   fields are now in place. The reader now handles table-cell extraction,
+   cross-row list aggregation, reliable relative-day dates, and simple day-delta
+   answers. Next: add multi-hop synthesis that can compose several cited spans
+   into one concise answer without relying on unsupported free text.
 
 8. Benchmark-honest optimization
 
@@ -89,8 +94,8 @@ retrieval, rerank, reading, verification, or memory drift.
 4. Bitemporal fields for facts/graph edges and current-vs-historical tests: done in this branch.
 5. Dream/self-repair probe report: done in this branch.
 6. Deterministic write admission policy for facts/edges: done in this branch.
-7. Next: neighbor-turn episodic expansion for answer context.
-8. Next: learned memory manager/reranker training from benchmark rows.
+7. Neighbor-turn episodic expansion for answer context: done in this branch.
+8. Offline learned reranker training from benchmark candidate rows: done in this branch.
 9. Next: richer contradiction/same-as graph semantics.
 10. Next: benchmark report grouping by failure kind, route, latency stage, and self-repair outcome.
 

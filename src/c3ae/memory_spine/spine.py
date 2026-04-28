@@ -301,9 +301,19 @@ class MemorySpine:
                 skipped[sc.role] = skipped.get(sc.role, 0) + 1
                 continue
 
-            meta = {"role": sc.role, "session_id": sc.session_id,
-                    "source_file": sc.source_file, "index": sc.index}
+            meta = {
+                "role": sc.role,
+                "session_id": sc.session_id,
+                "source_file": sc.source_file,
+                "index": sc.index,
+                "turn_index": sc.index,
+                "turn_part": 0,
+            }
             meta.update(sc.metadata)
+            if "turn_index" not in meta and "index" in meta:
+                meta["turn_index"] = meta["index"]
+            if "turn_part" not in meta:
+                meta["turn_part"] = meta.get("part_index", 0)
 
             chunk = Chunk(
                 content=sc.content,
@@ -461,8 +471,10 @@ class MemorySpine:
             query,
             top_k=min(max(top_k * 2, top_k), _RECALL_OVERFETCH_CAP),
         )
+        query_plan = plan_memory_query(query)
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+        expanded_rows = 0
         for r in results:
             meta = r.metadata or {}
             session_id = str(meta.get("session_id", ""))
@@ -483,17 +495,21 @@ class MemorySpine:
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
-            rows.append(
-                {
-                    "id": r.id,
-                    "content": r.content,
-                    "score": float(r.score),
-                    "source": r.source,
-                    "metadata": meta,
-                }
-            )
+            row = {
+                "id": r.id,
+                "content": r.content,
+                "score": float(r.score),
+                "source": r.source,
+                "metadata": meta,
+            }
+            row = self._maybe_expand_episodic_row(row, query_plan)
+            if bool((row.get("metadata") or {}).get("episodic_expanded")):
+                expanded_rows += 1
+            rows.append(row)
             if len(rows) >= top_k:
                 break
+        if expanded_rows:
+            self.last_retrieval_trace.add_counter("episodic_expanded_rows", expanded_rows)
         return rows
 
     def query_structured_facts(
@@ -1669,12 +1685,154 @@ class MemorySpine:
             role = self._infer_conversation_role(text)
             if role:
                 merged["role"] = role
+        self._attach_episode_metadata(merged, text, source_id)
         return merged
 
     @staticmethod
     def _infer_conversation_role(text: str) -> str:
         match = re.search(r"(?:^|\n)\s*(user|assistant|system)\s*:", text, flags=re.IGNORECASE)
         return match.group(1).strip().lower() if match else ""
+
+    @staticmethod
+    def _header_value(text: str, label: str) -> str:
+        match = re.search(rf"(?im)^\s*{re.escape(label)}\s*:\s*(.*?)\s*$", text or "")
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _parse_int(value: Any) -> int | None:
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _attach_episode_metadata(self, metadata: dict[str, Any], text: str, source_id: str) -> None:
+        """Infer stable episode/turn metadata without overriding caller metadata."""
+
+        header_map = {
+            "benchmark": "Benchmark",
+            "question_id": "Question ID",
+            "session_id": "Session ID",
+            "session_date": "Session date",
+        }
+        for key, label in header_map.items():
+            if key not in metadata:
+                value = self._header_value(text, label)
+                if value:
+                    metadata[key] = value
+
+        for key, label in (("turn_index", "Turn index"), ("turn_part", "Turn part")):
+            if key not in metadata:
+                value = self._parse_int(self._header_value(text, label))
+                if value is not None:
+                    metadata[key] = value
+
+        if "turn_index" not in metadata and "index" in metadata:
+            value = self._parse_int(metadata.get("index"))
+            if value is not None:
+                metadata["turn_index"] = value
+        if "turn_part" not in metadata and "part_index" in metadata:
+            value = self._parse_int(metadata.get("part_index"))
+            if value is not None:
+                metadata["turn_part"] = value
+
+        if "turn_index" not in metadata or "turn_part" not in metadata:
+            path_match = re.search(r"turn_(\d{1,8})_(\d{1,4})\.[A-Za-z0-9]+$", source_id or "")
+            if path_match:
+                metadata.setdefault("turn_index", int(path_match.group(1)))
+                metadata.setdefault("turn_part", int(path_match.group(2)))
+
+    def _should_expand_episodic_context(self, query_plan: Any, metadata: dict[str, Any]) -> bool:
+        if not bool(getattr(self.config.retrieval, "episodic_expansion_enabled", True)):
+            return False
+        if self._parse_int(metadata.get("turn_index")) is None:
+            return False
+        if not str(metadata.get("session_id", "")).strip():
+            return False
+        route = str(getattr(query_plan, "route", ""))
+        if route in {"table_lookup", "list_lookup", "multi_session", "temporal_math"}:
+            return True
+        intents = set(getattr(query_plan, "intents", []) or [])
+        return bool({"cross_session", "temporal", "enumeration", "structured_table"} & intents)
+
+    def _maybe_expand_episodic_row(
+        self,
+        row: dict[str, Any],
+        query_plan: Any,
+    ) -> dict[str, Any]:
+        """Attach adjacent same-session turns to a retrieved row when the query needs episode context."""
+
+        metadata = dict(row.get("metadata") or {})
+        if not self._should_expand_episodic_context(query_plan, metadata):
+            return row
+        turn_index = self._parse_int(metadata.get("turn_index"))
+        if turn_index is None:
+            return row
+        window = max(0, int(getattr(self.config.retrieval, "episodic_expansion_window", 1)))
+        if window <= 0:
+            return row
+
+        neighbors = self.sqlite.list_neighbor_chunks(
+            session_id=str(metadata.get("session_id", "")),
+            turn_index=turn_index,
+            window=window,
+            case_id=str(metadata.get("case_id", "")),
+            benchmark_case_token=str(metadata.get("benchmark_case_token", "")),
+            exclude_id=str(row.get("id", "")),
+            limit=max(6, (window * 2 + 2) * 3),
+        )
+        if not neighbors:
+            return row
+
+        current_content = str(row.get("content", ""))
+        current_id = str(row.get("id", ""))
+        max_chars = max(0, int(getattr(self.config.retrieval, "episodic_expansion_max_chars", 3600)))
+        if max_chars <= 0:
+            return row
+        seen_ids = {current_id}
+        neighbor_parts: list[str] = []
+        neighbor_ids: list[str] = []
+        remaining = max_chars
+        for chunk in neighbors:
+            if chunk.id in seen_ids:
+                continue
+            seen_ids.add(chunk.id)
+            chunk_meta = chunk.metadata or {}
+            role = str(chunk_meta.get("role", "memory") or "memory")
+            t_idx = chunk_meta.get("turn_index", "?")
+            t_part = chunk_meta.get("turn_part", chunk_meta.get("part_index", 0))
+            label = f"[neighbor turn {t_idx}.{t_part} role={role}]"
+            part = f"{label}\n{chunk.content.strip()}"
+            if remaining > 0 and len(part) > remaining:
+                part = part[:remaining].rstrip()
+            if not part:
+                break
+            neighbor_parts.append(part)
+            neighbor_ids.append(chunk.id)
+            remaining -= len(part)
+            if remaining <= 0:
+                break
+
+        if not neighbor_parts:
+            return row
+
+        expanded = dict(row)
+        expanded["content"] = (
+            f"{current_content}\n\n"
+            "<EpisodicNeighborContext>\n"
+            + "\n\n".join(neighbor_parts)
+            + "\n</EpisodicNeighborContext>"
+        )
+        metadata.update(
+            {
+                "episodic_expanded": True,
+                "episodic_neighbor_chunk_ids": neighbor_ids,
+                "episodic_neighbor_count": len(neighbor_ids),
+                "episodic_expansion_window": window,
+                "episodic_original_chars": len(current_content),
+            }
+        )
+        expanded["metadata"] = metadata
+        return expanded
 
     def _route_structured_query(
         self,

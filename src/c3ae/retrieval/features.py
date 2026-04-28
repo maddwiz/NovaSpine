@@ -31,6 +31,8 @@ class CandidateFeatures(BaseModel):
     access_count: int = 0
     source_kind: str = ""
     role: str = ""
+    benchmark_doc_id: str = ""
+    benchmark_source: str = ""
 
 
 def _tokens(text: str) -> set[str]:
@@ -92,6 +94,8 @@ def extract_candidate_features(
                 access_count=int(access_counts.get(row.id, 0)),
                 source_kind=str(metadata.get("_source_kind", "")),
                 role=str(metadata.get("role", "")),
+                benchmark_doc_id=str(metadata.get("benchmark_doc_id", "")),
+                benchmark_source=str(metadata.get("benchmark_source", metadata.get("path", ""))),
                 **scores,
             )
         )

@@ -566,6 +566,55 @@ class SQLiteStore:
         ).fetchall()
         return [self._row_to_chunk(r) for r in rows]
 
+    def list_neighbor_chunks(
+        self,
+        *,
+        session_id: str,
+        turn_index: int,
+        window: int = 1,
+        case_id: str = "",
+        benchmark_case_token: str = "",
+        exclude_id: str = "",
+        limit: int = 12,
+    ) -> list[Chunk]:
+        """Return nearby chunks in the same episode/session.
+
+        This is intentionally metadata-driven so it works for official eval
+        histories and OpenClaw session logs without broad semantic searches.
+        """
+        session = str(session_id or "").strip()
+        if not session:
+            return []
+        window = max(0, int(window))
+        low = int(turn_index) - window
+        high = int(turn_index) + window
+        where = [
+            "json_extract(c.metadata, '$.session_id') = ?",
+            "CAST(json_extract(c.metadata, '$.turn_index') AS INTEGER) BETWEEN ? AND ?",
+        ]
+        params: list[Any] = [session, low, high]
+        if case_id:
+            where.append("json_extract(c.metadata, '$.case_id') = ?")
+            params.append(case_id)
+        if benchmark_case_token:
+            where.append("json_extract(c.metadata, '$.benchmark_case_token') = ?")
+            params.append(benchmark_case_token)
+        if exclude_id:
+            where.append("c.id != ?")
+            params.append(exclude_id)
+        rows = self._conn.execute(
+            f"""SELECT c.*
+                FROM chunks c
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                  CAST(json_extract(c.metadata, '$.turn_index') AS INTEGER) ASC,
+                  CAST(COALESCE(json_extract(c.metadata, '$.turn_part'), json_extract(c.metadata, '$.part_index'), 0) AS INTEGER) ASC,
+                  c.created_at ASC
+                LIMIT ?""",
+            (*params, max(1, int(limit))),
+        ).fetchall()
+        return [self._row_to_chunk(r) for r in rows]
+
     def list_chunks_with_access(
         self,
         limit: int = 200,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import re
 import unicodedata
 from typing import Any
@@ -71,8 +71,13 @@ class NormalizedAnswer:
 
 def clean_answer(text: str) -> str:
     value = re.sub(r"\s+", " ", (text or "").strip())
-    value = value.strip(" \t\r\n\"'`.,;:()[]{}")
+    value = value.strip(" \t\r\n\"'`.,;:")
     return value
+
+
+def clean_cell(text: str) -> str:
+    value = re.sub(r"\s+", " ", (text or "").strip())
+    return value.strip(" \t\r\n\"'`.,;:")
 
 
 def normalize_for_match(text: str) -> str:
@@ -118,7 +123,7 @@ def infer_answer_type(question: str) -> str:
 def _parse_reference_datetime(metadata: dict[str, Any] | None) -> datetime | None:
     if not metadata:
         return None
-    for key in ("reference_date", "timestamp", "created_at", "_created_at", "date"):
+    for key in ("reference_date", "timestamp", "created_at", "_created_at", "date", "session_date", "question_date"):
         raw = metadata.get(key)
         if not isinstance(raw, str) or not raw.strip():
             continue
@@ -158,12 +163,39 @@ def _normalize_year(text: str, metadata: dict[str, Any] | None, steps: list[str]
     return clean_answer(text)
 
 
+def _format_date(value: datetime) -> str:
+    return f"{value.day} {value.strftime('%B')} {value.year}"
+
+
+def _normalize_relative_date(text: str, metadata: dict[str, Any] | None, steps: list[str]) -> str:
+    ref = _parse_reference_datetime(metadata)
+    if ref is None:
+        return ""
+    value = text.lower()
+    if re.search(r"\byesterday\b", value):
+        steps.append("resolved_yesterday")
+        return _format_date(ref - timedelta(days=1))
+    if re.search(r"\btoday\b", value):
+        steps.append("resolved_today")
+        return _format_date(ref)
+    if re.search(r"\btomorrow\b", value):
+        steps.append("resolved_tomorrow")
+        return _format_date(ref + timedelta(days=1))
+    if re.search(r"\blast week\b", value):
+        steps.append("resolved_last_week")
+        return _format_date(ref - timedelta(days=7))
+    if re.search(r"\bnext week\b", value):
+        steps.append("resolved_next_week")
+        return _format_date(ref + timedelta(days=7))
+    return ""
+
+
 def _normalize_date(text: str, metadata: dict[str, Any] | None, steps: list[str]) -> str:
-    year = _normalize_year(text, metadata, steps=[])
-    if re.fullmatch(r"(19|20)\d{2}", year):
-        steps.append("normalized_date_to_year")
-        return year
+    relative = _normalize_relative_date(text, metadata, steps)
+    if relative:
+        return relative
     for pattern in (
+        rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH_RE}(?:\s*(?:19|20)\d{{2}})?\b",
         rf"\b{_MONTH_RE}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*(?:19|20)\d{{2}})?\b",
         rf"\b{_MONTH_RE}\s+(?:19|20)\d{{2}}\b",
         r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b",
@@ -173,6 +205,10 @@ def _normalize_date(text: str, metadata: dict[str, Any] | None, steps: list[str]
         if m:
             steps.append("extracted_date_span")
             return clean_answer(m.group(0))
+    year = _normalize_year(text, metadata, steps=[])
+    if re.fullmatch(r"(19|20)\d{2}", year):
+        steps.append("normalized_date_to_year")
+        return year
     return clean_answer(text)
 
 

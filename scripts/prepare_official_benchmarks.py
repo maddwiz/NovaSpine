@@ -142,6 +142,50 @@ def _flatten_session(session: Any) -> str:
     return "\n".join(parts)
 
 
+def _iter_session_turns(session: Any) -> list[tuple[int, str, str]]:
+    if isinstance(session, str):
+        text = session.strip()
+        return [(0, "memory", text)] if text else []
+    if not isinstance(session, list):
+        text = str(session).strip()
+        return [(0, "memory", text)] if text else []
+    turns: list[tuple[int, str, str]] = []
+    for turn_index, turn in enumerate(session):
+        if isinstance(turn, dict):
+            role = str(turn.get("role", "speaker")).strip() or "speaker"
+            content = str(turn.get("content", "")).strip()
+        else:
+            role = "speaker"
+            content = str(turn).strip()
+        if content:
+            turns.append((turn_index, role, content))
+    return turns
+
+
+def _turn_document_text(
+    *,
+    benchmark: str,
+    question_id: str,
+    session_id: str,
+    turn_index: int,
+    role: str,
+    content: str,
+    case_token: str,
+) -> str:
+    return "\n".join(
+        [
+            case_token,
+            f"Benchmark: {benchmark}",
+            f"Question ID: {question_id}",
+            f"Session ID: {session_id}",
+            f"Turn index: {turn_index}",
+            "Turn part: 0",
+            "",
+            f"{role}: {content}",
+        ]
+    ).strip()
+
+
 def _convert_longmemeval(
     src: Path,
     corpus_out: Path,
@@ -162,19 +206,30 @@ def _convert_longmemeval(
             sid_s = str(sid)
             doc_id = f"lme_{qid}_{sid_s}"
             sid_to_doc_id[sid_s] = doc_id
-            text = _flatten_session(session)
-            corpus_rows.append(
-                {
-                    "doc_id": doc_id,
-                    "source_id": f"lme:{qid}:{sid_s}",
-                    "text": f"{case_token}\n{text}",
-                    "metadata": {
-                        "benchmark": "longmemeval_oracle",
-                        "question_id": qid,
-                        "session_id": sid_s,
-                    },
-                }
-            )
+            for turn_index, role, content in _iter_session_turns(session):
+                corpus_rows.append(
+                    {
+                        "doc_id": doc_id,
+                        "source_id": f"lme:{qid}:{sid_s}:turn:{turn_index:04d}",
+                        "text": _turn_document_text(
+                            benchmark="longmemeval_oracle",
+                            question_id=qid,
+                            session_id=sid_s,
+                            turn_index=turn_index,
+                            role=role,
+                            content=content,
+                            case_token=case_token,
+                        ),
+                        "metadata": {
+                            "benchmark": "longmemeval_oracle",
+                            "question_id": qid,
+                            "session_id": sid_s,
+                            "turn_index": turn_index,
+                            "turn_part": 0,
+                            "role": role,
+                        },
+                    }
+                )
 
         expected_doc_ids = [
             sid_to_doc_id[sid]

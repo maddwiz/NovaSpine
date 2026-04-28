@@ -12,6 +12,17 @@ def test_normalizes_relative_year_with_reference_date():
     assert "resolved_last_year" in out.steps
 
 
+def test_normalizes_relative_day_with_session_date():
+    out = normalize_answer(
+        "pottery class yesterday",
+        "date",
+        {"session_date": "2023-07-03T12:00:00Z"},
+    )
+
+    assert out.answer == "2 July 2023"
+    assert "resolved_yesterday" in out.steps
+
+
 def test_normalizes_counts_and_match_text():
     assert normalize_answer("two projects", "count").answer == "2"
     assert normalize_for_match("The Two Projects!") == "2 projects"

@@ -174,3 +174,59 @@ def test_reader_can_select_historical_table_column():
 
     assert answer.answer == "drip coffee"
     assert answer.citations == ["prefs-table"]
+
+
+def test_reader_extracts_shift_cell_from_schedule_table():
+    answer = answer_from_memory(
+        "In the schedule table, which shift is Admon assigned on Sundays?",
+        [
+            _row(
+                "\n".join(
+                    [
+                        "| Day | Person | Shift |",
+                        "| --- | --- | --- |",
+                        "| Sunday | Admon | 8 am - 4 pm (Day Shift) |",
+                        "| Monday | Blair | 4 pm - 12 am (Swing Shift) |",
+                    ]
+                ),
+                "shift-table",
+            )
+        ],
+    )
+
+    assert answer.answer == "8 am - 4 pm (Day Shift)"
+    assert answer.citations == ["shift-table"]
+    assert answer.verifier_status == "supported"
+
+
+def test_reader_resolves_yesterday_with_session_date():
+    answer = answer_from_memory(
+        "When was the pottery class?",
+        [_row("I had pottery class yesterday.", "pottery", session_date="2023-07-03T12:00:00Z")],
+    )
+
+    assert answer.answer == "2 July 2023"
+    assert answer.verifier_status == "supported"
+
+
+def test_reader_aggregates_list_items_across_rows():
+    answer = answer_from_memory(
+        "Which allergies does the user have?",
+        [
+            _row("- Allergies: peanuts and shellfish", "allergy-1"),
+            _row("- Allergies: latex", "allergy-2"),
+        ],
+    )
+
+    assert answer.answer == "peanuts, shellfish, latex"
+    assert answer.citations == ["allergy-1", "allergy-2"]
+
+
+def test_reader_computes_simple_day_delta_from_question_and_memory_date():
+    answer = answer_from_memory(
+        "How many days before 10 July 2023 was the pottery class?",
+        [_row("I had pottery class yesterday.", "pottery", session_date="2023-07-03T12:00:00Z")],
+    )
+
+    assert answer.answer == "8"
+    assert answer.verifier_status == "supported"
