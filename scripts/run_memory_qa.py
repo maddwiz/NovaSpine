@@ -26,11 +26,15 @@ from typing import Any
 from c3ae.config import Config
 from c3ae.eval.corpus import build_corpus_docs, load_jsonl
 from c3ae.eval import best_exact_match, best_f1, extractive_answer
+from c3ae.eval.failure_taxonomy import classify_qa_failure
 from c3ae.eval.temporal import enrich_context_with_temporal_facts
 from c3ae.llm import Message, create_chat_backend
 from c3ae.memory_spine.spine import MemorySpine
+from c3ae.qa.normalizer import infer_answer_type, normalize_answer
+from c3ae.qa.reader import answer_from_memory
 from c3ae.retrieval.chained import chained_recall
 from c3ae.retrieval.cross_encoder import CrossEncoderReranker
+from c3ae.retrieval.planner import plan_memory_query
 from c3ae.retrieval.verify import verify_answer_with_llm
 from c3ae.utils import extract_benchmark_case_token, parse_json_object, strip_benchmark_case_tokens
 
@@ -303,7 +307,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--answer-mode",
         default="extractive",
-        choices=["extractive", "oracle_doc", "llm"],
+        choices=["extractive", "typed", "oracle_doc", "llm"],
         help="Answer strategy. oracle_doc uses expected doc hit as an answer gate.",
     )
     p.add_argument(
@@ -544,6 +548,17 @@ def _parse_args() -> argparse.Namespace:
         default="legacy",
         choices=["legacy", "typed", "benchmark"],
         help="Fallback strategy when LLM answer is empty: legacy extractive, typed structured, or benchmark-aware reader.",
+    )
+    p.add_argument("--row-out", default="", help="Optional per-row JSONL output path")
+    p.add_argument(
+        "--enable-tracing",
+        action="store_true",
+        help="Include stage-level retrieval timings in row output.",
+    )
+    p.add_argument(
+        "--capture-candidate-features",
+        action="store_true",
+        help="Include candidate feature rows for offline reranker training.",
     )
     p.add_argument("--out", default="", help="Optional output JSON path")
     return p.parse_args()
@@ -1601,6 +1616,9 @@ def _fallback_answer_from_context(
 ) -> str:
     at = _detect_answer_type(query)
     if mode == "benchmark":
+        typed = answer_from_memory(query, recalled)
+        if not typed.abstain and typed.answer:
+            return typed.answer
         out = _benchmark_reader_answer(query, recalled, at)
         if out:
             return out
@@ -2049,6 +2067,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         f" max_per_chunk={cfg.ingestion.fact_max_per_chunk}"
         f" min_conf={cfg.ingestion.fact_min_confidence:.2f}"
     )
+    if args.enable_tracing:
+        cfg.retrieval.enable_tracing = True
+        mode_notes.append("retrieval_tracing=on")
+    if args.capture_candidate_features:
+        cfg.retrieval.capture_candidate_features = True
+        mode_notes.append("candidate_features=on")
     if args.query_expansion:
         cfg.retrieval.enable_query_expansion = True
         mode_notes.append("query_expansion=on")
@@ -2273,6 +2297,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         f1_sum = 0.0
         skipped = 0
         sample_logs: list[dict[str, Any]] = []
+        row_out_fh = open(args.row_out, "w", encoding="utf-8") if args.row_out else None
         last_answer_ts = 0.0
         cross_encoder_disabled = False
 
@@ -2285,6 +2310,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if not query or not answers:
                 skipped += 1
                 continue
+            query_plan = plan_memory_query(query)
 
             expected_doc_ids = {str(x) for x in row.get("expected_doc_ids", []) if str(x)}
             fetch_k = max(args.top_k, max(1, int(args.rerank_candidates)))
@@ -2295,7 +2321,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if args.cross_encoder_top_n > 0:
                 fetch_k = max(fetch_k, max(1, int(args.cross_encoder_top_n)))
 
-            if args.chained_recall:
+            if args.chained_recall or (query_plan.route == "multi_session" and not use_recall_variants):
                 recalled = await chained_recall(
                     spine=spine,
                     query=query,
@@ -2355,12 +2381,21 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     top_k=max(1, int(args.top_k)),
                     min_sessions=max(1, int(args.min_session_diversity)),
                 )
+            candidate_recalled = list(recalled)
+            candidate_docs = [
+                str((r.get("metadata") or {}).get("benchmark_doc_id", ""))
+                for r in candidate_recalled
+            ]
             recalled = recalled[: max(1, int(args.top_k))]
             docs = [str((r.get("metadata") or {}).get("benchmark_doc_id", "")) for r in recalled]
             hit = any(d in expected_doc_ids for d in docs) if expected_doc_ids else False
 
+            typed_answer = None
             if args.answer_mode == "oracle_doc" and expected_doc_ids:
                 pred = answers[0] if hit else extractive_answer(query, recalled)
+            elif args.answer_mode == "typed":
+                typed_answer = answer_from_memory(query, recalled)
+                pred = typed_answer.answer
             elif args.answer_mode == "llm":
                 min_interval = max(0.0, float(args.answer_min_interval_seconds))
                 if min_interval > 0.0:
@@ -2432,6 +2467,20 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
             em = best_exact_match(pred, answers)
             f1 = best_f1(pred, answers)
+            verifier_status = typed_answer.verifier_status if typed_answer is not None else "unchecked"
+            answer_type = typed_answer.answer_type if typed_answer is not None else infer_answer_type(query)
+            normalized_gold = normalize_answer(answers[0], answer_type).answer if answers else ""
+            normalized_pred = normalize_answer(pred, answer_type).answer if pred else ""
+            classification = classify_qa_failure(
+                question=query,
+                gold_answers=answers,
+                pred_answer=pred,
+                expected_evidence_ids=expected_doc_ids,
+                candidate_evidence_ids=candidate_docs,
+                final_context_evidence_ids=docs,
+                verifier_status=verifier_status,
+                answer_type=answer_type,
+            )
 
             n += 1
             doc_hits += int(hit)
@@ -2450,6 +2499,37 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     flush=True,
                 )
 
+            if row_out_fh is not None:
+                row_payload: dict[str, Any] = {
+                    "question_id": str(row.get("question_id", row.get("id", ""))),
+                    "dataset": args.name,
+                    "query": query,
+                    "gold_answer": answers[0] if answers else "",
+                    "pred_answer": pred,
+                    "normalized_gold": normalized_gold,
+                    "normalized_pred": normalized_pred,
+                    "expected_evidence_ids": sorted(expected_doc_ids),
+                    "candidate_evidence_ids": [doc for doc in candidate_docs if doc],
+                    "final_context_evidence_ids": [doc for doc in docs if doc],
+                    "failure_kind": classification.failure_kind,
+                    "answer_type": answer_type,
+                    "query_plan": query_plan.to_dict(),
+                    "verifier_status": verifier_status,
+                    "doc_hit": bool(hit),
+                    "exact_match": em,
+                    "token_f1": f1,
+                    "timings_ms": spine.get_last_retrieval_trace().get("timings_ms", {}),
+                }
+                if typed_answer is not None:
+                    row_payload["memory_answer"] = typed_answer.model_dump()
+                if args.capture_candidate_features:
+                    row_payload["candidate_features"] = [
+                        item.model_dump()
+                        for item in getattr(spine.hybrid_search, "last_candidate_features", [])
+                    ]
+                row_out_fh.write(json.dumps(row_payload, ensure_ascii=False) + "\n")
+                row_out_fh.flush()
+
             if len(sample_logs) < 20:
                 sample_logs.append(
                     {
@@ -2459,8 +2539,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         "doc_hit": bool(hit),
                         "em": em,
                         "f1": f1,
+                        "failure_kind": classification.failure_kind,
                     }
                 )
+
+        if row_out_fh is not None:
+            row_out_fh.close()
 
         denom = max(1, n)
         return {

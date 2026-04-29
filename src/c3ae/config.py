@@ -157,6 +157,21 @@ class RetrievalConfig(BaseModel):
     query_expansion_max_terms: int = Field(
         default_factory=lambda: _env_int("C3AE_QUERY_EXPANSION_MAX_TERMS", 4)
     )
+    enable_tracing: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_RETRIEVAL_TRACING", False)
+    )
+    capture_candidate_features: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_RETRIEVAL_CANDIDATE_FEATURES", False)
+    )
+    episodic_expansion_enabled: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_EPISODIC_EXPANSION", True)
+    )
+    episodic_expansion_window: int = Field(
+        default_factory=lambda: _env_int("C3AE_EPISODIC_EXPANSION_WINDOW", 1)
+    )
+    episodic_expansion_max_chars: int = Field(
+        default_factory=lambda: _env_int("C3AE_EPISODIC_EXPANSION_MAX_CHARS", 3600)
+    )
 
 
 class IngestionConfig(BaseModel):
@@ -249,6 +264,15 @@ class ConsolidationConfig(BaseModel):
     skill_promotion_min_cluster_size: int = Field(
         default_factory=lambda: _env_int("C3AE_DREAM_SKILL_MIN_CLUSTER", 3)
     )
+    self_repair_enabled: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_DREAM_SELF_REPAIR", True)
+    )
+    self_repair_write_repairs: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_DREAM_SELF_REPAIR_WRITE", False)
+    )
+    self_repair_max_probes: int = Field(
+        default_factory=lambda: _env_int("C3AE_DREAM_SELF_REPAIR_MAX_PROBES", 25)
+    )
 
 
 class MemoryManagerConfig(BaseModel):
@@ -270,6 +294,9 @@ class MemoryManagerConfig(BaseModel):
     )
     similarity_update_threshold: float = Field(
         default_factory=lambda: _env_float("C3AE_MEMORY_MANAGER_UPDATE_THRESHOLD", 0.80)
+    )
+    admission_min_confidence: float = Field(
+        default_factory=lambda: _env_float("C3AE_MEMORY_ADMISSION_MIN_CONFIDENCE", 0.05)
     )
     llm_provider: str = Field(
         default_factory=lambda: os.environ.get("C3AE_MEMORY_MANAGER_PROVIDER", "venice")

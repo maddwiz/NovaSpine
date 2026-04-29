@@ -50,6 +50,11 @@ class FAISSStore:
     def size(self) -> int:
         return self._index.ntotal
 
+    def external_ids(self) -> list[str]:
+        """Return the currently addressable external chunk IDs."""
+        count = min(len(self._id_map), self._index.ntotal)
+        return list(self._id_map[:count])
+
     def _snapshot_rows(self) -> tuple[list[str], np.ndarray]:
         count = min(len(self._id_map), self._index.ntotal)
         if count <= 0:

@@ -5,14 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
 import numpy as np
 
 from c3ae.config import RetrievalConfig
+from c3ae.retrieval.features import CandidateFeatures, extract_candidate_features
 from c3ae.retrieval.keyword import KeywordSearch
+from c3ae.retrieval.planner import QueryPlan, plan_memory_query
 from c3ae.retrieval.query_expansion import maybe_expand_query
+from c3ae.retrieval.trace import RetrievalTrace
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.types import SearchResult
 
@@ -113,6 +117,8 @@ class HybridSearch:
         self.config = config or RetrievalConfig()
         self._access_count_getter = access_count_getter
         self._access_counts_getter = access_counts_getter
+        self.last_trace = RetrievalTrace()
+        self.last_candidate_features: list[CandidateFeatures] = []
 
     def search(
         self,
@@ -125,8 +131,14 @@ class HybridSearch:
 
         If query_vector is None, falls back to keyword-only search.
         """
+        total_start = time.perf_counter()
+        trace = RetrievalTrace()
+        self.last_candidate_features = []
         top_k = top_k or self.config.default_top_k
         profile = self.analyze_query(query)
+        query_plan = plan_memory_query(query)
+        trace.notes.append(f"query_plan={query_plan.route}")
+        trace.add_counter(f"query_plan_{query_plan.route}", 1)
         # Over-fetch aggressively to reduce false negatives before fusion.
         fetch_k = max(top_k * 5, 100)
 
@@ -138,26 +150,196 @@ class HybridSearch:
             )
 
         # Keyword results
-        kw_results = self.keyword.search_all(kw_query, limit=fetch_k)
+        stage_start = time.perf_counter()
+        keyword_variants = self._keyword_query_variants(query, kw_query, profile, query_plan)
+        kw_results = self._search_keyword_variants(keyword_variants, limit=fetch_k)
+        trace.add_timing("keyword_search_ms", (time.perf_counter() - stage_start) * 1000.0)
+        trace.add_counter("keyword_results", len(kw_results))
+        trace.add_counter("keyword_variants", len(keyword_variants))
 
         # Vector results (if we have an embedding)
         vec_results: list[SearchResult] = []
         if query_vector is not None:
+            stage_start = time.perf_counter()
             vec_results = self.vector.search(query_vector, top_k=fetch_k)
+            trace.add_timing("vector_search_ms", (time.perf_counter() - stage_start) * 1000.0)
+        else:
+            trace.add_timing("vector_search_ms", 0.0)
+        trace.add_counter("vector_results", len(vec_results))
 
         if not vec_results:
+            stage_start = time.perf_counter()
             if not apply_decay:
-                return kw_results[:top_k]
-            return self._rerank_with_decay(kw_results, top_k=top_k, profile=profile)
+                out = kw_results[:top_k]
+            else:
+                out = self._rerank_with_decay(kw_results, top_k=top_k, profile=profile)
+            trace.add_timing("rerank_ms", (time.perf_counter() - stage_start) * 1000.0)
+            trace.add_timing("fusion_ms", 0.0)
+            self._finalize_trace(trace, total_start, out, query)
+            return out
         if not kw_results:
+            stage_start = time.perf_counter()
             if not apply_decay:
-                return vec_results[:top_k]
-            return self._rerank_with_decay(vec_results, top_k=top_k, profile=profile)
+                out = vec_results[:top_k]
+            else:
+                out = self._rerank_with_decay(vec_results, top_k=top_k, profile=profile)
+            trace.add_timing("rerank_ms", (time.perf_counter() - stage_start) * 1000.0)
+            trace.add_timing("fusion_ms", 0.0)
+            self._finalize_trace(trace, total_start, out, query)
+            return out
 
+        stage_start = time.perf_counter()
         merged = self._merge(kw_results, vec_results, query=query, top_k=fetch_k)
+        trace.add_timing("fusion_ms", (time.perf_counter() - stage_start) * 1000.0)
         if not apply_decay:
-            return merged[:top_k]
-        return self._rerank_with_decay(merged, top_k=top_k, profile=profile)
+            out = merged[:top_k]
+            trace.add_timing("rerank_ms", 0.0)
+        else:
+            stage_start = time.perf_counter()
+            out = self._rerank_with_decay(merged, top_k=top_k, profile=profile)
+            trace.add_timing("rerank_ms", (time.perf_counter() - stage_start) * 1000.0)
+        self._finalize_trace(trace, total_start, out, query)
+        return out
+
+    def _keyword_query_variants(
+        self,
+        original_query: str,
+        expanded_query: str,
+        profile: QueryProfile,
+        query_plan: QueryPlan,
+    ) -> list[tuple[str, float]]:
+        variants: list[tuple[str, float]] = [(expanded_query, 1.0)]
+        if expanded_query != original_query:
+            variants.append((original_query, 0.92))
+        if profile.wants_literal_recall:
+            if profile.prefers_assistant_response:
+                variants.append((f"{original_query} assistant recommended suggested", 0.86))
+            return self._dedupe_keyword_variants(variants)
+        if query_plan.route == "direct_recall":
+            return self._dedupe_keyword_variants([(expanded_query, 1.0)])
+
+        tokens = [tok for tok in profile.tokens if len(tok) > 2]
+        if tokens:
+            core_terms = self._planned_core_terms(tokens, query_plan)
+            if core_terms:
+                variants.append((" ".join(core_terms), 0.88))
+            if profile.fact_relation_hints:
+                variants.append((" ".join((*profile.fact_relation_hints, *tokens[:8])), 0.82))
+
+        if query_plan.route == "table_lookup":
+            focused = [tok for tok in tokens if tok not in {"which", "what", "where", "when", "table", "column", "row"}]
+            if focused:
+                variants.append((" ".join(focused[:8]), 0.9))
+        elif query_plan.route == "list_lookup":
+            variants.append((" ".join([tok for tok in tokens if tok not in {"all", "which", "list", "items"}][:10]), 0.86))
+        elif query_plan.route in {"current_state", "historical_state"} and profile.fact_relation_hints:
+            variants.append((" ".join((*profile.fact_relation_hints, *tokens[:6])), 0.9))
+        elif query_plan.route == "temporal_math":
+            variants.append((" ".join([tok for tok in tokens if tok not in {"when", "date", "year", "before", "after"}][:10]), 0.84))
+
+        quoted = re.findall(r"['\"]([^'\"]{2,80})['\"]", original_query)
+        for phrase in quoted[:3]:
+            variants.append((phrase, 0.8))
+        names = re.findall(r"\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){0,2}\b", original_query)
+        if names:
+            variants.append((" ".join(names[:4]), 0.78))
+        return self._dedupe_keyword_variants(variants)
+
+    @staticmethod
+    def _planned_core_terms(tokens: list[str], query_plan: QueryPlan) -> list[str]:
+        stop = {
+            "about",
+            "after",
+            "before",
+            "current",
+            "currently",
+            "does",
+            "have",
+            "many",
+            "that",
+            "their",
+            "there",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+            "would",
+        }
+        if query_plan.route == "table_lookup":
+            stop |= {"table", "column", "row"}
+        elif query_plan.route == "list_lookup":
+            stop |= {"list", "items", "options"}
+        return [tok for tok in tokens if tok not in stop][:12]
+
+    @staticmethod
+    def _dedupe_keyword_variants(variants: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        out: list[tuple[str, float]] = []
+        seen: set[str] = set()
+        for query, weight in variants:
+            q = " ".join(str(query or "").split())
+            if not q:
+                continue
+            key = q.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((q, float(weight)))
+        return out or [("", 1.0)]
+
+    def _search_keyword_variants(self, variants: list[tuple[str, float]], *, limit: int) -> list[SearchResult]:
+        if len(variants) == 1:
+            return self.keyword.search_all(variants[0][0], limit=limit)
+
+        by_id: dict[str, SearchResult] = {}
+        scores: dict[str, float] = {}
+        for variant_index, (query, weight) in enumerate(variants):
+            for rank, row in enumerate(self.keyword.search_all(query, limit=limit), start=1):
+                score = float(weight) * (1.0 / (60.0 + rank))
+                if row.id not in by_id or row.score > by_id[row.id].score:
+                    by_id[row.id] = row
+                scores[row.id] = scores.get(row.id, 0.0) + score
+                if variant_index == 0:
+                    scores[row.id] += float(row.score) * 0.01
+
+        merged: list[SearchResult] = []
+        for row_id, row in by_id.items():
+            metadata = dict(row.metadata or {})
+            metadata["_keyword_variant_score"] = round(scores.get(row_id, 0.0), 6)
+            merged.append(
+                SearchResult(
+                    id=row.id,
+                    content=row.content,
+                    score=float(row.score) + scores.get(row_id, 0.0),
+                    source=row.source,
+                    metadata=metadata,
+                )
+            )
+        merged.sort(key=lambda r: r.score, reverse=True)
+        return merged[:limit]
+
+    def _finalize_trace(
+        self,
+        trace: RetrievalTrace,
+        total_start: float,
+        results: list[SearchResult],
+        query: str,
+    ) -> None:
+        trace.add_counter("final_results", len(results))
+        trace.add_timing("total_ms", (time.perf_counter() - total_start) * 1000.0)
+        self.last_trace = trace
+        if bool(self.config.capture_candidate_features):
+            access_counts: dict[str, int] = {}
+            if self._access_counts_getter is not None:
+                try:
+                    access_counts = self._access_counts_getter([r.id for r in results])
+                except Exception:
+                    access_counts = {}
+            self.last_candidate_features = extract_candidate_features(
+                query,
+                results,
+                access_counts=access_counts,
+            )
 
     def _merge(
         self,

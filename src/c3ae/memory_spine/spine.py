@@ -8,6 +8,8 @@ import hashlib
 import logging
 import re
 import threading
+import time
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,11 +26,16 @@ from c3ae.ingestion.fact_extractor import extract_facts, extract_facts_async
 from c3ae.governance.audit import AuditLog
 from c3ae.governance.guardian import Guardian
 from c3ae.llm import create_chat_backend
+from c3ae.memory_manager import MemoryWriteAdmissionManager
+from c3ae.qa.normalizer import normalize_for_match
+from c3ae.qa.reader import answer_from_memory
 from c3ae.reasoning_bank.bank import ReasoningBank
 from c3ae.reasoning_bank.evidence import EvidenceManager
 from c3ae.reasoning_bank.manager import MemoryWriteManager
 from c3ae.retrieval.hybrid import HybridSearch
 from c3ae.retrieval.keyword import KeywordSearch
+from c3ae.retrieval.planner import plan_memory_query
+from c3ae.retrieval.trace import RetrievalTrace
 from c3ae.retrieval.vector import VectorSearch
 from c3ae.skill_capsules.registry import SkillRegistry
 from c3ae.storage.faiss_store import FAISSStore
@@ -55,6 +62,30 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of candidates fetched during recall/augment over-fetch passes.
 _RECALL_OVERFETCH_CAP = 200
+
+
+@dataclass(frozen=True)
+class SelfRepairProbe:
+    question: str
+    expected_answer: str
+    answer_type: str
+    source_kind: str
+    source_id: str
+    source_chunk_id: str = ""
+    entity: str = ""
+    relation: str = ""
+    basis: str = ""
+
+
+@dataclass(frozen=True)
+class SelfRepairProbeResult:
+    probe: SelfRepairProbe
+    passed: bool
+    repaired: bool
+    answer: str
+    verifier_status: str
+    citations: list[str]
+    reason: str = ""
 
 
 class MemorySpine:
@@ -88,6 +119,7 @@ class MemorySpine:
         self.cos = COSManager(self.sqlite, self.config.cos)
         self.bank = ReasoningBank(self.sqlite)
         self.write_manager = MemoryWriteManager(self.bank, self.config.memory_manager)
+        self.write_admission = MemoryWriteAdmissionManager(self.config.memory_manager)
         self.evidence = EvidenceManager(self.sqlite)
         self.skills = SkillRegistry(self.sqlite)
         self.guardian = Guardian(
@@ -106,6 +138,7 @@ class MemorySpine:
         self._graph_chat = None
         self._consolidation_chat = None
         self._fact_chat = None
+        self.last_retrieval_trace = RetrievalTrace()
 
     # --- Ingest ---
 
@@ -268,9 +301,19 @@ class MemorySpine:
                 skipped[sc.role] = skipped.get(sc.role, 0) + 1
                 continue
 
-            meta = {"role": sc.role, "session_id": sc.session_id,
-                    "source_file": sc.source_file, "index": sc.index}
+            meta = {
+                "role": sc.role,
+                "session_id": sc.session_id,
+                "source_file": sc.source_file,
+                "index": sc.index,
+                "turn_index": sc.index,
+                "turn_part": 0,
+            }
             meta.update(sc.metadata)
+            if "turn_index" not in meta and "index" in meta:
+                meta["turn_index"] = meta["index"]
+            if "turn_part" not in meta:
+                meta["turn_part"] = meta.get("part_index", 0)
 
             chunk = Chunk(
                 content=sc.content,
@@ -324,15 +367,24 @@ class MemorySpine:
 
     async def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         """Hybrid search across all memory tiers."""
+        total_start = time.perf_counter()
+        trace = RetrievalTrace()
         top_k = top_k or self.config.retrieval.default_top_k
         query_profile = self.hybrid_search.analyze_query(query)
+        query_plan = plan_memory_query(query)
+        trace.notes.append(f"query_plan={query_plan.route}")
+        trace.add_counter(f"query_plan_{query_plan.route}", 1)
         exact_recall_query = bool(getattr(query_profile, "wants_literal_recall", False))
 
         # Try to get query embedding (may fail if no API key)
         query_vec = None
         try:
+            stage_start = time.perf_counter()
             query_vec = await self._embed_text(query)
+            trace.add_timing("query_embedding_ms", (time.perf_counter() - stage_start) * 1000.0)
         except Exception:
+            trace.add_timing("query_embedding_ms", 0.0)
+            trace.notes.append("query_embedding_failed")
             logger.warning(
                 "Embedding failed for query, falling back to keyword-only: %s",
                 query,
@@ -342,28 +394,47 @@ class MemorySpine:
 
         benchmark_case_query = bool(self._extract_benchmark_case_token(query))
         if bool(self.config.ingestion.enable_fact_extraction) and not benchmark_case_query and not exact_recall_query:
+            stage_start = time.perf_counter()
             routed_structured = self._route_structured_query(query, query_profile, top_k=top_k)
+            trace.add_timing("structured_fact_lookup_ms", (time.perf_counter() - stage_start) * 1000.0)
             if routed_structured:
                 self._record_access(routed_structured)
                 self.audit.log_search(query, len(routed_structured))
+                trace.add_counter("final_results", len(routed_structured[:top_k]))
+                trace.add_timing("total_ms", (time.perf_counter() - total_start) * 1000.0)
+                self.last_retrieval_trace = trace
                 return routed_structured[:top_k]
+        else:
+            trace.add_timing("structured_fact_lookup_ms", 0.0)
         results = self.hybrid_search.search(
             query,
             query_vector=query_vec,
             top_k=top_k,
             apply_decay=not benchmark_case_query,
         )
+        trace.merge(self.hybrid_search.last_trace)
         if self.config.graph.enabled and not benchmark_case_query and not exact_recall_query:
+            stage_start = time.perf_counter()
             graph_results = self.sqlite.search_graph_context(query, limit=max(top_k, 5))
+            trace.add_timing("graph_lookup_ms", (time.perf_counter() - stage_start) * 1000.0)
             if graph_results:
                 results = self._merge_with_graph(query, results, graph_results, top_k=top_k)
+                trace.add_counter("graph_results", len(graph_results))
+        else:
+            trace.add_timing("graph_lookup_ms", 0.0)
         if bool(self.config.ingestion.enable_fact_extraction) and not exact_recall_query:
+            stage_start = time.perf_counter()
             fact_results = self.sqlite.search_structured_facts_fts(query, limit=max(top_k, 5))
+            trace.add_timing("structured_fact_lookup_ms", (time.perf_counter() - stage_start) * 1000.0)
             if fact_results:
                 results = self._merge_with_structured(query, results, fact_results, top_k=top_k)
+                trace.add_counter("structured_fact_results", len(fact_results))
         if not benchmark_case_query:
             self._record_access(results)
         self.audit.log_search(query, len(results))
+        trace.add_counter("final_results", len(results))
+        trace.add_timing("total_ms", (time.perf_counter() - total_start) * 1000.0)
+        self.last_retrieval_trace = trace
         return results
 
     def search_keyword(self, query: str, top_k: int = 20) -> list[SearchResult]:
@@ -400,8 +471,10 @@ class MemorySpine:
             query,
             top_k=min(max(top_k * 2, top_k), _RECALL_OVERFETCH_CAP),
         )
+        query_plan = plan_memory_query(query)
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+        expanded_rows = 0
         for r in results:
             meta = r.metadata or {}
             session_id = str(meta.get("session_id", ""))
@@ -422,17 +495,21 @@ class MemorySpine:
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
-            rows.append(
-                {
-                    "id": r.id,
-                    "content": r.content,
-                    "score": float(r.score),
-                    "source": r.source,
-                    "metadata": meta,
-                }
-            )
+            row = {
+                "id": r.id,
+                "content": r.content,
+                "score": float(r.score),
+                "source": r.source,
+                "metadata": meta,
+            }
+            row = self._maybe_expand_episodic_row(row, query_plan)
+            if bool((row.get("metadata") or {}).get("episodic_expanded")):
+                expanded_rows += 1
+            rows.append(row)
             if len(rows) >= top_k:
                 break
+        if expanded_rows:
+            self.last_retrieval_trace.add_counter("episodic_expanded_rows", expanded_rows)
         return rows
 
     def query_structured_facts(
@@ -452,6 +529,10 @@ class MemorySpine:
             order_by_date_desc=order_by_date_desc,
             limit=limit,
         )
+
+    def get_last_retrieval_trace(self) -> dict[str, object]:
+        """Return diagnostics for the most recent retrieval call."""
+        return self.last_retrieval_trace.to_dict()
 
     async def augment(
         self,
@@ -548,7 +629,7 @@ class MemorySpine:
                     raise GovernanceError(f"Write blocked: {'; '.join(issues)}")
                 if warnings:
                     self.audit.log("warning", "reasoning_entry", entry.id, "; ".join(warnings))
-            superseded = self.supersede_knowledge(
+            superseded = await self.supersede_knowledge_async(
                 decision.target_id,
                 new_title=title,
                 new_content=content,
@@ -583,6 +664,7 @@ class MemorySpine:
             metadata={
                 "type": "reasoning_entry",
                 "reasoning_entry_id": entry.id,
+                "entry_status": "active",
             },
         )
         self.sqlite.insert_chunk(chunk)
@@ -593,21 +675,52 @@ class MemorySpine:
         self.audit.log_write("reasoning_entry", entry.id, title)
         return entry
 
-    def supersede_knowledge(self, old_id: str, new_title: str, new_content: str,
-                            tags: list[str] | None = None,
-                            evidence_ids: list[str] | None = None) -> ReasoningEntry:
+    async def supersede_knowledge_async(
+        self,
+        old_id: str,
+        new_title: str,
+        new_content: str,
+        tags: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> ReasoningEntry:
+        """Supersede a reasoning entry and index its replacement everywhere."""
         entry = self.bank.supersede(old_id, new_title, new_content, tags, evidence_ids)
+        self.sqlite.mark_reasoning_chunks_superseded(old_id, entry.id)
         combined = f"{new_title}. {new_content}"
         chunk = Chunk(
             content=combined,
             source_id=entry.id,
-            metadata={"type": "reasoning_entry", "reasoning_entry_id": entry.id},
+            metadata={
+                "type": "reasoning_entry",
+                "reasoning_entry_id": entry.id,
+                "entry_status": "active",
+                "supersedes": old_id,
+            },
         )
         self.sqlite.insert_chunk(chunk)
-        self._index_graph_chunk(chunk.id, chunk.content, chunk.metadata)
-        self._index_structured_facts(chunk.id, chunk.content, chunk.metadata)
+        await self._index_graph_chunk_async(chunk.id, chunk.content, chunk.metadata)
+        await self._index_structured_facts_async(chunk.id, chunk.content, chunk.metadata)
+        await self._embed_and_index([chunk.id], [combined])
         self.audit.log_write("reasoning_entry", entry.id, f"supersedes {old_id}")
         return entry
+
+    def supersede_knowledge(
+        self,
+        old_id: str,
+        new_title: str,
+        new_content: str,
+        tags: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+    ) -> ReasoningEntry:
+        return self._run_async_sync(
+            self.supersede_knowledge_async(
+                old_id,
+                new_title,
+                new_content,
+                tags=tags,
+                evidence_ids=evidence_ids,
+            )
+        )
 
     # --- Evidence ---
 
@@ -1086,6 +1199,7 @@ class MemorySpine:
         skill_candidates = self._propose_skill_candidates(limit=10)
         recompression_preview = self._dream_recompression_preview(limit=200)
         novelty = self._dream_novelty_estimate(limit=200)
+        self_repair = await self.self_repair_probes_async()
         report = {
             "consolidation": consolidation,
             "forgetting_preview": forgetting,
@@ -1093,6 +1207,7 @@ class MemorySpine:
             "skill_candidates": skill_candidates,
             "recompression_preview": recompression_preview,
             "novelty": novelty,
+            "self_repair": self_repair,
         }
         self.audit.log(
             "dream_consolidation",
@@ -1127,7 +1242,147 @@ class MemorySpine:
             "skill_candidates": self._propose_skill_candidates(limit=10),
             "recompression_preview": self._dream_recompression_preview(limit=200),
             "novelty": self._dream_novelty_estimate(limit=200),
+            "self_repair": self.self_repair_probes(),
         }
+
+    async def self_repair_probes_async(self, limit: int | None = None) -> dict[str, Any]:
+        """Run deterministic memory QA probes and optionally write safe repairs."""
+        if not bool(self.config.consolidation.self_repair_enabled):
+            return {"enabled": False, "probes": [], "passed": 0, "failed": 0, "repaired": 0}
+        probes = self._generate_self_repair_probes(limit=limit)
+        results: list[SelfRepairProbeResult] = []
+        for probe in probes:
+            results.append(await self.self_repair_probe_async(probe))
+        passed = sum(1 for item in results if item.passed)
+        repaired = sum(1 for item in results if item.repaired)
+        return {
+            "enabled": True,
+            "write_repairs": bool(self.config.consolidation.self_repair_write_repairs),
+            "probes": [asdict(item) for item in results],
+            "passed": passed,
+            "failed": len(results) - passed,
+            "repaired": repaired,
+        }
+
+    def self_repair_probes(self, limit: int | None = None) -> dict[str, Any]:
+        return self._run_async_sync(self.self_repair_probes_async(limit=limit))
+
+    async def self_repair_probe_async(self, probe: SelfRepairProbe) -> SelfRepairProbeResult:
+        rows = await self.search(probe.question, top_k=max(5, self.config.retrieval.default_top_k))
+        answer = answer_from_memory(probe.question, rows)
+        expected_norm = normalize_for_match(probe.expected_answer)
+        answer_norm = normalize_for_match(answer.answer)
+        passed = bool(expected_norm) and (
+            expected_norm == answer_norm
+            or expected_norm in answer_norm
+            or answer_norm in expected_norm
+        )
+        repaired = False
+        reason = "passed" if passed else "answer_mismatch"
+        if not passed and bool(self.config.consolidation.self_repair_write_repairs):
+            repaired = self._write_self_repair_fact(probe)
+            reason = "repaired" if repaired else reason
+        return SelfRepairProbeResult(
+            probe=probe,
+            passed=passed,
+            repaired=repaired,
+            answer=answer.answer,
+            verifier_status=answer.verifier_status,
+            citations=list(answer.citations),
+            reason=reason,
+        )
+
+    def self_repair_probe(self, probe: SelfRepairProbe) -> SelfRepairProbeResult:
+        return self._run_async_sync(self.self_repair_probe_async(probe))
+
+    def _generate_self_repair_probes(self, limit: int | None = None) -> list[SelfRepairProbe]:
+        max_probes = max(1, int(limit or self.config.consolidation.self_repair_max_probes))
+        probes: list[SelfRepairProbe] = []
+        for fact in self.sqlite.list_current_structured_facts(limit=max_probes * 2):
+            entity = str(fact.get("entity") or "").strip()
+            relation = str(fact.get("relation") or "").strip()
+            value = str(fact.get("value") or "").strip()
+            if not entity or not relation or not value:
+                continue
+            probes.append(
+                SelfRepairProbe(
+                    question=self._probe_question(entity, relation),
+                    expected_answer=value,
+                    answer_type="free_text",
+                    source_kind="structured_fact",
+                    source_id=str(fact.get("id") or ""),
+                    source_chunk_id=str(fact.get("source_chunk_id") or ""),
+                    entity=entity,
+                    relation=relation,
+                    basis=str((fact.get("metadata") or {}).get("source_span") or ""),
+                )
+            )
+            if len(probes) >= max_probes:
+                return probes
+
+        for entry in self.bank.list_active(limit=max_probes):
+            probe = self._probe_from_reasoning_entry(entry)
+            if probe is not None:
+                probes.append(probe)
+            if len(probes) >= max_probes:
+                break
+        return probes
+
+    @staticmethod
+    def _probe_question(entity: str, relation: str) -> str:
+        relation_words = relation.replace("_", " ")
+        if relation_words in {"prefers", "likes"}:
+            return f"What does {entity} prefer?"
+        if relation_words in {"location", "lives in", "based in"}:
+            return f"Where is {entity} currently located?"
+        if relation_words in {"owns", "has"}:
+            return f"What does {entity} own?"
+        return f"What is {entity}'s {relation_words}?"
+
+    def _probe_from_reasoning_entry(self, entry: ReasoningEntry) -> SelfRepairProbe | None:
+        title = (entry.title or "").strip()
+        content = (entry.content or "").strip()
+        if not title or not content:
+            return None
+        answer = content.splitlines()[0].strip()
+        if len(answer) > 160:
+            answer = answer[:157].rstrip() + "..."
+        return SelfRepairProbe(
+            question=f"What memory is stored under {title}?",
+            expected_answer=answer,
+            answer_type="free_text",
+            source_kind="reasoning_entry",
+            source_id=entry.id,
+            source_chunk_id=self._reasoning_source_chunk_id(entry.id),
+            basis=title,
+        )
+
+    def _reasoning_source_chunk_id(self, entry_id: str) -> str:
+        for link in self.sqlite.list_reasoning_chunk_links(limit=1_000_000):
+            if str(link.get("reasoning_entry_id") or "") == entry_id:
+                return str(link.get("chunk_id") or "")
+        return ""
+
+    def _write_self_repair_fact(self, probe: SelfRepairProbe) -> bool:
+        if probe.source_kind != "structured_fact" or not probe.entity or not probe.relation:
+            return False
+        try:
+            self.sqlite.insert_structured_fact(
+                source_chunk_id=probe.source_chunk_id or probe.source_id,
+                entity=probe.entity,
+                relation=probe.relation,
+                value=probe.expected_answer,
+                confidence=0.5,
+                metadata={
+                    "source_span": probe.basis,
+                    "repair_probe": asdict(probe),
+                    "provenance": {"repair": "self_repair_probe", "source_id": probe.source_id},
+                },
+            )
+            return True
+        except Exception:
+            logger.debug("Self-repair write failed for probe %s", probe.source_id, exc_info=True)
+            return False
 
     def _list_recent_chunks_for_consolidation(
         self,
@@ -1331,6 +1586,48 @@ class MemorySpine:
             status["temporal"] = {"motifs_detected": len(motifs)}
         return status
 
+    def check_index_consistency(self) -> dict[str, Any]:
+        """Report SQLite/FAISS drift without mutating either store."""
+        chunk_rows = self.sqlite.list_chunk_ids(limit=1_000_000)
+        chunk_ids = {row["id"] for row in chunk_rows}
+        vector_ids = set(self.faiss.external_ids())
+
+        reasoning_entries = self.sqlite.list_reasoning_entries_any_status(limit=1_000_000)
+        reasoning_chunk_rows = self.sqlite.list_reasoning_chunk_links(limit=1_000_000)
+        reasoning_to_chunks: dict[str, list[str]] = {}
+        for row in reasoning_chunk_rows:
+            reasoning_id = str(row.get("reasoning_entry_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            if reasoning_id and chunk_id:
+                reasoning_to_chunks.setdefault(reasoning_id, []).append(chunk_id)
+
+        active_entry_ids = {entry.id for entry in reasoning_entries if entry.status.value == "active"}
+        reasoning_entries_missing_chunks = sorted(
+            entry_id for entry_id in active_entry_ids if not reasoning_to_chunks.get(entry_id)
+        )
+        active_reasoning_entries_missing_vectors: list[str] = []
+        for entry_id in active_entry_ids:
+            linked_chunks = reasoning_to_chunks.get(entry_id, [])
+            if linked_chunks and not any(chunk_id in vector_ids for chunk_id in linked_chunks):
+                active_reasoning_entries_missing_vectors.append(entry_id)
+
+        expected_dims = int(self.config.venice.embedding_dims)
+        faiss_dims = int(getattr(self.faiss, "dims", expected_dims))
+        return {
+            "sqlite_chunk_count": len(chunk_ids),
+            "faiss_vector_count": int(self.faiss.size),
+            "faiss_idmap_count": len(vector_ids),
+            "chunks_missing_vectors": sorted(chunk_ids - vector_ids),
+            "vectors_missing_chunks": sorted(vector_ids - chunk_ids),
+            "reasoning_entries_missing_chunks": reasoning_entries_missing_chunks,
+            "active_reasoning_entries_missing_vectors": sorted(active_reasoning_entries_missing_vectors),
+            "embedding_dimension_mismatch": faiss_dims != expected_dims,
+            "embedding_dimensions": {
+                "config": expected_dims,
+                "faiss": faiss_dims,
+            },
+        }
+
     @staticmethod
     def _render_augmented_context(memories: list[dict[str, str]], format: str = "xml") -> str:
         if not memories:
@@ -1388,12 +1685,154 @@ class MemorySpine:
             role = self._infer_conversation_role(text)
             if role:
                 merged["role"] = role
+        self._attach_episode_metadata(merged, text, source_id)
         return merged
 
     @staticmethod
     def _infer_conversation_role(text: str) -> str:
         match = re.search(r"(?:^|\n)\s*(user|assistant|system)\s*:", text, flags=re.IGNORECASE)
         return match.group(1).strip().lower() if match else ""
+
+    @staticmethod
+    def _header_value(text: str, label: str) -> str:
+        match = re.search(rf"(?im)^\s*{re.escape(label)}\s*:\s*(.*?)\s*$", text or "")
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _parse_int(value: Any) -> int | None:
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _attach_episode_metadata(self, metadata: dict[str, Any], text: str, source_id: str) -> None:
+        """Infer stable episode/turn metadata without overriding caller metadata."""
+
+        header_map = {
+            "benchmark": "Benchmark",
+            "question_id": "Question ID",
+            "session_id": "Session ID",
+            "session_date": "Session date",
+        }
+        for key, label in header_map.items():
+            if key not in metadata:
+                value = self._header_value(text, label)
+                if value:
+                    metadata[key] = value
+
+        for key, label in (("turn_index", "Turn index"), ("turn_part", "Turn part")):
+            if key not in metadata:
+                value = self._parse_int(self._header_value(text, label))
+                if value is not None:
+                    metadata[key] = value
+
+        if "turn_index" not in metadata and "index" in metadata:
+            value = self._parse_int(metadata.get("index"))
+            if value is not None:
+                metadata["turn_index"] = value
+        if "turn_part" not in metadata and "part_index" in metadata:
+            value = self._parse_int(metadata.get("part_index"))
+            if value is not None:
+                metadata["turn_part"] = value
+
+        if "turn_index" not in metadata or "turn_part" not in metadata:
+            path_match = re.search(r"turn_(\d{1,8})_(\d{1,4})\.[A-Za-z0-9]+$", source_id or "")
+            if path_match:
+                metadata.setdefault("turn_index", int(path_match.group(1)))
+                metadata.setdefault("turn_part", int(path_match.group(2)))
+
+    def _should_expand_episodic_context(self, query_plan: Any, metadata: dict[str, Any]) -> bool:
+        if not bool(getattr(self.config.retrieval, "episodic_expansion_enabled", True)):
+            return False
+        if self._parse_int(metadata.get("turn_index")) is None:
+            return False
+        if not str(metadata.get("session_id", "")).strip():
+            return False
+        route = str(getattr(query_plan, "route", ""))
+        if route in {"table_lookup", "list_lookup", "multi_session", "temporal_math"}:
+            return True
+        intents = set(getattr(query_plan, "intents", []) or [])
+        return bool({"cross_session", "temporal", "enumeration", "structured_table"} & intents)
+
+    def _maybe_expand_episodic_row(
+        self,
+        row: dict[str, Any],
+        query_plan: Any,
+    ) -> dict[str, Any]:
+        """Attach adjacent same-session turns to a retrieved row when the query needs episode context."""
+
+        metadata = dict(row.get("metadata") or {})
+        if not self._should_expand_episodic_context(query_plan, metadata):
+            return row
+        turn_index = self._parse_int(metadata.get("turn_index"))
+        if turn_index is None:
+            return row
+        window = max(0, int(getattr(self.config.retrieval, "episodic_expansion_window", 1)))
+        if window <= 0:
+            return row
+
+        neighbors = self.sqlite.list_neighbor_chunks(
+            session_id=str(metadata.get("session_id", "")),
+            turn_index=turn_index,
+            window=window,
+            case_id=str(metadata.get("case_id", "")),
+            benchmark_case_token=str(metadata.get("benchmark_case_token", "")),
+            exclude_id=str(row.get("id", "")),
+            limit=max(6, (window * 2 + 2) * 3),
+        )
+        if not neighbors:
+            return row
+
+        current_content = str(row.get("content", ""))
+        current_id = str(row.get("id", ""))
+        max_chars = max(0, int(getattr(self.config.retrieval, "episodic_expansion_max_chars", 3600)))
+        if max_chars <= 0:
+            return row
+        seen_ids = {current_id}
+        neighbor_parts: list[str] = []
+        neighbor_ids: list[str] = []
+        remaining = max_chars
+        for chunk in neighbors:
+            if chunk.id in seen_ids:
+                continue
+            seen_ids.add(chunk.id)
+            chunk_meta = chunk.metadata or {}
+            role = str(chunk_meta.get("role", "memory") or "memory")
+            t_idx = chunk_meta.get("turn_index", "?")
+            t_part = chunk_meta.get("turn_part", chunk_meta.get("part_index", 0))
+            label = f"[neighbor turn {t_idx}.{t_part} role={role}]"
+            part = f"{label}\n{chunk.content.strip()}"
+            if remaining > 0 and len(part) > remaining:
+                part = part[:remaining].rstrip()
+            if not part:
+                break
+            neighbor_parts.append(part)
+            neighbor_ids.append(chunk.id)
+            remaining -= len(part)
+            if remaining <= 0:
+                break
+
+        if not neighbor_parts:
+            return row
+
+        expanded = dict(row)
+        expanded["content"] = (
+            f"{current_content}\n\n"
+            "<EpisodicNeighborContext>\n"
+            + "\n\n".join(neighbor_parts)
+            + "\n</EpisodicNeighborContext>"
+        )
+        metadata.update(
+            {
+                "episodic_expanded": True,
+                "episodic_neighbor_chunk_ids": neighbor_ids,
+                "episodic_neighbor_count": len(neighbor_ids),
+                "episodic_expansion_window": window,
+                "episodic_original_chars": len(current_content),
+            }
+        )
+        expanded["metadata"] = metadata
+        return expanded
 
     def _route_structured_query(
         self,
@@ -1804,19 +2243,39 @@ class MemorySpine:
             conf = float(getattr(fact, "confidence", 0.0))
             if conf < min_conf:
                 continue
+            entity = str(getattr(fact, "entity", "")).strip()
+            relation = str(getattr(fact, "relation", "")).strip()
+            value = str(getattr(fact, "value", "")).strip()
+            fact_date = str(getattr(fact, "date", "")).strip()
+            fact_metadata = self._structured_fact_metadata(fact, source_metadata=metadata)
+            decision = self.write_admission.decide_structured_fact(
+                self.sqlite,
+                source_chunk_id=chunk_id,
+                entity=entity,
+                relation=relation,
+                value=value,
+                fact_date=fact_date,
+                confidence=conf,
+                metadata=fact_metadata,
+            )
+            if decision.action in {"DENY", "NOOP"}:
+                continue
+            supersedes_ids = list(decision.metadata.get("supersedes_fact_ids", []))
+            fact_metadata.setdefault("admission", asdict(decision))
+            if decision.action == "SUPERSEDE" and supersedes_ids:
+                fact_metadata.setdefault("supersedes", supersedes_ids)
             try:
-                self.sqlite.insert_structured_fact(
+                fact_id = self.sqlite.insert_structured_fact(
                     source_chunk_id=chunk_id,
-                    entity=str(getattr(fact, "entity", "")).strip(),
-                    relation=str(getattr(fact, "relation", "")).strip(),
-                    value=str(getattr(fact, "value", "")).strip(),
-                    fact_date=str(getattr(fact, "date", "")).strip(),
+                    entity=entity,
+                    relation=relation,
+                    value=value,
+                    fact_date=fact_date,
                     confidence=conf,
-                    metadata={
-                        "source_span": str(getattr(fact, "source_span", "")).strip(),
-                        "source": metadata or {},
-                    },
+                    metadata=fact_metadata,
                 )
+                if supersedes_ids:
+                    self._mark_structured_facts_superseded(supersedes_ids, superseded_by=fact_id)
             except Exception:
                 logger.warning(
                     "Failed to persist fact for chunk %s, continuing",
@@ -1824,6 +2283,44 @@ class MemorySpine:
                     exc_info=True,
                 )
                 continue
+
+    @staticmethod
+    def _structured_fact_metadata(fact: Any, *, source_metadata: dict[str, Any] | None) -> dict[str, Any]:
+        provenance = getattr(fact, "provenance", None)
+        metadata: dict[str, Any] = {
+            "source_span": str(getattr(fact, "source_span", "")).strip(),
+            "source": source_metadata or {},
+        }
+        if isinstance(provenance, dict):
+            metadata["provenance"] = dict(provenance)
+        valid_from = str(getattr(fact, "valid_from", "") or getattr(fact, "date", "") or "").strip()
+        valid_to = str(getattr(fact, "valid_to", "") or "").strip()
+        observed_at = str(getattr(fact, "observed_at", "") or "").strip()
+        if valid_from:
+            metadata["valid_from"] = valid_from
+        if valid_to:
+            metadata["valid_to"] = valid_to
+        if observed_at:
+            metadata["observed_at"] = observed_at
+        return metadata
+
+    def _mark_structured_facts_superseded(self, fact_ids: list[str], *, superseded_by: str) -> None:
+        for fact_id in fact_ids:
+            current = self.sqlite.get_structured_fact(str(fact_id))
+            if not current:
+                continue
+            metadata = dict(current.get("metadata") or {})
+            now = iso_str(utcnow())
+            metadata["fact_status"] = "historical"
+            metadata["superseded_by"] = superseded_by
+            if not metadata.get("valid_to"):
+                metadata["valid_to"] = now
+            if not metadata.get("transaction_to"):
+                metadata["transaction_to"] = now
+            try:
+                self.sqlite.update_structured_fact_metadata(str(fact_id), metadata)
+            except Exception:
+                logger.debug("Failed to mark fact %s superseded", fact_id, exc_info=True)
 
     def _get_chat_backend(
         self,
@@ -1948,7 +2445,6 @@ class MemorySpine:
         for src_name, relation, dst_name in extracted.relations:
             src_id = entity_ids.get(src_name) or self.sqlite.upsert_entity(src_name)
             dst_id = entity_ids.get(dst_name) or self.sqlite.upsert_entity(dst_name)
-            invalidate = relation in {"is", "prefers", "owns"}
             rel_key = (src_name, relation, dst_name)
             base_edge_conf = extracted.relation_confidence.get(
                 rel_key,
@@ -1959,6 +2455,24 @@ class MemorySpine:
                 metadata=metadata,
                 kind="edge",
             )
+            rel_metadata = dict(getattr(extracted, "relation_metadata", {}).get(rel_key, {}))
+            decision = self.write_admission.decide_graph_edge(
+                self.sqlite,
+                src_entity_id=src_id,
+                relation=relation,
+                dst_entity_id=dst_id,
+                confidence=edge_conf,
+                metadata=rel_metadata,
+            )
+            if decision.action in {"DENY", "NOOP"}:
+                continue
+            invalidate = decision.action == "SUPERSEDE" or relation in {"is", "prefers", "owns"}
+            provenance = {
+                "source_chunk_id": chunk_id,
+                "src_name": src_name,
+                "dst_name": dst_name,
+                "extract_mode": extracted.mode,
+            }
             self.sqlite.add_edge(
                 src_id,
                 relation=relation,
@@ -1968,8 +2482,13 @@ class MemorySpine:
                 metadata={
                     "source": metadata or {},
                     "extract_mode": extracted.mode,
+                    "admission": asdict(decision),
+                    **rel_metadata,
                 },
                 invalidate_existing_relation=invalidate,
+                valid_from=str(rel_metadata.get("valid_from") or rel_metadata.get("observed_at") or ""),
+                valid_to=str(rel_metadata.get("valid_to") or ""),
+                provenance=provenance,
             )
 
     def _calibrate_graph_confidence(

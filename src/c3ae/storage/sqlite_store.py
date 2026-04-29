@@ -534,6 +534,13 @@ class SQLiteStore:
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return row[0]
 
+    def list_chunk_ids(self, limit: int = 1_000_000) -> list[dict[str, str]]:
+        rows = self._conn.execute(
+            "SELECT id FROM chunks ORDER BY created_at DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [{"id": str(r["id"])} for r in rows]
+
     def list_chunks(
         self,
         limit: int = 200,
@@ -556,6 +563,55 @@ class SQLiteStore:
                 ORDER BY c.created_at DESC
                 LIMIT ?""",
             (*params, limit),
+        ).fetchall()
+        return [self._row_to_chunk(r) for r in rows]
+
+    def list_neighbor_chunks(
+        self,
+        *,
+        session_id: str,
+        turn_index: int,
+        window: int = 1,
+        case_id: str = "",
+        benchmark_case_token: str = "",
+        exclude_id: str = "",
+        limit: int = 12,
+    ) -> list[Chunk]:
+        """Return nearby chunks in the same episode/session.
+
+        This is intentionally metadata-driven so it works for official eval
+        histories and OpenClaw session logs without broad semantic searches.
+        """
+        session = str(session_id or "").strip()
+        if not session:
+            return []
+        window = max(0, int(window))
+        low = int(turn_index) - window
+        high = int(turn_index) + window
+        where = [
+            "json_extract(c.metadata, '$.session_id') = ?",
+            "CAST(json_extract(c.metadata, '$.turn_index') AS INTEGER) BETWEEN ? AND ?",
+        ]
+        params: list[Any] = [session, low, high]
+        if case_id:
+            where.append("json_extract(c.metadata, '$.case_id') = ?")
+            params.append(case_id)
+        if benchmark_case_token:
+            where.append("json_extract(c.metadata, '$.benchmark_case_token') = ?")
+            params.append(benchmark_case_token)
+        if exclude_id:
+            where.append("c.id != ?")
+            params.append(exclude_id)
+        rows = self._conn.execute(
+            f"""SELECT c.*
+                FROM chunks c
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                  CAST(json_extract(c.metadata, '$.turn_index') AS INTEGER) ASC,
+                  CAST(COALESCE(json_extract(c.metadata, '$.turn_part'), json_extract(c.metadata, '$.part_index'), 0) AS INTEGER) ASC,
+                  c.created_at ASC
+                LIMIT ?""",
+            (*params, max(1, int(limit))),
         ).fetchall()
         return [self._row_to_chunk(r) for r in rows]
 
@@ -611,6 +667,24 @@ class SQLiteStore:
         if not source_chunk_id or not entity_clean or not relation_clean or not value_clean:
             raise ValueError("structured fact requires source_chunk_id/entity/relation/value")
         now = iso_str(utcnow())
+        fact_date_clean = str(fact_date or "").strip()
+        fact_metadata = dict(metadata or {})
+        observed_at = str(
+            fact_metadata.get("observed_at")
+            or fact_metadata.get("recorded_at")
+            or fact_metadata.get("ingested_at")
+            or now
+        )
+        fact_metadata.setdefault("observed_at", observed_at)
+        fact_metadata.setdefault("recorded_at", now)
+        fact_metadata.setdefault("ingested_at", now)
+        fact_metadata.setdefault("transaction_from", now)
+        fact_metadata.setdefault("valid_from", fact_date_clean or observed_at)
+        fact_metadata.setdefault("valid_to", "")
+        fact_metadata.setdefault(
+            "provenance",
+            {"source_chunk_id": source_chunk_id, "store": "structured_facts"},
+        )
 
         # Upsert-by-content for idempotent re-ingestion.
         with self._write_lock:
@@ -622,7 +696,7 @@ class SQLiteStore:
                     entity_clean,
                     relation_clean,
                     value_clean,
-                    fact_date.strip(),
+                    fact_date_clean,
                 ),
             ).fetchone()
             if row:
@@ -633,7 +707,7 @@ class SQLiteStore:
                        WHERE id=?""",
                     (
                         float(confidence),
-                        json_dumps(metadata or {}),
+                        json_dumps(fact_metadata),
                         now,
                         fact_id,
                     ),
@@ -652,9 +726,9 @@ class SQLiteStore:
                     entity_clean,
                     relation_clean,
                     value_clean,
-                    fact_date.strip(),
+                    fact_date_clean,
                     float(confidence),
-                    json_dumps(metadata or {}),
+                    json_dumps(fact_metadata),
                     now,
                 ),
             )
@@ -691,20 +765,42 @@ class SQLiteStore:
                 LIMIT ?""",
             (*params, max(1, int(limit))),
         ).fetchall()
-        return [
-            {
-                "id": str(r["id"]),
-                "source_chunk_id": str(r["source_chunk_id"]),
-                "entity": str(r["entity"]),
-                "relation": str(r["relation"]),
-                "value": str(r["value"]),
-                "date": str(r["fact_date"]),
-                "confidence": float(r["confidence"]),
-                "metadata": json_loads(r["metadata"]),
-                "created_at": str(r["created_at"]),
-            }
-            for r in rows
-        ]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            metadata = json_loads(r["metadata"])
+            created_at = str(r["created_at"])
+            fact_date_value = str(r["fact_date"])
+            out.append(
+                {
+                    "id": str(r["id"]),
+                    "source_chunk_id": str(r["source_chunk_id"]),
+                    "entity": str(r["entity"]),
+                    "relation": str(r["relation"]),
+                    "value": str(r["value"]),
+                    "date": fact_date_value,
+                    "confidence": float(r["confidence"]),
+                    "metadata": metadata,
+                    "created_at": created_at,
+                    **self._fact_temporal_fields(metadata, fact_date_value, created_at),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _fact_temporal_fields(
+        metadata: dict[str, Any],
+        fact_date: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        return {
+            "valid_from": str(metadata.get("valid_from") or fact_date or metadata.get("observed_at") or ""),
+            "valid_to": str(metadata.get("valid_to") or ""),
+            "observed_at": str(metadata.get("observed_at") or metadata.get("recorded_at") or created_at or ""),
+            "recorded_at": str(metadata.get("recorded_at") or created_at or ""),
+            "transaction_from": str(metadata.get("transaction_from") or created_at or ""),
+            "transaction_to": str(metadata.get("transaction_to") or ""),
+            "provenance": metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {},
+        }
 
     @staticmethod
     def _fact_status(fact: dict[str, Any]) -> str:
@@ -747,16 +843,20 @@ class SQLiteStore:
         ).fetchone()
         if not row:
             return None
+        metadata = json_loads(row["metadata"])
+        created_at = str(row["created_at"])
+        fact_date_value = str(row["fact_date"])
         return {
             "id": str(row["id"]),
             "source_chunk_id": str(row["source_chunk_id"]),
             "entity": str(row["entity"]),
             "relation": str(row["relation"]),
             "value": str(row["value"]),
-            "date": str(row["fact_date"]),
+            "date": fact_date_value,
             "confidence": float(row["confidence"]),
-            "metadata": json_loads(row["metadata"]),
-            "created_at": str(row["created_at"]),
+            "metadata": metadata,
+            "created_at": created_at,
+            **self._fact_temporal_fields(metadata, fact_date_value, created_at),
         }
 
     def update_structured_fact_metadata(self, fact_id: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -776,15 +876,18 @@ class SQLiteStore:
     ) -> list[dict[str, Any]]:
         current: list[dict[str, Any]] = []
         for facts in self._facts_by_group(entity=entity, relation=relation, limit=max(limit * 4, 200)).values():
-            explicit_current = [fact for fact in facts if self._fact_status(fact) == "current"]
+            eligible = [fact for fact in facts if self._fact_status(fact) != "historical"]
+            if not eligible:
+                eligible = facts
+            explicit_current = [fact for fact in eligible if self._fact_status(fact) == "current"]
             if explicit_current:
                 winners = explicit_current
             else:
-                latest_date = next((str(fact.get("date") or "") for fact in facts if str(fact.get("date") or "")), "")
+                latest_date = next((str(fact.get("date") or "") for fact in eligible if str(fact.get("date") or "")), "")
                 if latest_date:
-                    winners = [fact for fact in facts if str(fact.get("date") or "") == latest_date]
+                    winners = [fact for fact in eligible if str(fact.get("date") or "") == latest_date]
                 else:
-                    winners = [sorted(facts, key=self._fact_sort_key, reverse=True)[0]]
+                    winners = [sorted(eligible, key=self._fact_sort_key, reverse=True)[0]]
             current.extend(sorted(winners, key=self._fact_sort_key, reverse=True))
         current.sort(key=self._fact_sort_key, reverse=True)
         return current[: max(1, limit)]
@@ -992,6 +1095,49 @@ class SQLiteStore:
             (status, limit),
         ).fetchall()
         return [self._row_to_reasoning_entry(r) for r in rows]
+
+    def list_reasoning_entries_any_status(self, limit: int = 1_000_000) -> list[ReasoningEntry]:
+        rows = self._conn.execute(
+            "SELECT * FROM reasoning_bank ORDER BY created_at DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [self._row_to_reasoning_entry(r) for r in rows]
+
+    def list_reasoning_chunk_links(self, limit: int = 1_000_000) -> list[dict[str, str]]:
+        rows = self._conn.execute(
+            """SELECT id, json_extract(metadata, '$.reasoning_entry_id') AS reasoning_entry_id
+               FROM chunks
+               WHERE json_extract(metadata, '$.type') = 'reasoning_entry'
+               LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [
+            {
+                "chunk_id": str(r["id"]),
+                "reasoning_entry_id": str(r["reasoning_entry_id"] or ""),
+            }
+            for r in rows
+        ]
+
+    def mark_reasoning_chunks_superseded(self, reasoning_entry_id: str, superseded_by: str) -> int:
+        rows = self._conn.execute(
+            """SELECT id, metadata FROM chunks
+               WHERE json_extract(metadata, '$.reasoning_entry_id') = ?""",
+            (reasoning_entry_id,),
+        ).fetchall()
+        if not rows:
+            return 0
+        with self._write_lock:
+            for row in rows:
+                metadata = json_loads(row["metadata"])
+                metadata["entry_status"] = "superseded"
+                metadata["superseded_by"] = superseded_by
+                self._conn.execute(
+                    "UPDATE chunks SET metadata=? WHERE id=?",
+                    (json_dumps(metadata), row["id"]),
+                )
+            self._commit_locked()
+        return len(rows)
 
     def search_reasoning_fts(self, query: str, limit: int = 20) -> list[SearchResult]:
         fts_query = _sanitize_fts_query(query)
@@ -1368,9 +1514,20 @@ class SQLiteStore:
         confidence: float = 0.5,
         metadata: dict[str, Any] | None = None,
         invalidate_existing_relation: bool = False,
+        valid_from: str = "",
+        valid_to: str = "",
+        provenance: dict[str, Any] | None = None,
     ) -> str:
         now = iso_str(utcnow())
         relation_norm = relation.strip().lower().replace(" ", "_")
+        edge_metadata = dict(metadata or {})
+        if provenance is not None:
+            edge_metadata.setdefault("provenance", provenance)
+        edge_metadata.setdefault("observed_at", now)
+        edge_metadata.setdefault("recorded_at", now)
+        edge_metadata.setdefault("transaction_from", now)
+        edge_metadata.setdefault("valid_from", valid_from or now)
+        edge_metadata.setdefault("valid_to", valid_to or "")
         with self._write_lock:
             if invalidate_existing_relation:
                 self._conn.execute(
@@ -1384,16 +1541,17 @@ class SQLiteStore:
                 """INSERT INTO edges(
                     id, src_entity_id, relation, dst_entity_id, source_chunk_id,
                     valid_from, valid_to, confidence, status, metadata, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'active', ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
                 (
                     edge_id,
                     src_entity_id,
                     relation_norm,
                     dst_entity_id,
                     source_chunk_id,
-                    now,
+                    valid_from or now,
+                    valid_to or None,
                     float(confidence),
-                    json_dumps(metadata or {}),
+                    json_dumps(edge_metadata),
                     now,
                 ),
             )

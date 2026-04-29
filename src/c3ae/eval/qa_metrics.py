@@ -6,6 +6,8 @@ import re
 import unicodedata
 from typing import Any
 
+from c3ae.qa.reader import answer_from_memory
+from c3ae.qa.normalizer import is_abstention
 from c3ae.utils import strip_benchmark_case_tokens
 
 _STOPWORDS = {
@@ -255,7 +257,7 @@ def _compress_answer(query: str, sentence: str) -> str:
     return sentence.strip()
 
 
-def extractive_answer(query: str, recalled: list[dict[str, Any]]) -> str:
+def _legacy_extractive_answer(query: str, recalled: list[dict[str, Any]]) -> str:
     clean_q = _clean_query(query)
     best = ""
     best_score = -1.0
@@ -273,3 +275,28 @@ def extractive_answer(query: str, recalled: list[dict[str, Any]]) -> str:
     if recalled:
         return str(recalled[0].get("content", "")).strip()[:220]
     return ""
+
+
+def _format_typed_answer_for_eval(query: str, answer: str, answer_type: str) -> str:
+    value = (answer or "").strip()
+    if answer_type in {"count", "number"} and re.fullmatch(r"\d+(?:\.\d+)?", value):
+        q = normalize_text(_clean_query(query))
+        if "day" in q or "days" in q:
+            return f"{value} days"
+        if "week" in q or "weeks" in q:
+            return f"{value} weeks"
+        if "month" in q or "months" in q:
+            return f"{value} months"
+        if "year" in q or "years" in q:
+            return f"{value} years"
+    return value
+
+
+def extractive_answer(query: str, recalled: list[dict[str, Any]]) -> str:
+    try:
+        typed = answer_from_memory(_clean_query(query), recalled)
+    except Exception:
+        typed = None
+    if typed is not None and not typed.abstain and typed.answer and not is_abstention(typed.answer):
+        return _format_typed_answer_for_eval(query, typed.answer, typed.answer_type)
+    return _legacy_extractive_answer(query, recalled)
