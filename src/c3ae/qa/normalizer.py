@@ -60,6 +60,41 @@ _NUM_WORDS = {
     "nineteen": 19,
     "twenty": 20,
 }
+_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+_WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
 
 
 @dataclass
@@ -190,6 +225,122 @@ def _format_date(value: datetime) -> str:
     return f"{value.day} {value.strftime('%B')} {value.year}"
 
 
+def _number_from_word_or_digits(value: str) -> int | None:
+    raw = (value or "").strip().lower()
+    if raw in {"a", "an"}:
+        return 1
+    normalized = normalize_for_match(value)
+    if normalized in {"couple"}:
+        return 2
+    if normalized in {"few"}:
+        return 3
+    if normalized.isdigit():
+        return int(normalized)
+    number = _NUM_WORDS.get(normalized)
+    return int(number) if isinstance(number, int) else None
+
+
+def _subtract_months(value: datetime, months: int) -> datetime:
+    month_index = (value.year * 12 + value.month - 1) - months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    days_in_month = [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    return value.replace(year=year, month=month, day=min(value.day, days_in_month[month - 1]))
+
+
+def _month_number(value: str) -> int | None:
+    return _MONTHS.get(value.lower().rstrip("."))
+
+
+def _date_from_parts(day: int, month: int, year: int) -> datetime | None:
+    try:
+        return datetime(year=year, month=month, day=day, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _canonicalize_date_span(raw: str, metadata: dict[str, Any] | None, steps: list[str]) -> str:
+    value = clean_answer(raw)
+    ref = _parse_reference_datetime(metadata)
+
+    iso = re.fullmatch(r"(?P<year>(?:19|20)\d{2})-(?P<month>\d{1,2})-(?P<day>\d{1,2})", value)
+    if iso:
+        parsed = _date_from_parts(int(iso.group("day")), int(iso.group("month")), int(iso.group("year")))
+        if parsed is not None:
+            steps.append("canonicalized_explicit_date")
+            return _format_date(parsed)
+
+    slash = re.fullmatch(r"(?P<month>\d{1,2})/(?P<day>\d{1,2})(?:/(?P<year>\d{2,4}))?", value)
+    if slash:
+        year_raw = slash.group("year")
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000 if year < 70 else 1900
+        elif ref is not None:
+            year = ref.year
+        else:
+            return value
+        parsed = _date_from_parts(int(slash.group("day")), int(slash.group("month")), year)
+        if parsed is not None:
+            steps.append("canonicalized_slash_date")
+            return _format_date(parsed)
+
+    day_month = re.fullmatch(
+        rf"(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{_MONTH_RE})(?:,?\s*(?P<year>(?:19|20)\d{{2}}))?",
+        value,
+        re.IGNORECASE,
+    )
+    if day_month:
+        month = _month_number(day_month.group("month"))
+        year = int(day_month.group("year")) if day_month.group("year") else (ref.year if ref is not None else None)
+        if month is not None and year is not None:
+            parsed = _date_from_parts(int(day_month.group("day")), month, year)
+            if parsed is not None:
+                steps.append("canonicalized_day_month_date")
+                return _format_date(parsed)
+        return value
+
+    month_day = re.fullmatch(
+        rf"(?P<month>{_MONTH_RE})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(?P<year>(?:19|20)\d{{2}}))?",
+        value,
+        re.IGNORECASE,
+    )
+    if month_day:
+        month = _month_number(month_day.group("month"))
+        year = int(month_day.group("year")) if month_day.group("year") else (ref.year if ref is not None else None)
+        if month is not None and year is not None:
+            parsed = _date_from_parts(int(month_day.group("day")), month, year)
+            if parsed is not None:
+                steps.append("canonicalized_month_day_date")
+                return _format_date(parsed)
+        return value
+
+    phase_month = re.fullmatch(
+        rf"(?P<phase>early|mid|late)[-\s]+(?P<month>{_MONTH_RE})(?:,?\s*(?P<year>(?:19|20)\d{{2}}))?",
+        value,
+        re.IGNORECASE,
+    )
+    if phase_month:
+        month = _month_number(phase_month.group("month"))
+        year = int(phase_month.group("year")) if phase_month.group("year") else (ref.year if ref is not None else None)
+        day_by_phase = {"early": 5, "mid": 15, "late": 25}
+        if month is not None and year is not None:
+            parsed = _date_from_parts(day_by_phase[phase_month.group("phase").lower()], month, year)
+            if parsed is not None:
+                steps.append("canonicalized_month_phase_date")
+                return _format_date(parsed)
+        return value
+
+    month_year = re.fullmatch(rf"(?P<month>{_MONTH_RE})\s+(?P<year>(?:19|20)\d{{2}})", value, re.IGNORECASE)
+    if month_year:
+        month = _month_number(month_year.group("month"))
+        if month is not None:
+            steps.append("canonicalized_month_year")
+            return f"{datetime(2000, month, 1).strftime('%B')} {month_year.group('year')}"
+    return value
+
+
 def _normalize_relative_date(text: str, metadata: dict[str, Any] | None, steps: list[str]) -> str:
     ref = _parse_reference_datetime(metadata)
     if ref is None:
@@ -210,6 +361,36 @@ def _normalize_relative_date(text: str, metadata: dict[str, Any] | None, steps: 
     if re.search(r"\bnext week\b", value):
         steps.append("resolved_next_week")
         return _format_date(ref + timedelta(days=7))
+    m = re.search(
+        r"\b(?:about|around|roughly|approximately)?\s*(?P<num>\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\s+"
+        r"(?P<unit>day|days|week|weeks|month|months|year|years)\s+ago\b",
+        value,
+    )
+    if m:
+        amount = _number_from_word_or_digits(m.group("num"))
+        if amount is not None:
+            unit = m.group("unit")
+            if unit.startswith("day"):
+                resolved = ref - timedelta(days=amount)
+            elif unit.startswith("week"):
+                resolved = ref - timedelta(days=amount * 7)
+            elif unit.startswith("month"):
+                resolved = _subtract_months(ref, amount)
+            else:
+                resolved = ref.replace(year=ref.year - amount)
+            steps.append(f"resolved_{unit.rstrip('s')}_ago")
+            return _format_date(resolved)
+    m = re.search(r"\b(?:last|this past)\s+(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", value)
+    if m:
+        target = _WEEKDAYS[m.group("weekday")]
+        days_back = (ref.weekday() - target) % 7
+        if days_back == 0:
+            days_back = 7
+        steps.append("resolved_last_weekday")
+        return _format_date(ref - timedelta(days=days_back))
+    if re.search(r"\brecently\b", value):
+        steps.append("resolved_recently_approximate")
+        return _format_date(ref - timedelta(days=3))
     return ""
 
 
@@ -220,6 +401,7 @@ def _normalize_date(text: str, metadata: dict[str, Any] | None, steps: list[str]
     for pattern in (
         rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH_RE}(?:\s*(?:19|20)\d{{2}})?\b",
         rf"\b{_MONTH_RE}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*(?:19|20)\d{{2}})?\b",
+        rf"\b(?:early|mid|late)[-\s]+{_MONTH_RE}(?:,?\s*(?:19|20)\d{{2}})?\b",
         rf"\b{_MONTH_RE}\s+(?:19|20)\d{{2}}\b",
         r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b",
         r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
@@ -227,7 +409,7 @@ def _normalize_date(text: str, metadata: dict[str, Any] | None, steps: list[str]
         m = re.search(pattern, text, re.IGNORECASE)
         if m:
             steps.append("extracted_date_span")
-            return clean_answer(m.group(0))
+            return _canonicalize_date_span(m.group(0), metadata, steps)
     year = _normalize_year(text, metadata, steps=[])
     if re.fullmatch(r"(19|20)\d{2}", year):
         steps.append("normalized_date_to_year")

@@ -269,3 +269,150 @@ def test_reader_computes_simple_day_delta_from_question_and_memory_date():
 
     assert answer.answer == "8"
     assert answer.verifier_status == "supported"
+
+
+def test_reader_chooses_first_quoted_event_by_relative_dates():
+    answer = answer_from_memory(
+        "Which event did I attend first, the 'Effective Time Management' workshop or the 'Data Analysis using Python' webinar?",
+        [
+            _row(
+                'I attended a workshop on "Effective Time Management" at the local community center last Saturday.',
+                "time-workshop",
+                session_date="2023/05/28 (Sun) 21:04",
+            ),
+            _row(
+                'I participated in a webinar on "Data Analysis using Python" two months ago.',
+                "python-webinar",
+                session_date="2023/05/28 (Sun) 07:17",
+            ),
+        ],
+    )
+
+    assert answer.answer == "Data Analysis using Python webinar"
+    assert answer.citations == ["python-webinar"]
+
+
+def test_reader_chooses_first_vehicle_nearest_date():
+    answer = answer_from_memory(
+        "Which vehicle did I take care of first in February, the bike or the car?",
+        [
+            _row(
+                "I was looking at a new bike rack for my car. My bike had issues in mid-February, so I took it in for repairs.",
+                "bike-repair",
+                session_date="2023/03/10 (Fri) 22:50",
+            ),
+            _row(
+                "My car is still in good condition and I use it for errands.",
+                "car-note",
+                session_date="2023/03/10 (Fri) 08:11",
+            ),
+        ],
+    )
+
+    assert answer.answer == "bike"
+    assert answer.citations == ["bike-repair"]
+
+
+def test_reader_prefers_arrival_over_preorder_for_got_first_question():
+    answer = answer_from_memory(
+        "Which device did I got first, the Samsung Galaxy S22 or the Dell XPS 13?",
+        [
+            _row(
+                "I pre-ordered the laptop, Dell XPS 13, on January 28th, and it finally arrived on February 25th.",
+                "dell",
+                session_date="2023/03/15 (Wed) 10:31",
+            ),
+            _row(
+                "I recently got a new Samsung Galaxy S22 from Best Buy on February 20th.",
+                "samsung",
+                session_date="2023/03/15 (Wed) 00:56",
+            ),
+        ],
+    )
+
+    assert answer.answer == "Samsung Galaxy S22"
+    assert answer.citations == ["samsung"]
+
+
+def test_reader_resolves_option_comparison_with_weeks_and_months_ago():
+    answer = answer_from_memory(
+        "Which item did I purchase first, dog bed for Max or training pads for Luna?",
+        [
+            _row("I bought a dog bed for Max about 3 weeks ago.", "dog-bed", session_date="2023/05/28 (Sun) 12:00"),
+            _row("I purchased training pads for Luna about a month ago.", "training-pads", session_date="2023/05/28 (Sun) 12:00"),
+        ],
+    )
+
+    assert answer.answer == "training pads for Luna"
+    assert answer.citations == ["training-pads"]
+
+
+def test_reader_extracts_issue_target():
+    answer = answer_from_memory(
+        "What was the first issue I had with my new car after its first service?",
+        [
+            _row(
+                "I had an issue with my car's GPS system on 3/22, and I had to take it back to the dealership.",
+                "gps",
+                session_date="2023/04/10 (Mon) 14:47",
+            )
+        ],
+    )
+
+    assert answer.answer == "GPS system"
+    assert answer.citations == ["gps"]
+
+
+def test_reader_computes_day_delta_from_month_day_dates_in_question():
+    answer = answer_from_memory(
+        "How many days were there between the January 2nd event and the February 1st event?",
+        [_row("The relevant year for these events is 2023.", "calendar", session_date="2023/02/20 (Mon) 09:05")],
+    )
+
+    assert answer.answer == "30"
+
+
+def test_reader_uses_session_date_header_when_metadata_missing():
+    answer = answer_from_memory(
+        "Which item did I purchase first, the dog bed for Max or the training pads for Luna?",
+        [
+            _row(
+                "Session date: 2023/05/20 (Sat) 23:31\n\nuser: I got a new dog bed for Max 3 weeks ago.",
+                "dog-bed",
+            ),
+            _row(
+                "Session date: 2023/05/20 (Sat) 06:19\n\nuser: I got training pads for Luna about a month ago.",
+                "training-pads",
+            ),
+        ],
+    )
+
+    assert answer.answer == "training pads for Luna"
+    assert answer.citations == ["training-pads"]
+
+
+def test_reader_extracts_cleaned_shoe_pair():
+    answer = answer_from_memory(
+        "Which pair of shoes did I clean last month?",
+        [
+            _row(
+                "I finally got around to cleaning my white Adidas sneakers last month, which I'd been meaning to do for weeks.",
+                "shoes",
+            )
+        ],
+    )
+
+    assert answer.answer == "white Adidas sneakers"
+
+
+def test_reader_computes_duration_before_current_job():
+    answer = answer_from_memory(
+        "How long have I been working before I started my current job at NovaTech?",
+        [
+            _row("I've been working professionally for 9 years and still keep a notebook for tasks.", "career-total"),
+            _row("I've been working at NovaTech for about 4 years and 3 months now.", "current-job"),
+        ],
+    )
+
+    assert answer.answer == "4 years and 9 months"
+    assert answer.verifier_status == "supported"
