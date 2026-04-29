@@ -43,6 +43,40 @@ def test_build_chunk_metadata_parses_official_turn_headers(tmp_path):
         asyncio.run(spine.close())
 
 
+def test_build_chunk_metadata_parses_locomo_dialogue_headers(tmp_path):
+    cfg = Config()
+    cfg.data_dir = tmp_path
+    cfg.ensure_dirs()
+    spine = MemorySpine(cfg)
+    try:
+        metadata = spine._build_chunk_metadata(
+            "\n".join(
+                [
+                    "Benchmark: LoCoMo",
+                    "Conversation sample: conv-26",
+                    "Participants: Caroline, Melanie",
+                    "Session: 3",
+                    "Session date: 7:55 pm on 9 June, 2023",
+                    "Dialogue ID: D3:13",
+                    "",
+                    "Caroline: I'm single, but my friends have been there through everything.",
+                ]
+            ),
+            "memory/official/locomo/conv-26/D3_13.md",
+            {"session_id": "conv-26:D3", "benchmark_doc_id": "conv-26:D3:13"},
+        )
+
+        assert metadata["benchmark"] == "LoCoMo"
+        assert metadata["dialogue_id"] == "D3:13"
+        assert metadata["locomo_session_index"] == 3
+        assert metadata["turn_index"] == 13
+        assert metadata["turn_part"] == 0
+        assert metadata["speaker"] == "Caroline"
+        assert metadata["session_id"] == "conv-26:D3"
+    finally:
+        asyncio.run(spine.close())
+
+
 def test_sqlite_lists_same_episode_neighbor_chunks(tmp_path):
     store = SQLiteStore(tmp_path / "memory.db")
     try:
@@ -76,6 +110,77 @@ def test_sqlite_lists_same_episode_neighbor_chunks(tmp_path):
         assert [chunk.id for chunk in neighbors] == [before.id, after.id]
     finally:
         store.close()
+
+
+def test_locomo_dialogue_metadata_can_expand_when_query_needs_episode_context(tmp_path):
+    cfg = Config()
+    cfg.data_dir = tmp_path
+    cfg.retrieval.episodic_expansion_enabled = True
+    cfg.retrieval.episodic_expansion_window = 1
+    cfg.ensure_dirs()
+    spine = MemorySpine(cfg)
+    try:
+        before = Chunk(
+            content="Dialogue ID: D3:12\n\nMelanie: Are you dating anyone right now?",
+            metadata={
+                "benchmark": "locomo",
+                "session_id": "conv-26:D3",
+                "case_id": "conv-26",
+                "turn_index": 12,
+                "turn_part": 0,
+                "speaker": "Melanie",
+                "benchmark_doc_id": "conv-26:D3:12",
+            },
+        )
+        current = Chunk(
+            content="Dialogue ID: D3:13\n\nCaroline: I'm single, but my friends support me.",
+            metadata={
+                "benchmark": "locomo",
+                "session_id": "conv-26:D3",
+                "case_id": "conv-26",
+                "turn_index": 13,
+                "turn_part": 0,
+                "speaker": "Caroline",
+                "benchmark_doc_id": "conv-26:D3:13",
+            },
+        )
+        after = Chunk(
+            content="Dialogue ID: D3:14\n\nMelanie: I'm glad your friends are there for you.",
+            metadata={
+                "benchmark": "locomo",
+                "session_id": "conv-26:D3",
+                "case_id": "conv-26",
+                "turn_index": 14,
+                "turn_part": 0,
+                "speaker": "Melanie",
+                "benchmark_doc_id": "conv-26:D3:14",
+            },
+        )
+        for chunk in (before, current, after):
+            spine.sqlite.insert_chunk(chunk)
+
+        row = {
+            "id": current.id,
+            "content": current.content,
+            "score": 1.0,
+            "source": "test",
+            "metadata": dict(current.metadata),
+        }
+        expanded = spine._maybe_expand_episodic_row(
+            row,
+            plan_memory_query("Which things happened before and after Caroline said she was single?"),
+        )
+
+        assert expanded["metadata"]["episodic_expanded"] is True
+        assert expanded["metadata"]["episodic_neighbor_chunk_ids"] == [before.id, after.id]
+        assert expanded["metadata"]["episodic_neighbor_benchmark_doc_ids"] == [
+            "conv-26:D3:12",
+            "conv-26:D3:14",
+        ]
+        assert "Melanie: Are you dating anyone right now?" in expanded["content"]
+        assert "speaker=Melanie" in expanded["content"]
+    finally:
+        asyncio.run(spine.close())
 
 
 def test_episodic_expansion_adds_neighbor_context_for_table_queries(tmp_path):

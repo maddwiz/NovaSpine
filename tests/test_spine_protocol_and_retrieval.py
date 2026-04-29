@@ -7,7 +7,7 @@ from c3ae.config import Config, RetrievalConfig
 from c3ae.embeddings.backends import HashEmbedder, create_embedder
 from c3ae.memory_spine.spine import MemorySpine, _RECALL_OVERFETCH_CAP
 from c3ae.retrieval.hybrid import HybridSearch
-from c3ae.types import SearchResult
+from c3ae.types import Chunk, SearchResult
 
 
 class _KeywordStub:
@@ -129,6 +129,32 @@ def test_hybrid_decay_and_access_boost_are_applied():
     hybrid_b = HybridSearch(kw, vec, config=cfg, access_counts_getter=lambda ids: {"old": 10})
     results_b = hybrid_b.search("any query", query_vector=None, top_k=2)
     assert [r.id for r in results_b] == ["old", "fresh"]
+
+
+def test_hybrid_access_boost_can_be_disabled():
+    cfg = RetrievalConfig(
+        vector_weight=0.7,
+        keyword_weight=0.3,
+        adaptive_weights=False,
+        enable_decay=True,
+        decay_half_life_hours=1.0,
+        decay_min_factor=0.5,
+        enable_access_boost=False,
+        access_boost_per_hit=0.5,
+        access_boost_cap=2.0,
+    )
+    old = _mk_result("old", score=1.0, hours_old=24.0)
+    fresh = _mk_result("fresh", score=0.8, hours_old=0.0)
+
+    hybrid = HybridSearch(
+        _KeywordStub([old, fresh]),
+        _VectorStub([]),
+        config=cfg,
+        access_counts_getter=lambda ids: {"old": 10},
+    )
+    results = hybrid.search("any query", query_vector=None, top_k=2)
+
+    assert [r.id for r in results] == ["fresh", "old"]
 
 
 def test_hybrid_apply_decay_flag_disables_decay_reranking():
@@ -715,6 +741,24 @@ def test_case_token_query_does_not_increment_access_counts(tmp_path):
             await spine.close()
 
     asyncio.run(_run())
+
+
+def test_access_tracking_can_be_disabled(tmp_path):
+    cfg = Config()
+    cfg.data_dir = tmp_path
+    cfg.retrieval.enable_access_tracking = False
+    cfg.ensure_dirs()
+    spine = MemorySpine(cfg)
+    try:
+        chunk = Chunk(content="Alpha benchmark memory for access tracking.", source_id="bench:access")
+        spine.sqlite.insert_chunk(chunk)
+
+        rows = spine.search_keyword("alpha benchmark memory", top_k=3)
+
+        assert rows
+        assert spine.sqlite.get_memory_access_count(chunk.id) == 0
+    finally:
+        asyncio.run(spine.close())
 
 
 def test_case_token_query_falls_back_when_tail_terms_miss(tmp_path):

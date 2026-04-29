@@ -136,6 +136,12 @@ class RetrievalConfig(BaseModel):
     enable_decay: bool = True
     decay_half_life_hours: float = 24.0 * 14.0
     decay_min_factor: float = 0.2
+    enable_access_tracking: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_ACCESS_TRACKING", True)
+    )
+    enable_access_boost: bool = Field(
+        default_factory=lambda: _env_bool("C3AE_ACCESS_BOOST", True)
+    )
     access_boost_per_hit: float = 0.05
     access_boost_cap: float = 2.0
     evidence_importance_boost: float = 1.25

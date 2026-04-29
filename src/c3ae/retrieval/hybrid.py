@@ -330,7 +330,7 @@ class HybridSearch:
         self.last_trace = trace
         if bool(self.config.capture_candidate_features):
             access_counts: dict[str, int] = {}
-            if self._access_counts_getter is not None:
+            if bool(self.config.enable_access_boost) and self._access_counts_getter is not None:
                 try:
                     access_counts = self._access_counts_getter([r.id for r in results])
                 except Exception:
@@ -562,7 +562,7 @@ class HybridSearch:
             return []
 
         access_counts: dict[str, int] = {}
-        if self._access_counts_getter is not None:
+        if bool(self.config.enable_access_boost) and self._access_counts_getter is not None:
             try:
                 access_counts = self._access_counts_getter([r.id for r in results])
             except Exception:
@@ -604,16 +604,18 @@ class HybridSearch:
             decay = math.exp(-math.log(2.0) * (age_hours / half_life))
             decay = max(float(self.config.decay_min_factor), decay)
 
-        access_count = access_counts.get(result.id, 0)
-        if access_count == 0 and self._access_count_getter is not None:
-            try:
-                access_count = int(self._access_count_getter(result.id))
-            except Exception:
-                access_count = 0
-        access_boost = min(
-            1.0 + float(self.config.access_boost_per_hit) * max(0, access_count),
-            float(self.config.access_boost_cap),
-        )
+        access_boost = 1.0
+        if bool(self.config.enable_access_boost):
+            access_count = access_counts.get(result.id, 0)
+            if access_count == 0 and self._access_count_getter is not None:
+                try:
+                    access_count = int(self._access_count_getter(result.id))
+                except Exception:
+                    access_count = 0
+            access_boost = min(
+                1.0 + float(self.config.access_boost_per_hit) * max(0, access_count),
+                float(self.config.access_boost_cap),
+            )
 
         source_kind = str(metadata.get("_source_kind", "")).lower()
         entry_type = str(metadata.get("type", "")).lower()

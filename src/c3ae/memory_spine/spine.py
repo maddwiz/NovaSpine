@@ -1644,6 +1644,8 @@ class MemorySpine:
         return "Relevant memories:\n" + "\n".join(lines)
 
     def _record_access(self, results: list[SearchResult]) -> None:
+        if not bool(getattr(self.config.retrieval, "enable_access_tracking", True)):
+            return
         if not results:
             return
         ids: list[str] = []
@@ -1726,6 +1728,23 @@ class MemorySpine:
                 if value is not None:
                     metadata[key] = value
 
+        dialogue_id = str(metadata.get("dialogue_id") or "").strip()
+        if not dialogue_id:
+            dialogue_id = self._header_value(text, "Dialogue ID")
+            if dialogue_id:
+                metadata["dialogue_id"] = dialogue_id
+        if dialogue_id:
+            match = re.fullmatch(r"D(?P<session>\d+):(?P<turn>\d+)", dialogue_id.strip(), flags=re.IGNORECASE)
+            if match:
+                metadata.setdefault("locomo_session_index", int(match.group("session")))
+                metadata.setdefault("turn_index", int(match.group("turn")))
+                metadata.setdefault("turn_part", 0)
+
+        if "speaker" not in metadata:
+            speaker = self._infer_dialogue_speaker(text)
+            if speaker:
+                metadata["speaker"] = speaker
+
         if "turn_index" not in metadata and "index" in metadata:
             value = self._parse_int(metadata.get("index"))
             if value is not None:
@@ -1740,6 +1759,32 @@ class MemorySpine:
             if path_match:
                 metadata.setdefault("turn_index", int(path_match.group(1)))
                 metadata.setdefault("turn_part", int(path_match.group(2)))
+
+    @staticmethod
+    def _infer_dialogue_speaker(text: str) -> str:
+        metadata_labels = {
+            "benchmark",
+            "conversation sample",
+            "participants",
+            "session",
+            "session date",
+            "dialogue id",
+            "question id",
+            "session id",
+            "turn index",
+            "turn part",
+        }
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if not stripped or ":" not in stripped:
+                continue
+            label, _ = stripped.split(":", 1)
+            key = label.strip().lower()
+            if key in metadata_labels or key in {"user", "assistant", "system"}:
+                continue
+            if re.fullmatch(r"[A-Z][A-Za-z0-9 ._'’-]{0,60}", label.strip()):
+                return label.strip()
+        return ""
 
     def _should_expand_episodic_context(self, query_plan: Any, metadata: dict[str, Any]) -> bool:
         if not bool(getattr(self.config.retrieval, "episodic_expansion_enabled", True)):
@@ -1791,6 +1836,7 @@ class MemorySpine:
         seen_ids = {current_id}
         neighbor_parts: list[str] = []
         neighbor_ids: list[str] = []
+        neighbor_benchmark_doc_ids: list[str] = []
         remaining = max_chars
         for chunk in neighbors:
             if chunk.id in seen_ids:
@@ -1798,9 +1844,11 @@ class MemorySpine:
             seen_ids.add(chunk.id)
             chunk_meta = chunk.metadata or {}
             role = str(chunk_meta.get("role", "memory") or "memory")
+            speaker = str(chunk_meta.get("speaker", "") or "").strip()
             t_idx = chunk_meta.get("turn_index", "?")
             t_part = chunk_meta.get("turn_part", chunk_meta.get("part_index", 0))
-            label = f"[neighbor turn {t_idx}.{t_part} role={role}]"
+            speaker_label = f" speaker={speaker}" if speaker else ""
+            label = f"[neighbor turn {t_idx}.{t_part} role={role}{speaker_label}]"
             part = f"{label}\n{chunk.content.strip()}"
             if remaining > 0 and len(part) > remaining:
                 part = part[:remaining].rstrip()
@@ -1808,6 +1856,9 @@ class MemorySpine:
                 break
             neighbor_parts.append(part)
             neighbor_ids.append(chunk.id)
+            benchmark_doc_id = str(chunk_meta.get("benchmark_doc_id", "") or "").strip()
+            if benchmark_doc_id and benchmark_doc_id not in neighbor_benchmark_doc_ids:
+                neighbor_benchmark_doc_ids.append(benchmark_doc_id)
             remaining -= len(part)
             if remaining <= 0:
                 break
@@ -1826,6 +1877,7 @@ class MemorySpine:
             {
                 "episodic_expanded": True,
                 "episodic_neighbor_chunk_ids": neighbor_ids,
+                "episodic_neighbor_benchmark_doc_ids": neighbor_benchmark_doc_ids,
                 "episodic_neighbor_count": len(neighbor_ids),
                 "episodic_expansion_window": window,
                 "episodic_original_chars": len(current_content),
